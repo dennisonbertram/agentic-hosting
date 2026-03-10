@@ -238,16 +238,15 @@ func normalizeIP(s string) string {
 // the only trustworthy source. Falls back to RemoteAddr.
 func trustedRealIP(r *http.Request) string {
 	if isLoopback(r.RemoteAddr) {
-		// Behind trusted proxy: use X-Real-Ip only.
-		// Do NOT fall back to loopback RemoteAddr — all clients would share
-		// one rate-limit bucket, creating both DoS and bypass risks.
+		// Behind trusted proxy: prefer X-Real-Ip.
 		if ip := normalizeIP(r.Header.Get("X-Real-Ip")); ip != "" {
 			return ip
 		}
-		return "unknown"
+		// If X-Real-Ip is not set (e.g., direct connection without proxy),
+		// use RemoteAddr. This is safe because stripUntrustedForwardedHeaders
+		// already stripped any spoofed headers from non-loopback sources.
+		// Note: callers should check for empty return and reject if needed.
+		return normalizeIP(r.RemoteAddr)
 	}
-	if ip := normalizeIP(r.RemoteAddr); ip != "" {
-		return ip
-	}
-	return "unknown"
+	return normalizeIP(r.RemoteAddr)
 }

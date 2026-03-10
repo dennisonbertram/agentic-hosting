@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -91,7 +93,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 
 		limiter := rl.getLimiter(tenantID)
 		if !limiter.Allow() {
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter))
 			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
@@ -115,10 +117,27 @@ func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
 func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !gl.limiter.Allow() {
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter))
 			writeJSONError(w, http.StatusTooManyRequests, "global rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// retryAfterFromLimiter computes a Retry-After value (in seconds) based on
+// the token bucket's refill rate. Uses Reserve/Cancel to peek at the delay
+// without consuming a token.
+func retryAfterFromLimiter(l *rate.Limiter) string {
+	r := l.Reserve()
+	delay := r.Delay()
+	r.Cancel()
+	secs := int(math.Ceil(delay.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 60 {
+		secs = 60 // cap at 60s to avoid unreasonable backoff
+	}
+	return fmt.Sprintf("%d", secs)
 }

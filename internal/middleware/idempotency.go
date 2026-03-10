@@ -152,7 +152,10 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			}
 			if entry.contentType != "" {
 				w.Header().Set("Content-Type", entry.contentType)
+			} else {
+				w.Header().Set("Content-Type", "application/json")
 			}
+			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Idempotency-Replayed", "true")
 			w.WriteHeader(entry.statusCode)
 			w.Write(entry.body)

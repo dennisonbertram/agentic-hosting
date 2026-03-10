@@ -189,13 +189,22 @@ func stripForwardedHeaders(next http.Handler) http.Handler {
 func trustedRealIP(r *http.Request) string {
 	if isLoopback(r.RemoteAddr) {
 		// X-Real-Ip is set by Traefik to the direct client IP (not spoofable)
-		if xri := r.Header.Get("X-Real-Ip"); xri != "" {
-			return strings.TrimSpace(xri)
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-Ip")); xri != "" {
+			if ip := net.ParseIP(xri); ip != nil {
+				return ip.String()
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		// RemoteAddr without port — validate as IP
+		if ip := net.ParseIP(r.RemoteAddr); ip != nil {
+			return ip.String()
+		}
+		return "unknown"
 	}
-	return host
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return "unknown"
 }

@@ -25,6 +25,7 @@ type idempotencyEntry struct {
 	contentType string // preserved from original response
 	body        []byte
 	bodyHash    string // SHA-256 hex of request body for mismatch detection
+	createdAt   time.Time
 	expiresAt   time.Time
 }
 
@@ -178,14 +179,14 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Idempotency-Replayed", "true")
-			// For responses with body, set content headers
+			// Always set security header for consistency with httpx helpers
+			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if len(entry.body) > 0 {
 				if entry.contentType != "" {
 					w.Header().Set("Content-Type", entry.contentType)
 				} else {
 					w.Header().Set("Content-Type", "application/json")
 				}
-				w.Header().Set("X-Content-Type-Options", "nosniff")
 			}
 			w.WriteHeader(entry.statusCode)
 			if len(entry.body) > 0 {
@@ -220,21 +221,23 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 					var oldestKey string
 					var oldestTime time.Time
 					for k, v := range s.entries {
-						if oldestKey == "" || v.expiresAt.Before(oldestTime) {
+						if oldestKey == "" || v.createdAt.Before(oldestTime) {
 							oldestKey = k
-							oldestTime = v.expiresAt
+							oldestTime = v.createdAt
 						}
 					}
 					if oldestKey != "" {
 						delete(s.entries, oldestKey)
 					}
 				}
+				now := time.Now()
 				s.entries[fullKey] = &idempotencyEntry{
 					statusCode:  rec.statusCode,
 					contentType: rec.Header().Get("Content-Type"),
 					body:        rec.body,
 					bodyHash:    reqBodyHash,
-					expiresAt:   time.Now().Add(idempotencyTTL),
+					createdAt:   now,
+					expiresAt:   now.Add(idempotencyTTL),
 				}
 			}
 			s.mu.Unlock()

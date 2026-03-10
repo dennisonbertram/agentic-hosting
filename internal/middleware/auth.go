@@ -191,7 +191,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 				writeJSONError(w, http.StatusUnauthorized, "invalid authorization format, expected: Bearer <token>")
 				return
 			}
-			token := parts[1]
+			token := strings.TrimSpace(parts[1])
 
 			// Token format: "keyID.secret" for O(1) lookup
 			dotIdx := strings.IndexByte(token, '.')

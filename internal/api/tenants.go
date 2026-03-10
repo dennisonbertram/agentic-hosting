@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,18 +86,20 @@ func init() {
 	}()
 }
 
-func (rl *registrationLimiter) allow(ip string) bool {
+// allow returns whether the request is permitted and, if blocked, how long
+// until the relevant window resets.
+func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
 
-	if now.After(rl.globalWindowAt) {
+	if rl.globalWindowAt.IsZero() || now.After(rl.globalWindowAt) {
 		rl.globalCount = 0
 		rl.globalWindowAt = now.Add(regWindow)
 	}
 	if rl.globalCount >= regGlobalPerHour {
-		return false
+		return false, time.Until(rl.globalWindowAt)
 	}
 
 	if len(rl.entries) >= regMaxEntries {
@@ -116,14 +120,14 @@ func (rl *registrationLimiter) allow(ip string) bool {
 	if !exists || now.After(entry.windowAt) {
 		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
 		rl.globalCount++
-		return true
+		return true, 0
 	}
 	if entry.count >= regMaxPerIPPerHour {
-		return false
+		return false, time.Until(entry.windowAt)
 	}
 	entry.count++
 	rl.globalCount++
-	return true
+	return true, 0
 }
 
 func generateID() (string, error) {
@@ -138,8 +142,12 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// Rate limit ALL registration attempts (including invalid tokens) to prevent
 	// brute-force of the bootstrap token. Uses trusted real IP from proxy headers.
 	ip := trustedRealIP(r)
-	if !regLimiter.allow(ip) {
-		w.Header().Set("Retry-After", "3600")
+	if ok, wait := regLimiter.allow(ip); !ok {
+		secs := int(math.Ceil(wait.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
 		return
 	}

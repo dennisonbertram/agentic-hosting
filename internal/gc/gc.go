@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // GC cleans up orphaned containers, volumes, images, and build dirs.

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // Reconciler periodically checks DB state against Docker state.

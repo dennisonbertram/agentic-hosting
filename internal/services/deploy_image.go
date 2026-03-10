@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/paasd/paasd/internal/diskcheck"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"log"
 	"time"
 
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // DeployImage deploys a pre-built image (from nixpacks build) for a service.

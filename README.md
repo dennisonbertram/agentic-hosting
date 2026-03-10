@@ -1,8 +1,8 @@
-# agentic-paasd
+# agentic-hosting
 
 A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. No web dashboard. Agents are the operators.
 
-- **Repo**: github.com/dennisonbertram/agentic-paasd
+- **Repo**: github.com/dennisonbertram/agentic-hosting
 - **Stack**: Go binary + Docker + gVisor + Traefik + Nixpacks + SQLite
 - **Language**: Go 1.25 (requires CGO for SQLite)
 - **Binary**: `paasd`
@@ -113,8 +113,8 @@ docker run -d --name paas-registry --restart unless-stopped \
 
 ```bash
 # Clone repo
-git clone https://github.com/dennisonbertram/agentic-paasd /agentic-paasd
-cd /agentic-paasd
+git clone https://github.com/dennisonbertram/agentic-hosting /agentic-hosting
+cd /agentic-hosting
 
 # Build (CGO required for SQLite)
 CGO_ENABLED=1 go build -o bin/paasd ./cmd/paasd
@@ -403,7 +403,7 @@ See [`scripts/README.md`](scripts/README.md) for full documentation.
 
 ## Planned Work
 
-See [GitHub Issues](https://github.com/dennisonbertram/agentic-paasd/issues) for planned enhancements including:
+See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) for planned enhancements including:
 
 - HKDF key separation
 - Multi-domain routing

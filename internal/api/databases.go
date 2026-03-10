@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/paasd/paasd/internal/databases"
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/databases"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 // requireDBManager is a guard that returns 503 if dbManager is nil.

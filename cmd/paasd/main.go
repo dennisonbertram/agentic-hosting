@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paasd/paasd/internal/api"
-	"github.com/paasd/paasd/internal/builder"
-	"github.com/paasd/paasd/internal/gc"
-	"github.com/paasd/paasd/internal/reconciler"
-	"github.com/paasd/paasd/internal/builds"
-	"github.com/paasd/paasd/internal/databases"
-	"github.com/paasd/paasd/internal/db"
-	"github.com/paasd/paasd/internal/docker"
-	"github.com/paasd/paasd/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/api"
+	"github.com/dennisonbertram/agentic-hosting/internal/builder"
+	"github.com/dennisonbertram/agentic-hosting/internal/gc"
+	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
+	"github.com/dennisonbertram/agentic-hosting/internal/builds"
+	"github.com/dennisonbertram/agentic-hosting/internal/databases"
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 func main() {

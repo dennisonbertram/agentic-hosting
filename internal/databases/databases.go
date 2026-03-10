@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paasd/paasd/internal/crypto"
-	"github.com/paasd/paasd/internal/diskcheck"
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // Database represents a provisioned database.

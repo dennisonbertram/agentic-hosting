@@ -1,4 +1,4 @@
-module github.com/paasd/paasd
+module github.com/dennisonbertram/agentic-hosting
 
 go 1.25.0
 

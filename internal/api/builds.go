@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/paasd/paasd/internal/builds"
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/builds"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 func (s *Server) requireBuildManager(w http.ResponseWriter) bool {

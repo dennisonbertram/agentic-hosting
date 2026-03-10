@@ -169,7 +169,7 @@ clean:
 </file>
 
 <file path="README.md">
-# agentic-paasd
+# agentic-hosting
 
 An agentic-first self-hosted PaaS built for bare metal servers.
 
@@ -230,7 +230,7 @@ package middleware
 import (
 	"net/http"
 
-	"github.com/paasd/paasd/internal/httpx"
+	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 )
 
 // writeJSONError delegates to the shared httpx.WriteError for consistent
@@ -241,7 +241,7 @@ func writeJSONError(w http.ResponseWriter, code int, message string) {
 </file>
 
 <file path="go.mod">
-module github.com/paasd/paasd
+module github.com/dennisonbertram/agentic-hosting
 
 go 1.25.0
 
@@ -465,8 +465,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/paasd/paasd/internal/middleware"
-	"github.com/paasd/paasd/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 // requireSvcManager is a guard that returns 503 if svcManager is nil.
@@ -1463,7 +1463,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 type HealthResponse struct {
@@ -1611,8 +1611,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paasd/paasd/internal/crypto"
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // Service represents a deployed service.
@@ -2320,8 +2320,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/paasd/paasd/internal/crypto"
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 const maxKeysPerTenant = 20
@@ -2508,9 +2508,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paasd/paasd/internal/api"
-	"github.com/paasd/paasd/internal/db"
-	"github.com/paasd/paasd/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/api"
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 func main() {
@@ -2656,7 +2656,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paasd/paasd/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 )
 
 type contextKey string
@@ -3197,11 +3197,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/paasd/paasd/internal/db"
-	"github.com/paasd/paasd/internal/docker"
-	"github.com/paasd/paasd/internal/httpx"
-	"github.com/paasd/paasd/internal/middleware"
-	"github.com/paasd/paasd/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 type ServerConfig struct {
@@ -3459,8 +3459,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paasd/paasd/internal/crypto"
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 type RegisterRequest struct {

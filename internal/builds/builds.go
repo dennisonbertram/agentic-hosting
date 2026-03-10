@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paasd/paasd/internal/builder"
-	"github.com/paasd/paasd/internal/diskcheck"
+	"github.com/dennisonbertram/agentic-hosting/internal/builder"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 )
 
 const maxLogSize = 5 * 1024 * 1024 // 5MB max log per build

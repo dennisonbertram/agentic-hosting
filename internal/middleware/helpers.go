@@ -3,7 +3,7 @@ package middleware
 import (
 	"net/http"
 
-	"github.com/paasd/paasd/internal/httpx"
+	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 )
 
 // writeJSONError delegates to the shared httpx.WriteError for consistent

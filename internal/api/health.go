@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paasd/paasd/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 type HealthResponse struct {

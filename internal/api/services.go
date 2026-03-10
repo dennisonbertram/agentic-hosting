@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/paasd/paasd/internal/middleware"
-	"github.com/paasd/paasd/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 // requireSvcManager is a guard that returns 503 if svcManager is nil.

@@ -9,13 +9,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/paasd/paasd/internal/db"
-	"github.com/paasd/paasd/internal/docker"
-	"github.com/paasd/paasd/internal/httpx"
-	"github.com/paasd/paasd/internal/middleware"
-	"github.com/paasd/paasd/internal/builds"
-	"github.com/paasd/paasd/internal/databases"
-	"github.com/paasd/paasd/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/builds"
+	"github.com/dennisonbertram/agentic-hosting/internal/databases"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 type ServerConfig struct {

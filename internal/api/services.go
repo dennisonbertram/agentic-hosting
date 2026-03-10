@@ -15,6 +15,10 @@ import (
 )
 
 func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+	if s.svcManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "service deployment is not configured")
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 
 	var req services.CreateRequest
@@ -55,6 +59,10 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") {
 			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if strings.Contains(msg, "tenant") {
+			writeError(w, http.StatusForbidden, msg)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create service")
@@ -231,7 +239,7 @@ func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "service not found")
 			return
 		}
-		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") {
+		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") || strings.Contains(msg, "env var") {
 			writeError(w, http.StatusBadRequest, msg)
 			return
 		}

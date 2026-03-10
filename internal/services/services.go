@@ -26,6 +26,7 @@ type Service struct {
 	ContainerID string `json:"container_id,omitempty"`
 	Port        int    `json:"port"`
 	URL         string `json:"url,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
 }
@@ -219,7 +220,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 // Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", err.Error())
 		return err
 	}
 	// Try to enter the deploy queue; reject immediately if full (backpressure)
@@ -227,7 +228,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	case m.deployQueue <- struct{}{}:
 		defer func() { <-m.deployQueue }()
 	default:
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", "deploy queue full; try again later")
 		return fmt.Errorf("deploy queue full; try again later")
 	}
 
@@ -249,18 +250,18 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	// Ensure per-tenant network exists for isolation
 	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
 	if err != nil {
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
 	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
 		return fmt.Errorf("pull image: %w", err)
 	}
 
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
@@ -279,7 +280,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil, limits)
 	if err != nil {
-		m.updateStatus(ctx, serviceID, "failed")
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		return fmt.Errorf("run container: %w", err)
 	}
 
@@ -431,7 +432,7 @@ func (m *Manager) Logs(ctx context.Context, tenantID, serviceID string, follow b
 // List returns all services for a tenant.
 func (m *Manager) List(ctx context.Context, tenantID string) ([]*Service, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, status, image, port, container_id, created_at, updated_at
+		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, created_at, updated_at
 		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100`,
 		tenantID,
 	)
@@ -444,7 +445,7 @@ func (m *Manager) List(ctx context.Context, tenantID string) ([]*Service, error)
 	for rows.Next() {
 		s := &Service{}
 		var containerID sql.NullString
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan service: %w", err)
 		}
 		if containerID.Valid {
@@ -538,10 +539,10 @@ func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Se
 	s := &Service{}
 	var containerID sql.NullString
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, status, image, port, container_id, created_at, updated_at
+		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, created_at, updated_at
 		 FROM services WHERE id = ? AND tenant_id = ?`,
 		serviceID, tenantID,
-	).Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("service not found")
 	}
@@ -558,6 +559,13 @@ func (m *Manager) updateStatus(ctx context.Context, serviceID, status string) {
 	m.db.ExecContext(ctx,
 		`UPDATE services SET status = ?, updated_at = ? WHERE id = ?`,
 		status, time.Now().Unix(), serviceID,
+	)
+}
+
+func (m *Manager) updateStatusWithError(ctx context.Context, serviceID, status, lastError string) {
+	m.db.ExecContext(ctx,
+		`UPDATE services SET status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		status, lastError, time.Now().Unix(), serviceID,
 	)
 }
 

@@ -19,7 +19,7 @@ func Check(path string, warnPct, blockPct float64) error {
 	totalBytes := float64(stat.Blocks) * float64(stat.Bsize)
 	freeBytes := float64(stat.Bavail) * float64(stat.Bsize)
 	if totalBytes == 0 {
-		return nil // can't determine, allow
+		return fmt.Errorf("check disk space: filesystem reported 0 total bytes")
 	}
 
 	// Convert to float64 before subtraction to prevent uint64 underflow.

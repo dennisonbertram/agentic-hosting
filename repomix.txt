@@ -448,6 +448,7 @@ master.key
 *.key
 .env
 vendor/
+repomix.txt
 </file>
 
 <file path="internal/api/services.go">
@@ -467,9 +468,18 @@ import (
 	"github.com/paasd/paasd/internal/services"
 )
 
-func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+// requireSvcManager is a guard that returns 503 if svcManager is nil.
+// All service handlers must call this before proceeding.
+func (s *Server) requireSvcManager(w http.ResponseWriter) bool {
 	if s.svcManager == nil {
-		writeError(w, http.StatusServiceUnavailable, "service deployment is not configured")
+		writeError(w, http.StatusServiceUnavailable, "service management is not available (Docker not configured)")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
 		return
 	}
 	tenantID := middleware.GetTenantID(r.Context())
@@ -536,6 +546,9 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 
 	svcs, err := s.svcManager.List(r.Context(), tenantID)
@@ -550,62 +563,111 @@ func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	svc, err := s.svcManager.Get(r.Context(), tenantID, serviceID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get service")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, svc)
 }
 
 func (s *Server) handleServiceDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Delete(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete service: "+err.Error())
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Start(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "tenant") {
+			writeError(w, http.StatusForbidden, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
 }
 
 func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Stop(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
 func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Restart(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
 }
 
 func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
@@ -619,7 +681,14 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 
 	reader, err := s.svcManager.Logs(r.Context(), tenantID, serviceID, follow, tail)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found or no container")
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, "service has no container yet")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get logs")
+		}
 		return
 	}
 	defer reader.Close()
@@ -649,19 +718,29 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceEnvGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 	reveal := r.URL.Query().Get("reveal") == "true"
 
 	vars, err := s.svcManager.GetEnv(r.Context(), tenantID, serviceID, reveal)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get env vars")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, vars)
 }
 
 func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
@@ -704,12 +783,19 @@ func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceEnvDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 	key := chi.URLParam(r, "key")
 
 	if err := s.svcManager.DeleteEnv(r.Context(), tenantID, serviceID, key); err != nil {
-		writeError(w, http.StatusNotFound, "env var not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "env var not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete env var")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -725,6 +811,172 @@ func envKeys(vars map[string]string) []string {
 }
 </file>
 
+<file path="internal/db/db.go">
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"io/fs"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type Store struct {
+	StateDB    *sql.DB
+	MeteringDB *sql.DB
+}
+
+func Open(dbPath string) (*Store, error) {
+	stateDB, err := openDB(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open state db: %w", err)
+	}
+
+	meteringPath := strings.TrimSuffix(dbPath, ".db") + "-metering.db"
+	meteringDB, err := openDB(meteringPath)
+	if err != nil {
+		stateDB.Close()
+		return nil, fmt.Errorf("open metering db: %w", err)
+	}
+
+	store := &Store{StateDB: stateDB, MeteringDB: meteringDB}
+
+	if err := store.runMigrations(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+
+	return store, nil
+}
+
+func openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	// WAL mode allows concurrent readers with a single writer.
+	// Allow a small pool so reads don't block on writes.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+
+	return db, nil
+}
+
+func (s *Store) runMigrations() error {
+	// Ensure migration tracking tables exist on both databases
+	for _, db := range []*sql.DB{s.StateDB, s.MeteringDB} {
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at INTEGER NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create schema_migrations table: %w", err)
+		}
+	}
+
+	entries, err := fs.ReadDir(MigrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Migration files must be prefixed with their target database:
+		// "state_*.sql" -> StateDB, "metering_*.sql" -> MeteringDB.
+		// Any other naming is rejected to prevent silent misrouting.
+		var target *sql.DB
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "state_"):
+			target = s.StateDB
+		case strings.HasPrefix(name, "metering_"):
+			target = s.MeteringDB
+		default:
+			return fmt.Errorf("migration %q must start with state_ or metering_", name)
+		}
+
+		// Skip already-applied migrations
+		var count int
+		if err := target.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
+		}
+		if count > 0 {
+			log.Printf("migration already applied: %s", entry.Name())
+			continue
+		}
+
+		data, err := fs.ReadFile(MigrationsFS, "migrations/"+entry.Name())
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+		}
+
+		tx, err := target.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", entry.Name(), err)
+		}
+
+		// Execute the entire migration file as a single exec (SQLite3 driver
+		// supports multi-statement execution). This avoids fragile semicolon
+		// splitting that breaks on semicolons inside strings or triggers.
+		if _, err := tx.Exec(string(data)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("exec migration %s: %w", entry.Name(), err)
+		}
+
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			entry.Name(), time.Now().Unix()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
+		}
+
+		log.Printf("migration applied: %s", entry.Name())
+	}
+
+	return nil
+}
+
+func (s *Store) Close() error {
+	var errs []error
+	if s.StateDB != nil {
+		if err := s.StateDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.MeteringDB != nil {
+		if err := s.MeteringDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %v", errs)
+	}
+	return nil
+}
+</file>
+
 <file path="internal/docker/client.go">
 // Package docker wraps the Docker Engine API for paasd container lifecycle.
 package docker
@@ -733,11 +985,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -760,30 +1012,6 @@ func NewClient() (*Client, error) {
 // Close releases the Docker client resources.
 func (c *Client) Close() error {
 	return c.cli.Close()
-}
-
-// VerifyGVisorRuntime checks that the Docker daemon has gVisor (runsc) configured.
-// Returns an error if the runtime is not available.
-func (c *Client) VerifyGVisorRuntime(ctx context.Context) error {
-	info, err := c.cli.Info(ctx)
-	if err != nil {
-		return fmt.Errorf("docker info: %w", err)
-	}
-	for name := range info.Runtimes {
-		if name == "runsc" {
-			return nil
-		}
-	}
-	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon; available runtimes: %v", runtimeNames(info.Runtimes))
-}
-
-// runtimeNames extracts runtime names from the map for error messages.
-func runtimeNames(runtimes map[string]system.RuntimeWithStatus) []string {
-	names := make([]string, 0, len(runtimes))
-	for k := range runtimes {
-		names = append(names, k)
-	}
-	return names
 }
 
 // ContainerInfo holds inspected container state.
@@ -816,6 +1044,18 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error)
 		},
 	})
 	if err != nil {
+		// Handle race condition: another goroutine may have created it
+		if strings.Contains(err.Error(), "already exists") {
+			networks2, err2 := c.cli.NetworkList(ctx, network.ListOptions{})
+			if err2 != nil {
+				return "", fmt.Errorf("list networks after race: %w", err2)
+			}
+			for _, n := range networks2 {
+				if n.Name == name {
+					return n.ID, nil
+				}
+			}
+		}
 		return "", fmt.Errorf("create network %s: %w", name, err)
 	}
 	return resp.ID, nil
@@ -926,8 +1166,15 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 	// are: gVisor runtime (syscall interception), CapDrop ALL, no-new-privileges,
 	// internal network (no outbound), ICC disabled (no inter-container comms).
 	traefikID, findErr := c.findTraefikContainer(ctx)
-	if findErr == nil && traefikID != "" {
-		_ = c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil)
+	if findErr != nil {
+		log.Printf("WARNING: Traefik container not found — service %s will not be routable: %v", serviceID, findErr)
+	} else if traefikID != "" {
+		if connErr := c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil); connErr != nil {
+			// "already connected" is expected and safe to ignore
+			if !strings.Contains(connErr.Error(), "already exists") {
+				log.Printf("WARNING: failed to connect Traefik to network %s: %v", tenantNet, connErr)
+			}
+		}
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
@@ -1037,6 +1284,166 @@ func (c *Client) ListContainersByLabel(ctx context.Context, label, value string)
 // containerName generates a deterministic container name from tenant and service IDs.
 func containerName(tenantID, serviceID string) string {
 	return fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)
+}
+
+// VerifyGVisorRuntime checks that the Docker daemon has the gVisor (runsc) runtime available.
+func (c *Client) VerifyGVisorRuntime(ctx context.Context) error {
+	info, err := c.cli.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("docker info: %w", err)
+	}
+	for name := range info.Runtimes {
+		if name == "runsc" {
+			return nil
+		}
+	}
+	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon")
+}
+</file>
+
+<file path="internal/middleware/ratelimit.go">
+package middleware
+
+import (
+	"fmt"
+	"math"
+	"net/http"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+const maxRateLimitEntries = 10000
+
+type rateLimitEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+type RateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rateLimitEntry
+	rate    rate.Limit
+	burst   int
+}
+
+func NewRateLimiter(rps float64, burst int) *RateLimiter {
+	rl := &RateLimiter{
+		entries: make(map[string]*rateLimitEntry),
+		rate:    rate.Limit(rps),
+		burst:   burst,
+	}
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-1 * time.Hour)
+		for k, v := range rl.entries {
+			if v.lastSeen.Before(cutoff) {
+				delete(rl.entries, k)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	entry, exists := rl.entries[key]
+	if exists {
+		entry.lastSeen = time.Now()
+		return entry.limiter
+	}
+
+	// Evict oldest if at capacity
+	if len(rl.entries) >= maxRateLimitEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rl.entries {
+			if oldestKey == "" || v.lastSeen.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastSeen
+			}
+		}
+		if oldestKey != "" {
+			delete(rl.entries, oldestKey)
+		}
+	}
+
+	limiter := rate.NewLimiter(rl.rate, rl.burst)
+	rl.entries[key] = &rateLimitEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
+	}
+	return limiter
+}
+
+func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenantID := GetTenantID(r.Context())
+		if tenantID == "" {
+			// Fail closed: reject if tenant ID is missing (should never happen
+			// in authenticated routes, but prevents bypass if context is lost)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		limiter := rl.getLimiter(tenantID)
+		if !limiter.Allow() {
+			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter))
+			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// GlobalRateLimiter enforces a single rate limit across all tenants to prevent
+// multi-tenant aggregate abuse (e.g., attacker creating many tenants to multiply throughput).
+type GlobalRateLimiter struct {
+	limiter *rate.Limiter
+}
+
+func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
+	return &GlobalRateLimiter{
+		limiter: rate.NewLimiter(rate.Limit(rps), burst),
+	}
+}
+
+func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !gl.limiter.Allow() {
+			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter))
+			writeJSONError(w, http.StatusTooManyRequests, "global rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// retryAfterFromLimiter computes a Retry-After value (in seconds) based on
+// the token bucket's refill rate. Uses Reserve/Cancel to peek at the delay
+// without consuming a token.
+func retryAfterFromLimiter(l *rate.Limiter) string {
+	r := l.Reserve()
+	delay := r.Delay()
+	r.Cancel()
+	secs := int(math.Ceil(delay.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 60 {
+		secs = 60 // cap at 60s to avoid unreasonable backoff
+	}
+	return fmt.Sprintf("%d", secs)
 }
 </file>
 
@@ -1302,6 +1709,12 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("pull image: %w", err)
 	}
 
+	// Re-verify service still exists after the slow image pull.
+	// The user may have deleted the service while we were pulling.
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return fmt.Errorf("service deleted during deploy")
+	}
+
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
 		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
@@ -1329,7 +1742,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	now := time.Now().Unix()
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ?`,
 		containerID, now, serviceID,
 	)
 	if err != nil {
@@ -1663,318 +2076,6 @@ func generateID() (string, error) {
 		return "", fmt.Errorf("generate id: %w", err)
 	}
 	return fmt.Sprintf("%x", b), nil
-}
-</file>
-
-<file path="internal/db/db.go">
-package db
-
-import (
-	"database/sql"
-	"fmt"
-	"io/fs"
-	"log"
-	"sort"
-	"strings"
-	"time"
-
-	_ "github.com/mattn/go-sqlite3"
-)
-
-type Store struct {
-	StateDB    *sql.DB
-	MeteringDB *sql.DB
-}
-
-func Open(dbPath string) (*Store, error) {
-	stateDB, err := openDB(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open state db: %w", err)
-	}
-
-	meteringPath := strings.TrimSuffix(dbPath, ".db") + "-metering.db"
-	meteringDB, err := openDB(meteringPath)
-	if err != nil {
-		stateDB.Close()
-		return nil, fmt.Errorf("open metering db: %w", err)
-	}
-
-	store := &Store{StateDB: stateDB, MeteringDB: meteringDB}
-
-	if err := store.runMigrations(); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("run migrations: %w", err)
-	}
-
-	return store, nil
-}
-
-func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	// WAL mode allows concurrent readers with a single writer.
-	// Allow a small pool so reads don't block on writes.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
-
-	return db, nil
-}
-
-func (s *Store) runMigrations() error {
-	// Ensure migration tracking tables exist on both databases
-	for _, db := range []*sql.DB{s.StateDB, s.MeteringDB} {
-		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-			name TEXT PRIMARY KEY,
-			applied_at INTEGER NOT NULL
-		)`); err != nil {
-			return fmt.Errorf("create schema_migrations table: %w", err)
-		}
-	}
-
-	entries, err := fs.ReadDir(MigrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("read migrations dir: %w", err)
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		// Migration files must be prefixed with their target database:
-		// "state_*.sql" -> StateDB, "metering_*.sql" -> MeteringDB.
-		// Any other naming is rejected to prevent silent misrouting.
-		var target *sql.DB
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sql") {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(name, "state_"):
-			target = s.StateDB
-		case strings.HasPrefix(name, "metering_"):
-			target = s.MeteringDB
-		default:
-			return fmt.Errorf("migration %q must start with state_ or metering_", name)
-		}
-
-		// Skip already-applied migrations
-		var count int
-		if err := target.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&count); err != nil {
-			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
-		}
-		if count > 0 {
-			log.Printf("migration already applied: %s", entry.Name())
-			continue
-		}
-
-		data, err := fs.ReadFile(MigrationsFS, "migrations/"+entry.Name())
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
-		}
-
-		tx, err := target.Begin()
-		if err != nil {
-			return fmt.Errorf("begin migration %s: %w", entry.Name(), err)
-		}
-
-		// Execute the entire migration file as a single exec (SQLite3 driver
-		// supports multi-statement execution). This avoids fragile semicolon
-		// splitting that breaks on semicolons inside strings or triggers.
-		if _, err := tx.Exec(string(data)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("exec migration %s: %w", entry.Name(), err)
-		}
-
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
-			entry.Name(), time.Now().Unix()); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
-		}
-
-		log.Printf("migration applied: %s", entry.Name())
-	}
-
-	return nil
-}
-
-func (s *Store) Close() error {
-	var errs []error
-	if s.StateDB != nil {
-		if err := s.StateDB.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if s.MeteringDB != nil {
-		if err := s.MeteringDB.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %v", errs)
-	}
-	return nil
-}
-</file>
-
-<file path="internal/middleware/ratelimit.go">
-package middleware
-
-import (
-	"fmt"
-	"math"
-	"net/http"
-	"sync"
-	"time"
-
-	"golang.org/x/time/rate"
-)
-
-const maxRateLimitEntries = 10000
-
-type rateLimitEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-type RateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rateLimitEntry
-	rate    rate.Limit
-	burst   int
-}
-
-func NewRateLimiter(rps float64, burst int) *RateLimiter {
-	rl := &RateLimiter{
-		entries: make(map[string]*rateLimitEntry),
-		rate:    rate.Limit(rps),
-		burst:   burst,
-	}
-	go rl.cleanup()
-	return rl
-}
-
-func (rl *RateLimiter) cleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
-	for range ticker.C {
-		rl.mu.Lock()
-		cutoff := time.Now().Add(-1 * time.Hour)
-		for k, v := range rl.entries {
-			if v.lastSeen.Before(cutoff) {
-				delete(rl.entries, k)
-			}
-		}
-		rl.mu.Unlock()
-	}
-}
-
-func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	entry, exists := rl.entries[key]
-	if exists {
-		entry.lastSeen = time.Now()
-		return entry.limiter
-	}
-
-	// Evict oldest if at capacity
-	if len(rl.entries) >= maxRateLimitEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rl.entries {
-			if oldestKey == "" || v.lastSeen.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.lastSeen
-			}
-		}
-		if oldestKey != "" {
-			delete(rl.entries, oldestKey)
-		}
-	}
-
-	limiter := rate.NewLimiter(rl.rate, rl.burst)
-	rl.entries[key] = &rateLimitEntry{
-		limiter:  limiter,
-		lastSeen: time.Now(),
-	}
-	return limiter
-}
-
-func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tenantID := GetTenantID(r.Context())
-		if tenantID == "" {
-			// Fail closed: reject if tenant ID is missing (should never happen
-			// in authenticated routes, but prevents bypass if context is lost)
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-
-		limiter := rl.getLimiter(tenantID)
-		if !limiter.Allow() {
-			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter))
-			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-// GlobalRateLimiter enforces a single rate limit across all tenants to prevent
-// multi-tenant aggregate abuse (e.g., attacker creating many tenants to multiply throughput).
-type GlobalRateLimiter struct {
-	limiter *rate.Limiter
-}
-
-func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
-	return &GlobalRateLimiter{
-		limiter: rate.NewLimiter(rate.Limit(rps), burst),
-	}
-}
-
-func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !gl.limiter.Allow() {
-			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter))
-			writeJSONError(w, http.StatusTooManyRequests, "global rate limit exceeded")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// retryAfterFromLimiter computes a Retry-After value (in seconds) based on
-// the token bucket's refill rate. Uses Reserve/Cancel to peek at the delay
-// without consuming a token.
-func retryAfterFromLimiter(l *rate.Limiter) string {
-	r := l.Reserve()
-	delay := r.Delay()
-	r.Cancel()
-	secs := int(math.Ceil(delay.Seconds()))
-	if secs < 1 {
-		secs = 1
-	}
-	if secs > 60 {
-		secs = 60 // cap at 60s to avoid unreasonable backoff
-	}
-	return fmt.Sprintf("%d", secs)
 }
 </file>
 

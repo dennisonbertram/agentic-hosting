@@ -149,24 +149,30 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 		if shouldMarkCrashed {
 			now := time.Now().Unix()
-			// Atomic circuit breaker with proper sliding window:
-			// Track window start. Reset if window expired, otherwise increment.
+			// Proper sliding window circuit breaker:
+			// crash_window_start tracks when the current crash window began.
+			// If the window has expired (>= 600s since window start), reset to 1.
+			// If within window, increment. Open circuit at 5 crashes in one window.
 			_, err := r.db.ExecContext(ctx, `
 				UPDATE services SET
 					status = 'crashed',
+					crash_window_start = CASE
+						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN ?
+						ELSE crash_window_start
+					END,
 					crash_count = CASE
-						WHEN last_crashed_at IS NULL OR (? - last_crashed_at) >= 600 THEN 1
+						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 1
 						ELSE crash_count + 1
 					END,
 					circuit_open = CASE
-						WHEN last_crashed_at IS NOT NULL AND (? - last_crashed_at) < 600 AND crash_count + 1 >= 5 THEN 1
+						WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 AND crash_count + 1 >= 5 THEN 1
 						ELSE circuit_open
 					END,
 					last_crashed_at = ?,
 					last_error = ?,
 					updated_at = ?
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, crashReason, now, s.id, s.tenantID)
+				now, now, now, now, now, crashReason, now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
 			} else {

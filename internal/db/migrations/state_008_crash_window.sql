@@ -1,0 +1,1 @@
+ALTER TABLE services ADD COLUMN crash_window_start INTEGER;

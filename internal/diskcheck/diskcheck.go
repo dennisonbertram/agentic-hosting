@@ -4,6 +4,7 @@ package diskcheck
 import (
 	"fmt"
 	"log"
+	"os"
 	"syscall"
 )
 
@@ -11,30 +12,47 @@ import (
 // Returns nil if below blockThreshold, error if at or above.
 // Logs a warning if above warnThreshold but below blockThreshold.
 func Check(path string, warnPct, blockPct float64) error {
+	if err := checkPath(path, warnPct, blockPct); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CheckAll verifies disk space at multiple paths, returning the first error.
+// This should be used when operations affect multiple filesystems (e.g., both
+// the paasd data dir and Docker's storage root).
+func CheckAll(paths []string, warnPct, blockPct float64) error {
+	for _, path := range paths {
+		// Skip paths that don't exist (e.g., Docker might use a different root)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if err := checkPath(path, warnPct, blockPct); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func checkPath(path string, warnPct, blockPct float64) error {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
-		return fmt.Errorf("check disk space: %w", err)
+		return fmt.Errorf("check disk space at %s: %w", path, err)
 	}
 
-	totalBytes := float64(stat.Blocks) * float64(stat.Bsize)
-	freeBytes := float64(stat.Bavail) * float64(stat.Bsize)
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
 	if totalBytes == 0 {
-		return fmt.Errorf("check disk space: filesystem reported 0 total bytes")
+		return nil // can't determine, allow
 	}
 
-	// Convert to float64 before subtraction to prevent uint64 underflow.
-	// Bavail can theoretically exceed Blocks on some filesystems.
-	usedBytes := totalBytes - freeBytes
-	if usedBytes < 0 {
-		usedBytes = 0
-	}
-	usedPct := usedBytes / totalBytes * 100
+	usedPct := float64(totalBytes-freeBytes) / float64(totalBytes) * 100
 
 	if usedPct >= blockPct {
-		return fmt.Errorf("insufficient disk space (%.1f%% used, threshold %.0f%%)", usedPct, blockPct)
+		return fmt.Errorf("insufficient disk space at %s (%.1f%% used, threshold %.0f%%)", path, usedPct, blockPct)
 	}
 	if usedPct >= warnPct {
-		log.Printf("WARNING: disk usage %.1f%% exceeds warning threshold %.0f%%", usedPct, warnPct)
+		log.Printf("WARNING: disk usage at %s: %.1f%% exceeds warning threshold %.0f%%", path, usedPct, warnPct)
 	}
 	return nil
 }

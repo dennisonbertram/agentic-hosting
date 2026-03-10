@@ -27,7 +27,7 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ReadWritePaths=/var/lib/paasd /var/lib/docker /etc/traefik/dynamic
+ReadWritePaths=/var/lib/paasd /etc/traefik/dynamic
 
 [Install]
 WantedBy=multi-user.target

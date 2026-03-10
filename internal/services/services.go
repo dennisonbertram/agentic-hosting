@@ -285,7 +285,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 
 	// Check disk space before deploy
-	if err := diskcheck.Check("/var/lib/paasd", 80, 90); err != nil {
+	if err := diskcheck.CheckAll([]string{"/var/lib/paasd", "/var/lib/docker"}, 80, 90); err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", err.Error())
 		return fmt.Errorf("disk check: %w", err)
 	}
@@ -705,10 +705,14 @@ func (m *Manager) ResetCircuitBreaker(ctx context.Context, tenantID, serviceID s
 		if stopErr := m.docker.StopContainer(ctx, svc.ContainerID); stopErr != nil {
 			// Check if container is genuinely gone (not found) vs stop failed
 			info, inspectErr := m.docker.InspectContainer(ctx, svc.ContainerID)
-			if inspectErr == nil && info.Status == "running" {
+			if inspectErr != nil {
+				// Can't verify container state — fail closed to avoid split-brain
+				return fmt.Errorf("cannot verify container state after stop failure: %v (stop error: %v)", inspectErr, stopErr)
+			}
+			if info.Status == "running" {
 				return fmt.Errorf("failed to stop container before reset: %w", stopErr)
 			}
-			// Container is gone or not running — safe to proceed
+			// Container exists but not running — safe to proceed
 		}
 	}
 

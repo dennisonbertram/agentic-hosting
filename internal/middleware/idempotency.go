@@ -77,6 +77,7 @@ func (rr *responseRecorder) Write(b []byte) (int, error) {
 	if !rr.wroteHeader {
 		rr.statusCode = http.StatusOK
 		rr.wroteHeader = true
+		rr.ResponseWriter.WriteHeader(http.StatusOK)
 	}
 	// Cap in-memory buffering to prevent memory exhaustion from large responses.
 	// Once overflow, stop buffering but continue writing to the client.

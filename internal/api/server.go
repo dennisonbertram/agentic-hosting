@@ -57,6 +57,10 @@ func (s *Server) setupRoutes() {
 	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
 	r.Use(chimw.Throttle(200))
 
+	// Strip forwarded headers from non-loopback requests to prevent spoofing.
+	// This runs unconditionally (including dev mode) as a defense-in-depth measure.
+	r.Use(stripUntrustedForwardedHeaders)
+
 	// Enforce HTTPS: only trust X-Forwarded-Proto from loopback (trusted proxy).
 	// Server binds to 127.0.0.1 by default; even if --listen-addr overrides this,
 	// the HTTPS check only trusts the header from loopback RemoteAddr.
@@ -142,30 +146,36 @@ func isLoopback(remoteAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// stripUntrustedForwardedHeaders removes proxy headers from non-loopback
+// requests to prevent spoofing. Runs unconditionally (including dev mode).
+func stripUntrustedForwardedHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopback(r.RemoteAddr) {
+			r.Header.Del("X-Forwarded-For")
+			r.Header.Del("X-Forwarded-Proto")
+			r.Header.Del("X-Real-Ip")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireHTTPS rejects requests not arriving via TLS-terminating proxy.
 // Only trusts X-Forwarded-Proto when RemoteAddr is loopback (i.e., from the
 // local Traefik proxy). Direct external connections cannot spoof this header.
+// Header stripping is handled by stripUntrustedForwardedHeaders above.
 func requireHTTPS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isLoopback(r.RemoteAddr) {
-			// Request from trusted proxy — check forwarded proto
 			proto := r.Header.Get("X-Forwarded-Proto")
 			if proto != "https" {
 				writeError(w, http.StatusForbidden, "HTTPS required")
 				return
 			}
 		} else {
-			// Direct connection (not via proxy) — reject unless already TLS
 			if r.TLS == nil {
 				writeError(w, http.StatusForbidden, "HTTPS required")
 				return
 			}
-		}
-		// Strip X-Forwarded headers from non-loopback to prevent spoofing
-		if !isLoopback(r.RemoteAddr) {
-			r.Header.Del("X-Forwarded-For")
-			r.Header.Del("X-Forwarded-Proto")
-			r.Header.Del("X-Real-Ip")
 		}
 		next.ServeHTTP(w, r)
 	})

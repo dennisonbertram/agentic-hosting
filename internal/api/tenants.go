@@ -147,6 +147,11 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// the only path that skips this. Without that explicit flag, bootstrapToken
 	// is always required (main.go fatals if unset outside dev+open-registration).
 	if !s.openRegistration {
+		// Fail closed: reject if bootstrap token is not configured
+		if s.bootstrapToken == "" {
+			writeError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
+			return
+		}
 		provided := r.Header.Get("X-Bootstrap-Token")
 		// HMAC-compare to prevent length-leak from ConstantTimeCompare
 		if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {

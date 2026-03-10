@@ -462,6 +462,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paasd/paasd/internal/middleware"
@@ -533,9 +534,11 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deploy asynchronously — return immediately with status "deploying".
-	// Use context.Background() because r.Context() is canceled after the response.
+	// Use a bounded context (10 min) to prevent goroutine leaks from stuck deploys.
 	go func(tid, sid string) {
-		if err := s.svcManager.Deploy(context.Background(), tid, sid); err != nil {
+		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
 			log.Printf("deploy failed for service %s: %v", sid, err)
 			return
 		}
@@ -1447,6 +1450,152 @@ func retryAfterFromLimiter(l *rate.Limiter) string {
 }
 </file>
 
+<file path="internal/api/health.go">
+package api
+
+import (
+	"context"
+	"math"
+	"net/http"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/paasd/paasd/internal/middleware"
+)
+
+type HealthResponse struct {
+	Status string `json:"status"`
+}
+
+type DetailedHealthResponse struct {
+	Status string     `json:"status"`
+	Docker DockerInfo `json:"docker"`
+	GVisor GVisorInfo `json:"gvisor"`
+	Disk   DiskInfo   `json:"disk"`
+}
+
+type DockerInfo struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+}
+
+type GVisorInfo struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+}
+
+type DiskInfo struct {
+	TotalGB     float64 `json:"total_gb"`
+	FreeGB      float64 `json:"free_gb"`
+	UsedPercent float64 `json:"used_percent"`
+}
+
+var (
+	detailedHealthCache     DetailedHealthResponse
+	detailedHealthCacheValid bool
+	detailedHealthCacheMu   sync.RWMutex
+	detailedHealthCacheTime time.Time
+	detailedHealthCacheTTL  = 30 * time.Second
+)
+
+// handleHealth returns minimal constant-time status for public (unauthenticated) requests.
+// No DB calls — avoids DoS via unauthenticated health check flooding.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
+}
+
+// handleHealthDetailed returns full system info (authenticated only).
+func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
+
+	detailedHealthCacheMu.RLock()
+	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
+		resp := detailedHealthCache // copy by value under lock
+		detailedHealthCacheMu.RUnlock()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	detailedHealthCacheMu.RUnlock()
+
+	resp := s.buildDetailedHealth()
+
+	detailedHealthCacheMu.Lock()
+	detailedHealthCache = resp // store by value
+	detailedHealthCacheValid = true
+	detailedHealthCacheTime = time.Now()
+	detailedHealthCacheMu.Unlock()
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) buildDetailedHealth() DetailedHealthResponse {
+	resp := DetailedHealthResponse{
+		Status: "ok",
+		Docker: DockerInfo{Available: false},
+		GVisor: GVisorInfo{Available: false},
+	}
+
+	// Check Docker with 5s timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
+		resp.Docker = DockerInfo{Available: true, Version: strings.TrimSpace(string(out))}
+	}
+
+	// Check gVisor with 5s timeout
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if out, err := exec.CommandContext(ctx2, "runsc", "--version").Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		version := ""
+		for _, line := range lines {
+			if strings.HasPrefix(line, "runsc version") {
+				version = strings.TrimPrefix(line, "runsc version ")
+				break
+			}
+		}
+		if version == "" {
+			// Fallback: use first non-empty line if standard prefix not found
+			version = strings.TrimSpace(string(out))
+		}
+		resp.GVisor = GVisorInfo{Available: version != "", Version: version}
+	}
+
+	// Check disk (no exec, safe syscall)
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err == nil {
+		totalBytes := stat.Blocks * uint64(stat.Bsize)
+		freeBytes := stat.Bavail * uint64(stat.Bsize)
+		totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
+		freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
+		usedPercent := 0.0
+		if totalGB > 0 {
+			usedPercent = ((totalGB - freeGB) / totalGB) * 100
+		}
+		resp.Disk = DiskInfo{
+			TotalGB:     round2(totalGB),
+			FreeGB:      round2(freeGB),
+			UsedPercent: round2(usedPercent),
+		}
+	}
+
+	if s.store == nil || s.store.StateDB == nil {
+		resp.Status = "degraded"
+	} else if err := s.store.StateDB.Ping(); err != nil {
+		resp.Status = "degraded"
+	}
+
+	return resp
+}
+
+func round2(f float64) float64 {
+	return math.Round(f*100) / 100
+}
+</file>
+
 <file path="internal/services/services.go">
 // Package services coordinates DB records with Docker containers.
 package services
@@ -1692,6 +1841,10 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 // Deploy pulls the image, reads env vars, creates and starts the container.
 // Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	if m.docker == nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", "Docker client not configured")
+		return fmt.Errorf("docker client not configured")
+	}
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
 		m.updateStatusWithError(ctx, serviceID, "failed", err.Error())
 		return err
@@ -1764,12 +1917,22 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 
 	now := time.Now().Unix()
-	_, err = m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ?`,
-		containerID, now, serviceID,
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		containerID, now, serviceID, tenantID,
 	)
 	if err != nil {
+		// Container is running but DB update failed; try to clean up
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
 		return fmt.Errorf("update service: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Service was deleted while we were deploying; clean up the container
+		log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+		return fmt.Errorf("service deleted during deploy")
 	}
 	return nil
 }
@@ -2113,152 +2276,6 @@ func generateID() (string, error) {
 		return "", fmt.Errorf("generate id: %w", err)
 	}
 	return fmt.Sprintf("%x", b), nil
-}
-</file>
-
-<file path="internal/api/health.go">
-package api
-
-import (
-	"context"
-	"math"
-	"net/http"
-	"os/exec"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
-
-	"github.com/paasd/paasd/internal/middleware"
-)
-
-type HealthResponse struct {
-	Status string `json:"status"`
-}
-
-type DetailedHealthResponse struct {
-	Status string     `json:"status"`
-	Docker DockerInfo `json:"docker"`
-	GVisor GVisorInfo `json:"gvisor"`
-	Disk   DiskInfo   `json:"disk"`
-}
-
-type DockerInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
-}
-
-type GVisorInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
-}
-
-type DiskInfo struct {
-	TotalGB     float64 `json:"total_gb"`
-	FreeGB      float64 `json:"free_gb"`
-	UsedPercent float64 `json:"used_percent"`
-}
-
-var (
-	detailedHealthCache     DetailedHealthResponse
-	detailedHealthCacheValid bool
-	detailedHealthCacheMu   sync.RWMutex
-	detailedHealthCacheTime time.Time
-	detailedHealthCacheTTL  = 30 * time.Second
-)
-
-// handleHealth returns minimal constant-time status for public (unauthenticated) requests.
-// No DB calls — avoids DoS via unauthenticated health check flooding.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
-}
-
-// handleHealthDetailed returns full system info (authenticated only).
-func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
-
-	detailedHealthCacheMu.RLock()
-	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
-		resp := detailedHealthCache // copy by value under lock
-		detailedHealthCacheMu.RUnlock()
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	detailedHealthCacheMu.RUnlock()
-
-	resp := s.buildDetailedHealth()
-
-	detailedHealthCacheMu.Lock()
-	detailedHealthCache = resp // store by value
-	detailedHealthCacheValid = true
-	detailedHealthCacheTime = time.Now()
-	detailedHealthCacheMu.Unlock()
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) buildDetailedHealth() DetailedHealthResponse {
-	resp := DetailedHealthResponse{
-		Status: "ok",
-		Docker: DockerInfo{Available: false},
-		GVisor: GVisorInfo{Available: false},
-	}
-
-	// Check Docker with 5s timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
-		resp.Docker = DockerInfo{Available: true, Version: strings.TrimSpace(string(out))}
-	}
-
-	// Check gVisor with 5s timeout
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-	if out, err := exec.CommandContext(ctx2, "runsc", "--version").Output(); err == nil {
-		lines := strings.Split(string(out), "\n")
-		version := ""
-		for _, line := range lines {
-			if strings.HasPrefix(line, "runsc version") {
-				version = strings.TrimPrefix(line, "runsc version ")
-				break
-			}
-		}
-		if version == "" {
-			// Fallback: use first non-empty line if standard prefix not found
-			version = strings.TrimSpace(string(out))
-		}
-		resp.GVisor = GVisorInfo{Available: version != "", Version: version}
-	}
-
-	// Check disk (no exec, safe syscall)
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err == nil {
-		totalBytes := stat.Blocks * uint64(stat.Bsize)
-		freeBytes := stat.Bavail * uint64(stat.Bsize)
-		totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
-		freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
-		usedPercent := 0.0
-		if totalGB > 0 {
-			usedPercent = ((totalGB - freeGB) / totalGB) * 100
-		}
-		resp.Disk = DiskInfo{
-			TotalGB:     round2(totalGB),
-			FreeGB:      round2(freeGB),
-			UsedPercent: round2(usedPercent),
-		}
-	}
-
-	if s.store == nil || s.store.StateDB == nil {
-		resp.Status = "degraded"
-	} else if err := s.store.StateDB.Ping(); err != nil {
-		resp.Status = "degraded"
-	}
-
-	return resp
-}
-
-func round2(f float64) float64 {
-	return math.Round(f*100) / 100
 }
 </file>
 

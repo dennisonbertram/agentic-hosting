@@ -74,6 +74,9 @@ type Manager struct {
 
 // NewManager creates a service manager.
 func NewManager(db *sql.DB, docker *docker.Client, masterKey []byte) *Manager {
+	if docker == nil {
+		panic("paasd: NewManager requires a non-nil Docker client")
+	}
 	return &Manager{
 		db:          db,
 		docker:      docker,
@@ -457,14 +460,23 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 			continue
 		}
 		if containerID.Valid && containerID.String != "" {
+			stopOk := true
 			if stopErr := m.docker.StopContainer(ctx, containerID.String); stopErr != nil {
 				log.Printf("WARNING: failed to stop container %s for tenant %s: %v", containerID.String, tenantID, stopErr)
+				stopOk = false
 			}
 			if rmErr := m.docker.RemoveContainer(ctx, containerID.String); rmErr != nil {
 				log.Printf("WARNING: failed to remove container %s for tenant %s: %v (orphan may remain)", containerID.String, tenantID, rmErr)
+				stopOk = false
 			}
+			if stopOk {
+				m.updateStatus(ctx, svcID, "stopped")
+			} else {
+				m.updateStatusWithError(ctx, svcID, "failed", "container cleanup failed during tenant suspension")
+			}
+		} else {
+			m.updateStatus(ctx, svcID, "stopped")
 		}
-		m.updateStatus(ctx, svcID, "stopped")
 	}
 }
 

@@ -40,4 +40,5 @@ CREATE TABLE IF NOT EXISTS tenant_quotas (
   api_rate_limit INTEGER NOT NULL DEFAULT 100
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
 CREATE INDEX IF NOT EXISTS idx_services_tenant ON services(tenant_id);

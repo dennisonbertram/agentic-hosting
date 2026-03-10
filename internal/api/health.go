@@ -1,18 +1,27 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
+
+	"github.com/paasd/paasd/internal/middleware"
 )
 
 type HealthResponse struct {
-	Status  string      `json:"status"`
-	Docker  DockerInfo  `json:"docker"`
-	GVisor  GVisorInfo  `json:"gvisor"`
-	Disk    DiskInfo    `json:"disk"`
+	Status string `json:"status"`
+}
+
+type DetailedHealthResponse struct {
+	Status string     `json:"status"`
+	Docker DockerInfo `json:"docker"`
+	GVisor GVisorInfo `json:"gvisor"`
+	Disk   DiskInfo   `json:"disk"`
 }
 
 type DockerInfo struct {
@@ -31,16 +40,66 @@ type DiskInfo struct {
 	UsedPercent float64 `json:"used_percent"`
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := HealthResponse{Status: "ok"}
+var (
+	healthCache     *DetailedHealthResponse
+	healthCacheMu   sync.RWMutex
+	healthCacheTime time.Time
+	healthCacheTTL  = 30 * time.Second
+)
 
-	// Check Docker
-	if out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
+// handleHealth returns minimal status for public requests.
+// Detailed info (docker, gvisor, disk) requires authentication.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	status := "ok"
+	if err := s.store.StateDB.Ping(); err != nil {
+		status = "degraded"
+	}
+	json.NewEncoder(w).Encode(HealthResponse{Status: status})
+}
+
+// handleHealthDetailed returns full system info (authenticated only).
+func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
+
+	healthCacheMu.RLock()
+	if healthCache != nil && time.Since(healthCacheTime) < healthCacheTTL {
+		resp := *healthCache
+		healthCacheMu.RUnlock()
+		// Refresh DB status (not cached)
+		if err := s.store.StateDB.Ping(); err != nil {
+			resp.Status = "degraded"
+		} else {
+			resp.Status = "ok"
+		}
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	healthCacheMu.RUnlock()
+
+	resp := s.buildDetailedHealth()
+
+	healthCacheMu.Lock()
+	healthCache = &resp
+	healthCacheTime = time.Now()
+	healthCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) buildDetailedHealth() DetailedHealthResponse {
+	resp := DetailedHealthResponse{Status: "ok"}
+
+	// Check Docker with 5s timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
 		resp.Docker = DockerInfo{Available: true, Version: strings.TrimSpace(string(out))}
 	}
 
-	// Check gVisor
-	if out, err := exec.Command("runsc", "--version").Output(); err == nil {
+	// Check gVisor with 5s timeout
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if out, err := exec.CommandContext(ctx2, "runsc", "--version").Output(); err == nil {
 		lines := strings.Split(string(out), "\n")
 		version := ""
 		for _, line := range lines {
@@ -52,7 +111,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.GVisor = GVisorInfo{Available: true, Version: version}
 	}
 
-	// Check disk
+	// Check disk (no exec, safe syscall)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs("/", &stat); err == nil {
 		totalBytes := stat.Blocks * uint64(stat.Bsize)
@@ -70,12 +129,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check DB
 	if err := s.store.StateDB.Ping(); err != nil {
 		resp.Status = "degraded"
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	return resp
 }
 
 func round2(f float64) float64 {

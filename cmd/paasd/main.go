@@ -42,11 +42,13 @@ func main() {
 	srv := api.NewServer(store, masterKey[:32])
 
 	httpServer := &http.Server{
-		Addr:         ":" + *port,
-		Handler:      srv,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + *port,
+		Handler:           srv,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 
 	// Graceful shutdown

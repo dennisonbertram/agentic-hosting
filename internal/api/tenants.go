@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"regexp"
+	"sync"
 	"time"
 
 	"github.com/paasd/paasd/internal/crypto"
@@ -35,25 +38,96 @@ type UpdateTenantRequest struct {
 	Name *string `json:"name,omitempty"`
 }
 
-func generateID() string {
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+// IP-based rate limiter for registration
+type registrationLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*regEntry
+}
+
+type regEntry struct {
+	count    int
+	windowAt time.Time
+}
+
+var regLimiter = &registrationLimiter{
+	entries: make(map[string]*regEntry),
+}
+
+const (
+	regMaxPerHour = 10
+	regWindow     = 1 * time.Hour
+)
+
+func (rl *registrationLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	entry, exists := rl.entries[ip]
+	if !exists || now.After(entry.windowAt) {
+		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
+		return true
+	}
+	if entry.count >= regMaxPerHour {
+		return false
+	}
+	entry.count++
+	return true
+}
+
+func generateID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
+	// IP-based rate limiting
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	if !regLimiter.allow(ip) {
+		w.Header().Set("Retry-After", "3600")
+		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
 	}
 
-	if req.Name == "" || req.Email == "" {
-		http.Error(w, `{"error":"name and email are required"}`, http.StatusBadRequest)
+	// Validate name
+	if len(req.Name) < 2 {
+		http.Error(w, `{"error":"name must be at least 2 characters"}`, http.StatusBadRequest)
+		return
+	}
+	if len(req.Name) > 128 {
+		http.Error(w, `{"error":"name must be at most 128 characters"}`, http.StatusBadRequest)
 		return
 	}
 
-	tenantID := generateID()
+	// Validate email format
+	if !emailRegex.MatchString(req.Email) {
+		http.Error(w, `{"error":"invalid email format"}`, http.StatusBadRequest)
+		return
+	}
+	if len(req.Email) > 256 {
+		http.Error(w, `{"error":"email too long"}`, http.StatusBadRequest)
+		return
+	}
+
+	tenantID, err := generateID()
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
 	now := time.Now().Unix()
 
 	tx, err := s.store.StateDB.Begin()
@@ -69,7 +143,8 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		tenantID, req.Name, req.Email, now, now,
 	)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to create tenant: %s"}`, err.Error()), http.StatusConflict)
+		// Check for unique constraint on email
+		http.Error(w, `{"error":"email already registered"}`, http.StatusConflict)
 		return
 	}
 
@@ -79,24 +154,28 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		tenantID,
 	)
 	if err != nil {
-		http.Error(w, `{"error":"failed to create quotas"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
 	// Generate API key
 	apiKey, err := crypto.GenerateAPIKey()
 	if err != nil {
-		http.Error(w, `{"error":"failed to generate api key"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
 	keyHash, err := crypto.HashPassword(apiKey)
 	if err != nil {
-		http.Error(w, `{"error":"failed to hash api key"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	keyID := generateID()
+	keyID, err := generateID()
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
 	prefix := apiKey[:8]
 
 	_, err = tx.Exec(
@@ -105,12 +184,12 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		keyID, tenantID, prefix, keyHash, now,
 	)
 	if err != nil {
-		http.Error(w, `{"error":"failed to create api key"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		http.Error(w, `{"error":"failed to commit"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
@@ -141,12 +220,16 @@ func (s *Server) handleTenantUpdate(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 
 	var req UpdateTenantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
 	}
 
 	if req.Name != nil {
+		if len(*req.Name) < 2 || len(*req.Name) > 128 {
+			http.Error(w, `{"error":"name must be 2-128 characters"}`, http.StatusBadRequest)
+			return
+		}
 		_, err := s.store.StateDB.Exec(
 			`UPDATE tenants SET name = ?, updated_at = ? WHERE id = ?`,
 			*req.Name, time.Now().Unix(), tenantID,

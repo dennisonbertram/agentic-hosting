@@ -45,19 +45,29 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		req.Name = "unnamed"
 	}
 
+	// Validate ExpiresIn if provided
+	if req.ExpiresIn != nil && *req.ExpiresIn <= 0 {
+		http.Error(w, `{"error":"expires_in must be positive"}`, http.StatusBadRequest)
+		return
+	}
+
 	apiKey, err := crypto.GenerateAPIKey()
 	if err != nil {
-		http.Error(w, `{"error":"failed to generate key"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
 	keyHash, err := crypto.HashPassword(apiKey)
 	if err != nil {
-		http.Error(w, `{"error":"failed to hash key"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	keyID := generateID()
+	keyID, err := generateID()
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
 	prefix := apiKey[:8]
 	now := time.Now().Unix()
 
@@ -110,6 +120,10 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, `{"error":"failed to list keys"}`, http.StatusInternalServerError)
+		return
 	}
 
 	json.NewEncoder(w).Encode(keys)

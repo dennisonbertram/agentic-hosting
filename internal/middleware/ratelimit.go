@@ -3,41 +3,79 @@ package middleware
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 )
 
+const maxRateLimitEntries = 10000
+
+type rateLimitEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
 type RateLimiter struct {
-	mu       sync.RWMutex
-	limiters map[string]*rate.Limiter
-	rate     rate.Limit
-	burst    int
+	mu      sync.Mutex
+	entries map[string]*rateLimitEntry
+	rate    rate.Limit
+	burst   int
 }
 
 func NewRateLimiter(rps float64, burst int) *RateLimiter {
-	return &RateLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		rate:     rate.Limit(rps),
-		burst:    burst,
+	rl := &RateLimiter{
+		entries: make(map[string]*rateLimitEntry),
+		rate:    rate.Limit(rps),
+		burst:   burst,
+	}
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-1 * time.Hour)
+		for k, v := range rl.entries {
+			if v.lastSeen.Before(cutoff) {
+				delete(rl.entries, k)
+			}
+		}
+		rl.mu.Unlock()
 	}
 }
 
 func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
-	rl.mu.RLock()
-	limiter, exists := rl.limiters[key]
-	rl.mu.RUnlock()
-	if exists {
-		return limiter
-	}
-
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	limiter, exists = rl.limiters[key]
+
+	entry, exists := rl.entries[key]
 	if exists {
-		return limiter
+		entry.lastSeen = time.Now()
+		return entry.limiter
 	}
-	limiter = rate.NewLimiter(rl.rate, rl.burst)
-	rl.limiters[key] = limiter
+
+	// Evict oldest if at capacity
+	if len(rl.entries) >= maxRateLimitEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rl.entries {
+			if oldestKey == "" || v.lastSeen.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastSeen
+			}
+		}
+		if oldestKey != "" {
+			delete(rl.entries, oldestKey)
+		}
+	}
+
+	limiter := rate.NewLimiter(rl.rate, rl.burst)
+	rl.entries[key] = &rateLimitEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
+	}
 	return limiter
 }
 

@@ -48,6 +48,12 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// SQLite is single-writer; constrain connection pool to avoid lock contention.
+	// WAL mode allows concurrent reads, but writes must be serialized.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
 	return db, nil
 }
 

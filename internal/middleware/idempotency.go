@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+const (
+	maxIdempotencyEntries = 10000
+	maxIdempotencyKeyLen  = 128
+	maxIdempotencyBodyLen = 64 * 1024 // 64KB max stored response
+	idempotencyTTL        = 24 * time.Hour
+)
+
 type idempotencyEntry struct {
 	statusCode int
 	body       []byte
@@ -57,14 +64,27 @@ func (rr *responseRecorder) Write(b []byte) (int, error) {
 
 func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only apply idempotency to POST and PUT
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		key := r.Header.Get("Idempotency-Key")
 		if key == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
+		// Validate key length
+		if len(key) > maxIdempotencyKeyLen {
+			http.Error(w, `{"error":"idempotency key too long"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Scope by tenant + method + path
 		tenantID := GetTenantID(r.Context())
-		fullKey := tenantID + ":" + key
+		fullKey := tenantID + ":" + r.Method + ":" + r.URL.Path + ":" + key
 
 		s.mu.RLock()
 		entry, exists := s.entries[fullKey]
@@ -80,12 +100,29 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
-		s.mu.Lock()
-		s.entries[fullKey] = &idempotencyEntry{
-			statusCode: rec.statusCode,
-			body:       rec.body,
-			expiresAt:  time.Now().Add(24 * time.Hour),
+		// Only store if within bounds
+		if len(rec.body) <= maxIdempotencyBodyLen {
+			s.mu.Lock()
+			// Enforce max entries — evict oldest if at capacity
+			if len(s.entries) >= maxIdempotencyEntries {
+				var oldestKey string
+				var oldestTime time.Time
+				for k, v := range s.entries {
+					if oldestKey == "" || v.expiresAt.Before(oldestTime) {
+						oldestKey = k
+						oldestTime = v.expiresAt
+					}
+				}
+				if oldestKey != "" {
+					delete(s.entries, oldestKey)
+				}
+			}
+			s.entries[fullKey] = &idempotencyEntry{
+				statusCode: rec.statusCode,
+				body:       rec.body,
+				expiresAt:  time.Now().Add(idempotencyTTL),
+			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	})
 }

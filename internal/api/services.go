@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,11 +38,23 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate env vars if provided inline
+	if len(req.Env) > 0 {
+		if err := services.ValidateEnvVars(req.Env); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	svc, err := s.svcManager.Create(r.Context(), tenantID, req)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "service limit reached") {
 			writeError(w, http.StatusForbidden, msg)
+			return
+		}
+		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") {
+			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create service")
@@ -52,7 +65,7 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 	// Use context.Background() because r.Context() is canceled after the response.
 	go func(tid, sid string) {
 		if err := s.svcManager.Deploy(context.Background(), tid, sid); err != nil {
-			// Status already set to "failed" by Deploy on error
+			log.Printf("deploy failed for service %s: %v", sid, err)
 			return
 		}
 	}(tenantID, svc.ID)
@@ -206,10 +219,26 @@ func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.svcManager.SetEnv(r.Context(), tenantID, serviceID, vars); err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+	// Validate env var keys and values
+	if err := services.ValidateEnvVars(vars); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	if err := s.svcManager.SetEnv(r.Context(), tenantID, serviceID, vars); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to set env vars")
+		return
+	}
+	log.Printf("AUDIT: tenant=%s set env vars for service=%s keys=%v", tenantID, serviceID, envKeys(vars))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "note": "restart service for changes to take effect"})
 }
 
@@ -223,4 +252,13 @@ func (s *Server) handleServiceEnvDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// envKeys extracts just the keys from a map for audit logging (no values).
+func envKeys(vars map[string]string) []string {
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	return keys
 }

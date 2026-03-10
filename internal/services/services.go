@@ -41,31 +41,48 @@ type CreateRequest struct {
 // maxConcurrentDeploys limits simultaneous deploy operations globally.
 const maxConcurrentDeploys = 5
 
+// maxQueuedDeploys limits how many deploys can be waiting for a slot.
+// If the queue is full, new deploy requests are rejected with backpressure.
+const maxQueuedDeploys = 20
+
 // imageAllowPattern restricts images to Docker Hub library (official) and
-// standard namespace/repo:tag format. Blocks registry prefixes (e.g., evil.com/img)
-// and SHA-less digests for now. Tenants cannot pull from arbitrary registries.
+// standard namespace/repo:tag format. Blocks registry prefixes (e.g., evil.com/img).
 var imageAllowPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)?(?::[a-zA-Z0-9._-]+)?$`)
+
+// envKeyPattern validates environment variable key names.
+var envKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,127}$`)
+
+// maxEnvValueLen is the maximum length of an environment variable value.
+const maxEnvValueLen = 32768 // 32KB
+
+// deniedEnvKeys are environment variable names that cannot be set by tenants.
+var deniedEnvKeys = map[string]bool{
+	"LD_PRELOAD":     true,
+	"LD_LIBRARY_PATH": true,
+	"PATH":           true,
+}
 
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
-	db        *sql.DB
-	docker    *docker.Client
-	masterKey []byte
-	deploySem chan struct{} // bounded deploy concurrency
+	db          *sql.DB
+	docker      *docker.Client
+	masterKey   []byte
+	deploySem   chan struct{} // bounded deploy concurrency
+	deployQueue chan struct{} // bounded queue for waiting deploys
 }
 
 // NewManager creates a service manager.
 func NewManager(db *sql.DB, docker *docker.Client, masterKey []byte) *Manager {
 	return &Manager{
-		db:        db,
-		docker:    docker,
-		masterKey: masterKey,
-		deploySem: make(chan struct{}, maxConcurrentDeploys),
+		db:          db,
+		docker:      docker,
+		masterKey:   masterKey,
+		deploySem:   make(chan struct{}, maxConcurrentDeploys),
+		deployQueue: make(chan struct{}, maxQueuedDeploys),
 	}
 }
 
 // ValidateImage checks that an image reference is allowed.
-// Blocks registry-prefixed images (must be Docker Hub only).
 func ValidateImage(img string) error {
 	if img == "" {
 		return fmt.Errorf("image is required")
@@ -73,8 +90,6 @@ func ValidateImage(img string) error {
 	if len(img) > 256 {
 		return fmt.Errorf("image reference too long")
 	}
-	// Block images with registry prefix (contains "." before first "/")
-	// e.g., "evil.com/image:tag" or "registry.io:5000/img"
 	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
 		prefix := img[:slashIdx]
 		if strings.ContainsAny(prefix, ".:") {
@@ -87,12 +102,37 @@ func ValidateImage(img string) error {
 	return nil
 }
 
+// ValidateEnvVars checks env var keys and values for format and safety.
+func ValidateEnvVars(vars map[string]string) error {
+	for k, v := range vars {
+		if !envKeyPattern.MatchString(k) {
+			return fmt.Errorf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]{0,127}", k)
+		}
+		if deniedEnvKeys[strings.ToUpper(k)] {
+			return fmt.Errorf("env var %q is not allowed", k)
+		}
+		if len(v) > maxEnvValueLen {
+			return fmt.Errorf("env var %q value too long (max %d bytes)", k, maxEnvValueLen)
+		}
+		if strings.ContainsAny(v, "\x00") {
+			return fmt.Errorf("env var %q value contains null bytes", k)
+		}
+	}
+	return nil
+}
+
 // Create inserts a new service record (status=created, not yet running).
 // Enforces tenant quota (max_services).
 func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest) (*Service, error) {
-	// Validate image before anything else
 	if err := ValidateImage(req.Image); err != nil {
 		return nil, err
+	}
+
+	// Validate env vars if provided
+	if len(req.Env) > 0 {
+		if err := ValidateEnvVars(req.Env); err != nil {
+			return nil, err
+		}
 	}
 
 	// Enforce tenant quota
@@ -134,7 +174,6 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("insert service: %w", err)
 	}
 
-	// Store env vars if provided
 	if len(req.Env) > 0 {
 		if err := m.setEnvVars(ctx, id, req.Env); err != nil {
 			return nil, fmt.Errorf("set env vars: %w", err)
@@ -155,8 +194,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 }
 
 // Deploy pulls the image, reads env vars, creates and starts the container.
-// Uses a bounded semaphore to limit concurrent deploys.
+// Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	// Try to enter the deploy queue; reject immediately if full (backpressure)
+	select {
+	case m.deployQueue <- struct{}{}:
+		defer func() { <-m.deployQueue }()
+	default:
+		m.updateStatus(ctx, serviceID, "failed")
+		return fmt.Errorf("deploy queue full; try again later")
+	}
+
 	// Acquire deploy slot (bounded concurrency)
 	select {
 	case m.deploySem <- struct{}{}:
@@ -184,14 +232,12 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("pull image: %w", err)
 	}
 
-	// Load decrypted env vars
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
 		m.updateStatus(ctx, serviceID, "failed")
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
-	// Determine port from service record or env PORT
 	port := svc.Port
 	if port <= 0 {
 		port = 8000
@@ -202,7 +248,10 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		}
 	}
 
-	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil)
+	// Load resource limits from tenant quotas
+	limits := m.getResourceLimits(ctx, tenantID)
+
+	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil, limits)
 	if err != nil {
 		m.updateStatus(ctx, serviceID, "failed")
 		return fmt.Errorf("run container: %w", err)
@@ -217,6 +266,25 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("update service: %w", err)
 	}
 	return nil
+}
+
+// getResourceLimits reads per-service resource limits from tenant quotas.
+func (m *Manager) getResourceLimits(ctx context.Context, tenantID string) *docker.ResourceLimits {
+	var maxMemMB, maxCPUCores int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT max_memory_mb, max_cpu_cores FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxMemMB, &maxCPUCores)
+	if err != nil {
+		return nil // use defaults
+	}
+	limits := &docker.ResourceLimits{}
+	if maxMemMB > 0 {
+		limits.MemoryMB = int64(maxMemMB)
+	}
+	if maxCPUCores > 0 {
+		limits.CPUCores = float64(maxCPUCores)
+	}
+	return limits
 }
 
 // Stop stops a running service container.
@@ -274,7 +342,6 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 }
 
 // Delete stops and removes the container, then deletes the DB record.
-// Uses CASCADE to clean up service_env rows.
 func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error {
 	svc, err := m.getOwned(ctx, tenantID, serviceID)
 	if err != nil {
@@ -294,9 +361,7 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 }
 
 // StopAllForTenant stops and removes all containers belonging to a tenant.
-// Called when a tenant is suspended/deleted to ensure no orphaned workloads.
 func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
-	// Find all services for this tenant
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, container_id FROM services WHERE tenant_id = ?`, tenantID,
 	)
@@ -367,7 +432,6 @@ func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service
 		return nil, err
 	}
 
-	// Refresh status from Docker if container exists
 	if svc.ContainerID != "" {
 		info, err := m.docker.InspectContainer(ctx, svc.ContainerID)
 		if err == nil {
@@ -379,23 +443,26 @@ func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service
 }
 
 // SetEnv sets or updates environment variables for a service.
-// Values are encrypted with AES-256-GCM before storage.
 func (m *Manager) SetEnv(ctx context.Context, tenantID, serviceID string, vars map[string]string) error {
 	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return err
+	}
+	if err := ValidateEnvVars(vars); err != nil {
 		return err
 	}
 	return m.setEnvVars(ctx, serviceID, vars)
 }
 
 // GetEnv returns env var keys for a service. If reveal is true, returns decrypted values.
+// Audit logs reveal operations for security monitoring.
 func (m *Manager) GetEnv(ctx context.Context, tenantID, serviceID string, reveal bool) (map[string]string, error) {
 	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
 		return nil, err
 	}
 	if reveal {
+		log.Printf("AUDIT: tenant=%s revealed env vars for service=%s", tenantID, serviceID)
 		return m.getEnvVars(ctx, serviceID)
 	}
-	// Keys only, values redacted
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT key FROM service_env WHERE service_id = ? ORDER BY key`,
 		serviceID,
@@ -431,6 +498,7 @@ func (m *Manager) DeleteEnv(ctx context.Context, tenantID, serviceID, key string
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("env var not found")
 	}
+	log.Printf("AUDIT: tenant=%s deleted env var %q for service=%s", tenantID, key, serviceID)
 	return nil
 }
 

@@ -42,7 +42,6 @@ type ContainerInfo struct {
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
 func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error) {
-	// Check if network already exists
 	networks, err := c.cli.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list networks: %w", err)
@@ -52,7 +51,6 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error)
 			return n.ID, nil
 		}
 	}
-	// Create internal network (no external access by default)
 	resp, err := c.cli.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver:   "bridge",
 		Internal: true,
@@ -73,10 +71,17 @@ func TenantNetworkName(tenantID string) string {
 	return "paasd-tenant-" + tenantID
 }
 
+// ResourceLimits holds per-container resource constraints from tenant quotas.
+type ResourceLimits struct {
+	MemoryMB int64
+	CPUCores float64
+}
+
 // RunContainer creates and starts a container with gVisor runtime.
-// Container is placed on the tenant-isolated network. Caller must connect
-// to traefik-public separately for ingress routing.
-func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string) (string, error) {
+// Container is placed on the tenant-isolated network only. Traefik is connected
+// to the per-tenant network (not the other way around) so containers never join
+// a shared network, preventing cross-tenant lateral movement.
+func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
 	name := containerName(tenantID, serviceID)
 
 	env := make([]string, 0, len(envVars))
@@ -84,7 +89,6 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 		env = append(env, k+"="+v)
 	}
 
-	// Default port for Traefik routing
 	if port <= 0 {
 		port = 8000
 	}
@@ -101,21 +105,30 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 		labels[k] = v
 	}
 
-	// Use per-tenant network for isolation. Container will also be connected
-	// to traefik-public after creation for ingress routing.
 	tenantNet := TenantNetworkName(tenantID)
+
+	// Apply resource limits from tenant quotas, with safe defaults
+	memoryBytes := int64(512 * 1024 * 1024) // default 512MB
+	nanoCPUs := int64(1_000_000_000)        // default 1 CPU
+	if limits != nil {
+		if limits.MemoryMB > 0 {
+			memoryBytes = limits.MemoryMB * 1024 * 1024
+		}
+		if limits.CPUCores > 0 {
+			nanoCPUs = int64(limits.CPUCores * 1_000_000_000)
+		}
+	}
 
 	hostCfg := &container.HostConfig{
 		Runtime: "runsc",
 		Resources: container.Resources{
-			Memory:   512 * 1024 * 1024, // 512MB
-			NanoCPUs: 1_000_000_000,     // 1 CPU
+			Memory:   memoryBytes,
+			NanoCPUs: nanoCPUs,
 		},
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		NetworkMode:   container.NetworkMode(tenantNet),
-		// Defense-in-depth: drop all capabilities, no new privileges
-		CapDrop:    []string{"ALL"},
-		SecurityOpt: []string{"no-new-privileges"},
+		CapDrop:       []string{"ALL"},
+		SecurityOpt:   []string{"no-new-privileges"},
 	}
 
 	resp, err := c.cli.ContainerCreate(ctx,
@@ -133,10 +146,12 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 		return "", fmt.Errorf("create container: %w", err)
 	}
 
-	// Connect to traefik-public for ingress routing (second network)
-	if err := c.cli.NetworkConnect(ctx, "traefik-public", resp.ID, nil); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", fmt.Errorf("connect to traefik-public: %w", err)
+	// Connect Traefik to the per-tenant network so it can route to this container.
+	// Containers never join a shared network — Traefik joins each tenant network.
+	// This is idempotent; if Traefik is already connected, the error is ignored.
+	traefikID, findErr := c.findTraefikContainer(ctx)
+	if findErr == nil && traefikID != "" {
+		_ = c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil)
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
@@ -145,6 +160,25 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 	}
 
 	return resp.ID, nil
+}
+
+// findTraefikContainer finds the Traefik container by image or name.
+func (c *Client) findTraefikContainer(ctx context.Context) (string, error) {
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
+	if err != nil {
+		return "", err
+	}
+	for _, ctr := range containers {
+		if strings.Contains(ctr.Image, "traefik") {
+			return ctr.ID, nil
+		}
+		for _, name := range ctr.Names {
+			if strings.Contains(name, "traefik") {
+				return ctr.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("traefik container not found")
 }
 
 // StopContainer stops a running container with a 10s timeout.
@@ -201,7 +235,6 @@ func (c *Client) PullImage(ctx context.Context, img string) error {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 	defer reader.Close()
-	// Drain the reader to complete the pull
 	_, _ = io.Copy(io.Discard, reader)
 	return nil
 }
@@ -224,14 +257,7 @@ func (c *Client) ListContainersByLabel(ctx context.Context, label, value string)
 }
 
 // containerName generates a deterministic container name from tenant and service IDs.
+// Uses full IDs to prevent name collisions between tenants/services.
 func containerName(tenantID, serviceID string) string {
-	tid := tenantID
-	if len(tid) > 8 {
-		tid = tid[:8]
-	}
-	sid := serviceID
-	if len(sid) > 8 {
-		sid = sid[:8]
-	}
-	return fmt.Sprintf("paasd-%s-%s", tid, sid)
+	return fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)
 }

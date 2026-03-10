@@ -44,9 +44,14 @@ func main() {
 		log.Fatalf("--open-registration requires --dev")
 	}
 
-	// Prevent --dev from being used with non-loopback listen address
+	// In production (non-dev) mode, refuse to bind to non-loopback addresses.
+	// The server must be behind a TLS-terminating reverse proxy on loopback.
+	if !*devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
+		log.Fatalf("FATAL: non-loopback listen address (%s) is not allowed in production mode. Use --dev for development or bind to 127.0.0.1 behind a reverse proxy.", *listenAddr)
+	}
+	// Warn in dev mode about non-loopback
 	if *devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
-		log.Printf("CRITICAL WARNING: --dev mode with non-loopback listen address (%s) disables HTTPS enforcement. This is unsafe for anything other than local development.", *listenAddr)
+		log.Printf("WARNING: dev mode with non-loopback listen address (%s) disables HTTPS enforcement.", *listenAddr)
 	}
 
 	// Read master key

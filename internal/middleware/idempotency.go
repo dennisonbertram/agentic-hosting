@@ -89,9 +89,9 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Scope by tenant + method + path
+		// Scope by tenant + method + path + query string
 		tenantID := GetTenantID(r.Context())
-		fullKey := tenantID + ":" + r.Method + ":" + r.URL.Path + ":" + key
+		fullKey := tenantID + ":" + r.Method + ":" + r.URL.RequestURI() + ":" + key
 
 		s.mu.RLock()
 		entry, exists := s.entries[fullKey]

@@ -147,15 +147,15 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	if !s.openRegistration {
 		provided := r.Header.Get("X-Bootstrap-Token")
 		// HMAC-compare to prevent length-leak from ConstantTimeCompare
-		if !hmacEqual(provided, s.bootstrapToken) {
+		if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 	}
 
-	// Enforce max tenant count to prevent DB/disk exhaustion
+	// Enforce max tenant count to prevent DB/disk exhaustion (only count active tenants)
 	var tenantCount int
-	if err := s.store.StateDB.QueryRow(`SELECT COUNT(*) FROM tenants`).Scan(&tenantCount); err != nil {
+	if err := s.store.StateDB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE status = 'active'`).Scan(&tenantCount); err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -339,8 +339,8 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 
 // hmacEqual compares two strings in constant time regardless of length.
 // Unlike subtle.ConstantTimeCompare, this does not leak the length of either input.
-func hmacEqual(a, b string) bool {
-	key := []byte("bootstrap-token-compare")
+// Uses the server's master key as the HMAC key for domain separation.
+func hmacEqual(a, b string, key []byte) bool {
 	macA := hmac.New(sha256.New, key)
 	macA.Write([]byte(a))
 	macB := hmac.New(sha256.New, key)

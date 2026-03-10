@@ -18,7 +18,73 @@ const TenantIDKey contextKey = "tenant_id"
 const (
 	lastUsedInterval = 5 * time.Minute
 	lastUsedMaxKeys  = 10000
+	authCacheTTL     = 30 * time.Second
+	authCacheMaxKeys = 5000
 )
+
+// authCacheEntry caches a validated key's DB result to reduce SQLite load.
+// The HMAC verification still runs on every request (fast, in-memory).
+type authCacheEntry struct {
+	tenantID string
+	keyHash  string
+	status   string
+	cachedAt time.Time
+}
+
+type authCache struct {
+	mu      sync.RWMutex
+	entries map[string]*authCacheEntry
+}
+
+func newAuthCache() *authCache {
+	c := &authCache{
+		entries: make(map[string]*authCacheEntry),
+	}
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		for range ticker.C {
+			c.mu.Lock()
+			now := time.Now()
+			for k, v := range c.entries {
+				if now.Sub(v.cachedAt) > authCacheTTL {
+					delete(c.entries, k)
+				}
+			}
+			c.mu.Unlock()
+		}
+	}()
+	return c
+}
+
+func (c *authCache) get(keyID string) (*authCacheEntry, bool) {
+	c.mu.RLock()
+	entry, exists := c.entries[keyID]
+	c.mu.RUnlock()
+	if !exists || time.Since(entry.cachedAt) > authCacheTTL {
+		return nil, false
+	}
+	return entry, true
+}
+
+func (c *authCache) set(keyID string, entry *authCacheEntry) {
+	c.mu.Lock()
+	// Evict oldest if at capacity
+	if len(c.entries) >= authCacheMaxKeys {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range c.entries {
+			if oldestKey == "" || v.cachedAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.cachedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(c.entries, oldestKey)
+		}
+	}
+	c.entries[keyID] = entry
+	c.mu.Unlock()
+}
 
 // lastUsedTracker samples last_used_at updates with bounded map.
 type lastUsedTracker struct {
@@ -77,19 +143,18 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 
 func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 	tracker := newLastUsedTracker(db)
+	cache := newAuthCache()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-	
 				http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 				return
 			}
 
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || parts[0] != "Bearer" {
-	
 				http.Error(w, `{"error":"invalid authorization format"}`, http.StatusUnauthorized)
 				return
 			}
@@ -98,7 +163,6 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 			// Token format: "keyID.secret" for O(1) lookup
 			dotIdx := strings.IndexByte(token, '.')
 			if dotIdx < 1 || dotIdx >= len(token)-1 {
-	
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
@@ -106,36 +170,47 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 			secret := token[dotIdx+1:]
 
 			if len(keyID) > 64 || len(secret) > 256 {
-	
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
 
-			now := time.Now().Unix()
 			var tenantID, keyHash, status string
-			err := db.QueryRowContext(r.Context(),
-				`SELECT ak.tenant_id, ak.key_hash, t.status
-				 FROM api_keys ak
-				 JOIN tenants t ON t.id = ak.tenant_id
-				 WHERE ak.id = ?
-				   AND ak.revoked_at IS NULL
-				   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
-				keyID, now,
-			).Scan(&tenantID, &keyHash, &status)
-			if err != nil {
-	
-				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
-				return
+
+			// Check auth cache first to reduce DB load
+			if cached, ok := cache.get(keyID); ok {
+				tenantID = cached.tenantID
+				keyHash = cached.keyHash
+				status = cached.status
+			} else {
+				now := time.Now().Unix()
+				err := db.QueryRowContext(r.Context(),
+					`SELECT ak.tenant_id, ak.key_hash, t.status
+					 FROM api_keys ak
+					 JOIN tenants t ON t.id = ak.tenant_id
+					 WHERE ak.id = ?
+					   AND ak.revoked_at IS NULL
+					   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
+					keyID, now,
+				).Scan(&tenantID, &keyHash, &status)
+				if err != nil {
+					http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+					return
+				}
+
+				cache.set(keyID, &authCacheEntry{
+					tenantID: tenantID,
+					keyHash:  keyHash,
+					status:   status,
+					cachedAt: time.Now(),
+				})
 			}
 
 			if status != "active" {
-	
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
 
 			if !crypto.VerifyAPIKey(keyHash, secret, masterKey) {
-	
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
@@ -152,4 +227,3 @@ func GetTenantID(ctx context.Context) string {
 	v, _ := ctx.Value(TenantIDKey).(string)
 	return v
 }
-

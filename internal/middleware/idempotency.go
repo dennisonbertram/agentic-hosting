@@ -52,6 +52,7 @@ type responseRecorder struct {
 	http.ResponseWriter
 	statusCode int
 	body       []byte
+	overflow   bool // true if body exceeded maxIdempotencyBodyLen
 }
 
 func (rr *responseRecorder) WriteHeader(code int) {
@@ -60,7 +61,16 @@ func (rr *responseRecorder) WriteHeader(code int) {
 }
 
 func (rr *responseRecorder) Write(b []byte) (int, error) {
-	rr.body = append(rr.body, b...)
+	// Cap in-memory buffering to prevent memory exhaustion from large responses.
+	// Once overflow, stop buffering but continue writing to the client.
+	if !rr.overflow {
+		if len(rr.body)+len(b) <= maxIdempotencyBodyLen {
+			rr.body = append(rr.body, b...)
+		} else {
+			rr.overflow = true
+			rr.body = nil // release buffered bytes
+		}
+	}
 	return rr.ResponseWriter.Write(b)
 }
 
@@ -115,7 +125,7 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 
 		// Only cache successful (2xx) responses within size bounds.
 		// Error responses are not cached to prevent "sticky failure" attacks.
-		if rec.statusCode >= 200 && rec.statusCode < 300 && len(rec.body) <= maxIdempotencyBodyLen {
+		if rec.statusCode >= 200 && rec.statusCode < 300 && !rec.overflow && len(rec.body) <= maxIdempotencyBodyLen {
 			s.mu.Lock()
 			// Enforce per-tenant limit to prevent single-tenant memory abuse
 			tenantPrefix := tenantID + ":"

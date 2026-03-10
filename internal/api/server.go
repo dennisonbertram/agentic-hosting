@@ -30,7 +30,8 @@ func (s *Server) setupRoutes() {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
-	r.Use(chimw.RealIP)
+	// NOTE: RealIP removed — do not trust X-Forwarded-For without validated trusted proxies.
+	// Traefik sets the real client IP in the TCP connection itself.
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))

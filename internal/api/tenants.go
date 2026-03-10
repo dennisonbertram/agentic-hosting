@@ -2,12 +2,15 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,10 +43,21 @@ type UpdateTenantRequest struct {
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
-// IP-based rate limiter for registration
+// bootstrapToken is loaded from PAASD_BOOTSTRAP_TOKEN env var.
+// If set, registration requires this token in X-Bootstrap-Token header.
+var bootstrapToken string
+
+func init() {
+	bootstrapToken = strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
+}
+
+// IP-based rate limiter for registration with bounded map and cleanup.
 type registrationLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*regEntry
+	// Global counter
+	globalCount    int
+	globalWindowAt time.Time
 }
 
 type regEntry struct {
@@ -56,24 +70,70 @@ var regLimiter = &registrationLimiter{
 }
 
 const (
-	regMaxPerHour = 10
-	regWindow     = 1 * time.Hour
+	regMaxPerIPPerHour = 10
+	regGlobalPerHour   = 100
+	regMaxEntries      = 10000
+	regWindow          = 1 * time.Hour
 )
+
+func init() {
+	// Periodic cleanup of expired entries
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		for range ticker.C {
+			regLimiter.mu.Lock()
+			now := time.Now()
+			for k, v := range regLimiter.entries {
+				if now.After(v.windowAt) {
+					delete(regLimiter.entries, k)
+				}
+			}
+			regLimiter.mu.Unlock()
+		}
+	}()
+}
 
 func (rl *registrationLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+
+	// Global rate limit
+	if now.After(rl.globalWindowAt) {
+		rl.globalCount = 0
+		rl.globalWindowAt = now.Add(regWindow)
+	}
+	if rl.globalCount >= regGlobalPerHour {
+		return false
+	}
+
+	// Evict oldest if at capacity
+	if len(rl.entries) >= regMaxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rl.entries {
+			if oldestKey == "" || v.windowAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.windowAt
+			}
+		}
+		if oldestKey != "" {
+			delete(rl.entries, oldestKey)
+		}
+	}
+
 	entry, exists := rl.entries[ip]
 	if !exists || now.After(entry.windowAt) {
 		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
+		rl.globalCount++
 		return true
 	}
-	if entry.count >= regMaxPerHour {
+	if entry.count >= regMaxPerIPPerHour {
 		return false
 	}
 	entry.count++
+	rl.globalCount++
 	return true
 }
 
@@ -86,7 +146,16 @@ func generateID() (string, error) {
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
-	// IP-based rate limiting
+	// Bootstrap token gate (if configured)
+	if bootstrapToken != "" {
+		provided := r.Header.Get("X-Bootstrap-Token")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(bootstrapToken)) != 1 {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+	}
+
+	// IP-based + global rate limiting
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if ip == "" {
 		ip = r.RemoteAddr
@@ -143,8 +212,8 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		tenantID, req.Name, req.Email, now, now,
 	)
 	if err != nil {
-		// Check for unique constraint on email
-		http.Error(w, `{"error":"email already registered"}`, http.StatusConflict)
+		// Generic message to prevent email enumeration
+		http.Error(w, `{"error":"registration failed"}`, http.StatusConflict)
 		return
 	}
 

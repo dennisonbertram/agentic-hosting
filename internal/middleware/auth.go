@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/paasd/paasd/internal/crypto"
@@ -14,44 +15,40 @@ type contextKey string
 
 const TenantIDKey contextKey = "tenant_id"
 
-// lastUsedUpdater is a bounded worker pool for async last_used_at updates.
-type lastUsedUpdater struct {
-	ch chan lastUsedUpdate
+// lastUsedTracker samples last_used_at updates — at most once per key per 5 minutes.
+type lastUsedTracker struct {
+	mu       sync.Mutex
+	lastSeen map[string]time.Time
+	db       *sql.DB
 }
 
-type lastUsedUpdate struct {
-	db    *sql.DB
-	keyID string
-	ts    int64
-}
-
-var updater = newLastUsedUpdater(10)
-
-func newLastUsedUpdater(workers int) *lastUsedUpdater {
-	u := &lastUsedUpdater{
-		ch: make(chan lastUsedUpdate, 100),
-	}
-	for i := 0; i < workers; i++ {
-		go u.worker()
-	}
-	return u
-}
-
-func (u *lastUsedUpdater) worker() {
-	for upd := range u.ch {
-		upd.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", upd.ts, upd.keyID)
+func newLastUsedTracker(db *sql.DB) *lastUsedTracker {
+	return &lastUsedTracker{
+		lastSeen: make(map[string]time.Time),
+		db:       db,
 	}
 }
 
-func (u *lastUsedUpdater) submit(db *sql.DB, keyID string) {
-	select {
-	case u.ch <- lastUsedUpdate{db: db, keyID: keyID, ts: time.Now().Unix()}:
-	default:
-		// Drop update if buffer full — non-critical
+const lastUsedInterval = 5 * time.Minute
+
+func (t *lastUsedTracker) maybeUpdate(keyID string) {
+	t.mu.Lock()
+	last, exists := t.lastSeen[keyID]
+	now := time.Now()
+	if exists && now.Sub(last) < lastUsedInterval {
+		t.mu.Unlock()
+		return
 	}
+	t.lastSeen[keyID] = now
+	t.mu.Unlock()
+
+	// Synchronous but sampled — runs at most once per key per 5 min
+	t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID)
 }
 
 func Auth(db *sql.DB) func(http.Handler) http.Handler {
+	tracker := newLastUsedTracker(db)
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -113,8 +110,8 @@ func Auth(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Bounded async update of last_used_at
-			updater.submit(db, matchedKeyID)
+			// Sampled last_used_at update (at most once per key per 5 min)
+			tracker.maybeUpdate(matchedKeyID)
 
 			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))

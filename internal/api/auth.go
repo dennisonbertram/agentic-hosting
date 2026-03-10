@@ -10,6 +10,8 @@ import (
 	"github.com/paasd/paasd/internal/middleware"
 )
 
+const maxKeysPerTenant = 20
+
 type CreateKeyRequest struct {
 	Name      string `json:"name"`
 	ExpiresIn *int64 `json:"expires_in,omitempty"` // seconds
@@ -48,6 +50,21 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	// Validate ExpiresIn if provided
 	if req.ExpiresIn != nil && *req.ExpiresIn <= 0 {
 		http.Error(w, `{"error":"expires_in must be positive"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Enforce per-tenant key quota
+	var keyCount int
+	err := s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
+		tenantID,
+	).Scan(&keyCount)
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if keyCount >= maxKeysPerTenant {
+		http.Error(w, `{"error":"maximum API keys reached, revoke unused keys first"}`, http.StatusForbidden)
 		return
 	}
 
@@ -104,7 +121,8 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, name, key_prefix, created_at, last_used_at, expires_at
 		 FROM api_keys
 		 WHERE tenant_id = ? AND revoked_at IS NULL
-		 ORDER BY created_at DESC`,
+		 ORDER BY created_at DESC
+		 LIMIT 100`,
 		tenantID,
 	)
 	if err != nil {

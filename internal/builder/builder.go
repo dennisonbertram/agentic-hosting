@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 )
@@ -43,7 +42,7 @@ type Builder struct {
 
 	// Active build processes for cancellation (keyed by buildID)
 	procMu  sync.Mutex
-	procMap map[string]int // buildID -> process group ID (pgid)
+	procMap map[string]string // buildID -> systemd unit name
 }
 
 // NewBuilder creates a builder.
@@ -60,7 +59,7 @@ func NewBuilder(workDir, nixpacksPath string) (*Builder, error) {
 		nixpacks:     nixpacksPath,
 		buildSem:     make(chan struct{}, 3),
 		tenantBuilds: make(map[string]struct{}),
-		procMap:      make(map[string]int),
+		procMap:      make(map[string]string),
 	}, nil
 }
 
@@ -120,17 +119,18 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 	return nil
 }
 
-// CancelBuild kills a running build process group.
+// CancelBuild stops a running build by stopping its systemd scope unit.
 func (b *Builder) CancelBuild(buildID string) error {
 	b.procMu.Lock()
-	pgid, ok := b.procMap[buildID]
+	unitName, ok := b.procMap[buildID]
 	b.procMu.Unlock()
 	if !ok {
 		return fmt.Errorf("build not found or not running")
 	}
-	// Kill entire process group
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("kill process group %d: %w", pgid, err)
+	// Stop the systemd scope unit, which kills all processes in it
+	cmd := exec.Command("systemctl", "stop", unitName)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("stop unit %s: %w", unitName, err)
 	}
 	return nil
 }
@@ -151,13 +151,13 @@ func (b *Builder) releaseTenant(tenantID string) {
 	delete(b.tenantBuilds, tenantID)
 }
 
-func (b *Builder) trackProc(buildID string, pid int) {
+func (b *Builder) trackUnit(buildID, unitName string) {
 	b.procMu.Lock()
-	b.procMap[buildID] = pid
+	b.procMap[buildID] = unitName
 	b.procMu.Unlock()
 }
 
-func (b *Builder) untrackProc(buildID string) {
+func (b *Builder) untrackUnit(buildID string) {
 	b.procMu.Lock()
 	delete(b.procMap, buildID)
 	b.procMu.Unlock()
@@ -198,8 +198,10 @@ func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir strin
 	defer cancel()
 
 	// Run git clone as paasd-builder user via systemd-run for isolation
+	unitName := fmt.Sprintf("paasd-clone-%s.scope", req.BuildID[:16])
 	cmd := exec.CommandContext(cloneCtx,
 		"systemd-run", "--scope", "--quiet",
+		"--unit="+unitName,
 		"-p", "MemoryMax=512M",
 		"/usr/sbin/runuser", "-u", "paasd-builder", "--",
 		"git", "clone", "--depth=1", "--branch", ref,
@@ -212,8 +214,6 @@ func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir strin
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"GIT_TERMINAL_PROMPT=0",
 	}
-	// Create new process group so we can kill entire tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -227,8 +227,8 @@ func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir strin
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start git clone: %w", err)
 	}
-	b.trackProc(req.BuildID, cmd.Process.Pid)
-	defer b.untrackProc(req.BuildID)
+	b.trackUnit(req.BuildID, unitName)
+	defer b.untrackUnit(req.BuildID)
 
 	go streamLines(stdout, logCb)
 	go streamLines(stderr, logCb)
@@ -250,8 +250,10 @@ func (b *Builder) nixpacksBuild(ctx context.Context, req BuildRequest, buildDir 
 	// Run nixpacks via systemd-run with resource limits and sandboxing.
 	// Nixpacks needs Docker socket access to build images (it runs docker build internally).
 	// We run as paasd-builder (member of docker group) instead of root.
+	unitName := fmt.Sprintf("paasd-build-%s.scope", req.BuildID[:16])
 	cmd := exec.CommandContext(buildCtx,
 		"systemd-run", "--scope", "--quiet",
+		"--unit="+unitName,
 		"-p", "MemoryMax=2G",
 		"-p", "CPUQuota=200%",
 		"/usr/sbin/runuser", "-u", "paasd-builder", "--",
@@ -266,7 +268,6 @@ func (b *Builder) nixpacksBuild(ctx context.Context, req BuildRequest, buildDir 
 		"DOCKER_CONFIG=/tmp/.docker",
 	}
 	// Create new process group for killable tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -280,8 +281,8 @@ func (b *Builder) nixpacksBuild(ctx context.Context, req BuildRequest, buildDir 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start nixpacks: %w", err)
 	}
-	b.trackProc(req.BuildID, cmd.Process.Pid)
-	defer b.untrackProc(req.BuildID)
+	b.trackUnit(req.BuildID, unitName)
+	defer b.untrackUnit(req.BuildID)
 
 	go streamLines(stdout, logCb)
 	go streamLines(stderr, logCb)
@@ -300,13 +301,17 @@ func (b *Builder) pushImage(ctx context.Context, req BuildRequest, logCb func(st
 	pushCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(pushCtx, "docker", "push", req.ImageTag)
+	unitName := fmt.Sprintf("paasd-push-%s.scope", req.BuildID[:16])
+	cmd := exec.CommandContext(pushCtx,
+		"systemd-run", "--scope", "--quiet",
+		"--unit="+unitName,
+		"docker", "push", req.ImageTag,
+	)
 	cmd.Env = []string{
 		"HOME=/tmp",
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"DOCKER_HOST=unix:///var/run/docker.sock",
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -320,8 +325,8 @@ func (b *Builder) pushImage(ctx context.Context, req BuildRequest, logCb func(st
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start docker push: %w", err)
 	}
-	b.trackProc(req.BuildID, cmd.Process.Pid)
-	defer b.untrackProc(req.BuildID)
+	b.trackUnit(req.BuildID, unitName)
+	defer b.untrackUnit(req.BuildID)
 
 	go streamLines(stdout, logCb)
 	go streamLines(stderr, logCb)

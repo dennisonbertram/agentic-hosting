@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -89,8 +89,8 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 	if ref == "" {
 		ref = "main"
 	}
-	if len(ref) > 256 {
-		return nil, fmt.Errorf("source_ref too long (max 256)")
+	if err := validateSourceRef(ref); err != nil {
+		return nil, err
 	}
 
 	// Verify service exists and belongs to tenant
@@ -365,31 +365,18 @@ func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) err
 	return nil
 }
 
-// isPrivateIP checks if an IP address is in a private, loopback, link-local, or reserved range.
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"127.0.0.0/8",    // loopback
-		"10.0.0.0/8",     // RFC1918
-		"172.16.0.0/12",  // RFC1918
-		"192.168.0.0/16", // RFC1918
-		"169.254.0.0/16", // link-local (cloud metadata)
-		"100.64.0.0/10",  // carrier-grade NAT
-		"0.0.0.0/8",      // unspecified
-		"::1/128",        // IPv6 loopback
-		"fc00::/7",       // IPv6 ULA
-		"fe80::/10",      // IPv6 link-local
-	}
-	for _, cidr := range privateRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+// allowedGitHosts is the set of trusted git hosting providers.
+// This prevents DNS rebinding attacks by only allowing known-good hostnames.
+var allowedGitHosts = map[string]bool{
+	"github.com":    true,
+	"gitlab.com":    true,
+	"bitbucket.org": true,
+	"sr.ht":         true,
+	"codeberg.org":  true,
 }
+
+// validRefPattern matches safe git ref names (branches, tags, SHAs).
+var validRefPattern = regexp.MustCompile(`^[A-Za-z0-9._/\-]+$`)
 
 func validateGitURL(rawURL string) error {
 	if len(rawURL) > 2048 {
@@ -413,26 +400,21 @@ func validateGitURL(rawURL string) error {
 		return fmt.Errorf("empty hostname in URL")
 	}
 
-	// Block localhost/loopback hostnames
-	if strings.EqualFold(host, "localhost") {
-		return fmt.Errorf("localhost URLs are not allowed")
+	// Only allow known trusted git hosting providers (prevents DNS rebinding)
+	if !allowedGitHosts[strings.ToLower(host)] {
+		return fmt.Errorf("git host %q is not in the allowed list; supported: github.com, gitlab.com, bitbucket.org, sr.ht, codeberg.org", host)
 	}
 
-	// Resolve hostname and check all IPs against private ranges
-	ips, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("cannot resolve hostname %q: %w", host, err)
-	}
-	for _, ipStr := range ips {
-		ip := net.ParseIP(ipStr)
-		if ip == nil {
-			return fmt.Errorf("invalid IP for hostname %q: %s", host, ipStr)
-		}
-		if isPrivateIP(ip) {
-			return fmt.Errorf("hostname %q resolves to private/reserved IP %s", host, ipStr)
-		}
-	}
+	return nil
+}
 
+func validateSourceRef(ref string) error {
+	if len(ref) > 256 {
+		return fmt.Errorf("source_ref too long (max 256)")
+	}
+	if !validRefPattern.MatchString(ref) {
+		return fmt.Errorf("source_ref contains invalid characters")
+	}
 	return nil
 }
 

@@ -52,7 +52,6 @@ func (s *Server) setupRoutes() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
-	r.Use(jsonContentType)
 	r.Use(maxBodySize(1 << 20))
 	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
 	r.Use(chimw.Throttle(200))
@@ -106,13 +105,9 @@ func (s *Server) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, s)
 }
 
-func jsonContentType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		next.ServeHTTP(w, r)
-	})
-}
+// jsonContentType is no longer needed as a global middleware because
+// writeJSON and writeError (via httpx) set Content-Type and nosniff
+// on every response. This avoids setting Content-Type on 204 responses.
 
 // writeError delegates to httpx.WriteError for consistent JSON error responses.
 // All handlers in the api package should use this.

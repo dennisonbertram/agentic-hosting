@@ -134,7 +134,8 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var k KeyInfo
 		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.CreatedAt, &k.LastUsedAt, &k.ExpiresAt); err != nil {
-			continue
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
 		}
 		keys = append(keys, k)
 	}

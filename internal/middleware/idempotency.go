@@ -174,6 +174,11 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		rec := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 
+		// Default to 200 if handler never called WriteHeader (per net/http spec)
+		if !rec.wroteHeader {
+			rec.statusCode = http.StatusOK
+		}
+
 		// Only cache successful (2xx) responses within size bounds.
 		// Error responses are not cached to prevent "sticky failure" attacks.
 		if rec.statusCode >= 200 && rec.statusCode < 300 && !rec.overflow && len(rec.body) <= maxIdempotencyBodyLen {

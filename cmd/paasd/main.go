@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"log"
 	"net/http"
@@ -52,9 +53,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to read master key from %s: %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
 	}
-	masterKey := []byte(strings.TrimSpace(string(masterKeyData)))
+	masterKeyHex := strings.TrimSpace(string(masterKeyData))
+	masterKey, err := hex.DecodeString(masterKeyHex)
+	if err != nil {
+		log.Fatalf("master key in %s must be hex-encoded (got invalid hex): %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
+	}
 	if len(masterKey) < 32 {
-		log.Fatalf("master key in %s must be at least 32 bytes after trimming whitespace (got %d).\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, len(masterKey), *masterKeyPath)
+		log.Fatalf("master key in %s must be at least 32 bytes after hex decoding (got %d bytes from %d hex chars).\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, len(masterKey), len(masterKeyHex), *masterKeyPath)
 	}
 
 	// Open databases

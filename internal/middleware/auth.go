@@ -96,56 +96,52 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 			}
 			token := parts[1]
 
-			if len(token) < 8 || len(token) > 256 {
+			// Token format: "keyID.secret" for O(1) lookup
+			dotIdx := strings.IndexByte(token, '.')
+			if dotIdx < 1 || dotIdx >= len(token)-1 {
 				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
-			prefix := token[:8]
+			keyID := token[:dotIdx]
+			secret := token[dotIdx+1:]
+
+			if len(keyID) > 64 || len(secret) > 256 {
+				time.Sleep(authFailDelay)
+				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
 
 			now := time.Now().Unix()
-			rows, err := db.QueryContext(r.Context(),
-				`SELECT ak.id, ak.tenant_id, ak.key_hash, t.status
+			var tenantID, keyHash, status string
+			err := db.QueryRowContext(r.Context(),
+				`SELECT ak.tenant_id, ak.key_hash, t.status
 				 FROM api_keys ak
 				 JOIN tenants t ON t.id = ak.tenant_id
-				 WHERE ak.key_prefix = ?
+				 WHERE ak.id = ?
 				   AND ak.revoked_at IS NULL
 				   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
-				prefix, now,
-			)
+				keyID, now,
+			).Scan(&tenantID, &keyHash, &status)
 			if err != nil {
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-			defer rows.Close()
-
-			var matched bool
-			var tenantID string
-			var matchedKeyID string
-			for rows.Next() {
-				var keyID, tid, keyHash, status string
-				if err := rows.Scan(&keyID, &tid, &keyHash, &status); err != nil {
-					continue
-				}
-				if status != "active" {
-					continue
-				}
-				if crypto.VerifyAPIKey(keyHash, token, masterKey) {
-					matched = true
-					tenantID = tid
-					matchedKeyID = keyID
-					break
-				}
-			}
-
-			if !matched {
-				// Delay on failure to slow brute-force without IP-based blocking
 				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
 
-			tracker.maybeUpdate(matchedKeyID)
+			if status != "active" {
+				time.Sleep(authFailDelay)
+				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
+
+			if !crypto.VerifyAPIKey(keyHash, secret, masterKey) {
+				time.Sleep(authFailDelay)
+				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
+
+			tracker.maybeUpdate(keyID)
 
 			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))

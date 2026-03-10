@@ -66,20 +66,13 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey, err := crypto.GenerateAPIKey()
+	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
 	if err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Use HMAC-SHA256 for fast, constant-time API key hashing
 	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
-
-	keyID, err := generateID()
-	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
-	}
 	prefix := apiKey[:8]
 	now := time.Now().Unix()
 
@@ -99,11 +92,14 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Return token in format "keyID.secret" for O(1) lookup
+	token := keyID + "." + apiKey
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(CreateKeyResponse{
 		ID:      keyID,
 		Name:    req.Name,
-		APIKey:  apiKey,
+		APIKey:  token,
 		Prefix:  prefix,
 		Expires: expiresAt,
 	})

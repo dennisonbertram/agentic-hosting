@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -42,12 +40,6 @@ type UpdateTenantRequest struct {
 }
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-
-var bootstrapToken string
-
-func init() {
-	bootstrapToken = strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
-}
 
 type registrationLimiter struct {
 	mu             sync.Mutex
@@ -150,10 +142,10 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bootstrap token gate
-	if bootstrapToken != "" {
+	// Bootstrap token gate — uses Server field, not env
+	if s.bootstrapToken != "" {
 		provided := r.Header.Get("X-Bootstrap-Token")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(bootstrapToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.bootstrapToken)) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
@@ -216,19 +208,13 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey, err := crypto.GenerateAPIKey()
+	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
 	if err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
 	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
-
-	keyID, err := generateID()
-	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
-	}
 	prefix := apiKey[:8]
 
 	_, err = tx.Exec(
@@ -246,10 +232,13 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Return token in format "keyID.secret" for O(1) lookup
+	token := keyID + "." + apiKey
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(RegisterResponse{
 		TenantID: tenantID,
-		APIKey:   apiKey,
+		APIKey:   token,
 	})
 }
 

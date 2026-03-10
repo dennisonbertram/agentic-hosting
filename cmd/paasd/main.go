@@ -48,11 +48,23 @@ func main() {
 	}
 	defer store.Close()
 
-	// Create server
-	srv := api.NewServer(store, masterKey[:32], *devMode)
+	// Create server — pass bootstrap token via config, not env
+	srv := api.NewServer(api.ServerConfig{
+		Store:          store,
+		MasterKey:      masterKey[:32],
+		DevMode:        *devMode,
+		BootstrapToken: bootstrapToken,
+	})
+
+	// Bind to 127.0.0.1 in production (only Traefik can reach it).
+	// In dev mode, bind to all interfaces for direct testing.
+	listenAddr := "127.0.0.1:" + *port
+	if *devMode {
+		listenAddr = ":" + *port
+	}
 
 	httpServer := &http.Server{
-		Addr:              ":" + *port,
+		Addr:              listenAddr,
 		Handler:           srv,
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -70,11 +82,10 @@ func main() {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
-	log.Printf("paasd listening on :%s", *port)
+	log.Printf("paasd listening on %s", listenAddr)
 	if *devMode {
-		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled")
+		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled, binding to all interfaces")
 	}
-	log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
 
 	<-done
 	log.Println("shutting down...")

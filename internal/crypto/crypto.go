@@ -95,10 +95,27 @@ func VerifyAPIKey(storedHash, key string, secret []byte) bool {
 	return hmac.Equal([]byte(storedHash), []byte(computed))
 }
 
+// GenerateAPIKey generates a random 64-char hex API key secret.
 func GenerateAPIKey() (string, error) {
 	b := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {
 		return "", fmt.Errorf("generate api key: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// GenerateAPIKeyWithID generates an API key secret and a unique key ID.
+// Returns (secret, keyID, error). The caller combines them as "keyID.secret"
+// in the token given to the user, enabling O(1) lookup by key ID.
+func GenerateAPIKeyWithID() (string, string, error) {
+	secret, err := GenerateAPIKey()
+	if err != nil {
+		return "", "", err
+	}
+	idBytes := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
+		return "", "", fmt.Errorf("generate key id: %w", err)
+	}
+	keyID := hex.EncodeToString(idBytes)
+	return secret, keyID, nil
 }

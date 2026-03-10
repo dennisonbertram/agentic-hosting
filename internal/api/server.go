@@ -11,18 +11,27 @@ import (
 	"github.com/paasd/paasd/internal/middleware"
 )
 
-type Server struct {
-	store     *db.Store
-	masterKey []byte
-	devMode   bool
-	router    chi.Router
+type ServerConfig struct {
+	Store          *db.Store
+	MasterKey      []byte
+	DevMode        bool
+	BootstrapToken string
 }
 
-func NewServer(store *db.Store, masterKey []byte, devMode bool) *Server {
+type Server struct {
+	store          *db.Store
+	masterKey      []byte
+	devMode        bool
+	bootstrapToken string
+	router         chi.Router
+}
+
+func NewServer(cfg ServerConfig) *Server {
 	s := &Server{
-		store:     store,
-		masterKey: masterKey,
-		devMode:   devMode,
+		store:          cfg.Store,
+		masterKey:      cfg.MasterKey,
+		devMode:        cfg.DevMode,
+		bootstrapToken: cfg.BootstrapToken,
 	}
 	s.setupRoutes()
 	return s
@@ -38,7 +47,8 @@ func (s *Server) setupRoutes() {
 	r.Use(jsonContentType)
 	r.Use(maxBodySize(1 << 20))
 
-	// Enforce HTTPS via X-Forwarded-Proto (Traefik sets this)
+	// Enforce HTTPS via X-Forwarded-Proto (Traefik sets this).
+	// Server binds to 127.0.0.1 only, so direct access is impossible.
 	if !s.devMode {
 		r.Use(requireHTTPS)
 	}
@@ -75,7 +85,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ListenAndServe(addr string) error {
 	log.Printf("starting server on %s", addr)
-	log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
+	if !s.devMode {
+		log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
+	}
 	return http.ListenAndServe(addr, s)
 }
 
@@ -97,7 +109,8 @@ func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 }
 
 // requireHTTPS rejects requests not arriving via TLS-terminating proxy.
-// Traefik sets X-Forwarded-Proto: https for all TLS-terminated connections.
+// Combined with binding to 127.0.0.1, this ensures the service is only
+// accessible through Traefik which sets X-Forwarded-Proto.
 func requireHTTPS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proto := r.Header.Get("X-Forwarded-Proto")

@@ -82,6 +82,10 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 
 	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
 	// Use keyID prefix as the display hint, not the secret's prefix
+	if len(keyID) < 8 {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	prefix := keyID[:8]
 	now := time.Now().Unix()
 

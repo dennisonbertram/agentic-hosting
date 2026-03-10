@@ -199,8 +199,12 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 					   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
 					keyID, now,
 				).Scan(&tenantID, &keyHash, &status, &expiresAt)
-				if err != nil {
+				if err == sql.ErrNoRows {
 					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+					return
+				}
+				if err != nil {
+					writeJSONError(w, http.StatusServiceUnavailable, "service temporarily unavailable")
 					return
 				}
 

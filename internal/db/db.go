@@ -83,8 +83,14 @@ func (s *Store) runMigrations() error {
 			continue
 		}
 
+		// Migration files must be prefixed with their target database.
+		// Files containing "metering" in name target MeteringDB, all others target StateDB.
 		var target *sql.DB
-		if strings.Contains(entry.Name(), "metering") {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		if strings.HasPrefix(name, "metering_") || strings.Contains(name, "_metering") {
 			target = s.MeteringDB
 		} else {
 			target = s.StateDB

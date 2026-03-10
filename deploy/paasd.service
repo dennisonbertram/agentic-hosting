@@ -7,6 +7,7 @@ Requires=docker.service
 Type=simple
 User=paasd
 Group=paasd
+SupplementaryGroups=docker
 EnvironmentFile=-/etc/default/paasd
 ExecStart=/usr/local/bin/paasd serve \
   --port 8080 \
@@ -17,6 +18,8 @@ RestartSec=5s
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=paasd
+
+StateDirectory=paasd
 
 # Security hardening
 UMask=0077
@@ -32,7 +35,7 @@ LockPersonality=yes
 PrivateDevices=yes
 RestrictNamespaces=yes
 ProtectKernelLogs=yes
-ReadWritePaths=/var/lib/paasd /etc/traefik/dynamic
+ReadWritePaths=/var/lib/paasd /etc/traefik/dynamic/paasd.yml
 
 [Install]
 WantedBy=multi-user.target

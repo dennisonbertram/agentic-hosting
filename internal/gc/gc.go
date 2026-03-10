@@ -68,7 +68,10 @@ func (g *GC) safeCollect(ctx context.Context) {
 			log.Printf("gc: PANIC recovered: %v\n%s", rec, string(debug.Stack()))
 		}
 	}()
-	if err := g.collectOnce(ctx); err != nil {
+	// Per-tick timeout prevents a hung Docker call from stalling GC forever.
+	tickCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if err := g.collectOnce(tickCtx); err != nil {
 		log.Printf("gc: error: %v", err)
 	}
 }

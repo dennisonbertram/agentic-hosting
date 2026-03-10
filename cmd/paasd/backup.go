@@ -2,12 +2,15 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/paasd/paasd/internal/diskcheck"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -17,6 +20,11 @@ func runBackup(dbPath string) {
 	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		log.Fatalf("create backup dir: %v", err)
+	}
+
+	// Check disk space before backup to avoid filling disk
+	if err := diskcheck.Check(backupDir, 80, 90); err != nil {
+		log.Fatalf("disk check before backup: %v", err)
 	}
 
 	ts := time.Now().Format("20060102-150405")
@@ -52,7 +60,10 @@ func backupSQLite(srcDB, dstGz string) error {
 	defer os.Remove(tmpDB) // clean up intermediate file
 
 	// VACUUM INTO creates a consistent, standalone copy of the database
-	_, err = db.Exec(fmt.Sprintf("VACUUM INTO '%s'", tmpDB))
+	// Use a 5-minute timeout to prevent hanging on busy/locked DB.
+	vacuumCtx, vacuumCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer vacuumCancel()
+	_, err = db.ExecContext(vacuumCtx, fmt.Sprintf("VACUUM INTO '%s'", tmpDB))
 	if err != nil {
 		return fmt.Errorf("vacuum into: %w", err)
 	}

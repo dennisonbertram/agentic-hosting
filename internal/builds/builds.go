@@ -123,7 +123,7 @@ func ImageTag(tenantID, serviceID, buildID string) string {
 // StartBuild creates a build record and starts the build asynchronously.
 func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, req StartBuildRequest) (*Build, error) {
 	// Check disk space before starting build
-	if err := diskcheck.Check("/var/lib/paasd", 80, 90); err != nil {
+	if err := diskcheck.CheckAll([]string{"/var/lib/paasd", "/var/lib/docker"}, 80, 90); err != nil {
 		return nil, fmt.Errorf("disk check: %w", err)
 	}
 

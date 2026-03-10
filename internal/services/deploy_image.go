@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+
+	"github.com/paasd/paasd/internal/diskcheck"
 	"log"
 	"time"
 
@@ -32,6 +34,11 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		defer func() { <-m.deploySem }()
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+
+	// Check disk space before deploy
+	if err := diskcheck.CheckAll([]string{"/var/lib/paasd", "/var/lib/docker"}, 80, 90); err != nil {
+		return fmt.Errorf("disk check: %w", err)
 	}
 
 	svc, err := m.getOwned(ctx, tenantID, serviceID)

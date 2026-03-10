@@ -114,7 +114,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	// Check disk space before provisioning
-	if err := diskcheck.Check("/var/lib/paasd", 80, 90); err != nil {
+	if err := diskcheck.CheckAll([]string{"/var/lib/paasd", "/var/lib/docker"}, 80, 90); err != nil {
 		return nil, fmt.Errorf("disk check: %w", err)
 	}
 

@@ -53,7 +53,10 @@ func (r *Reconciler) safeReconcile(ctx context.Context) {
 			log.Printf("reconciler: PANIC recovered: %v\n%s", rec, string(debug.Stack()))
 		}
 	}()
-	if err := r.reconcileOnce(ctx); err != nil {
+	// Per-tick timeout prevents a hung Docker call from stalling reconciliation forever.
+	tickCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := r.reconcileOnce(tickCtx); err != nil {
 		log.Printf("reconciler: error: %v", err)
 	}
 }
@@ -151,8 +154,9 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			now := time.Now().Unix()
 			// Proper sliding window circuit breaker:
 			// crash_window_start tracks when the current crash window began.
-			// If the window has expired (>= 600s since window start), reset to 1.
+			// If the window has expired (>= 600s since window start), reset to 1 and close circuit.
 			// If within window, increment. Open circuit at 5 crashes in one window.
+			// When window resets, circuit_open is explicitly set to 0 (auto-close).
 			_, err := r.db.ExecContext(ctx, `
 				UPDATE services SET
 					status = 'crashed',
@@ -165,21 +169,26 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						ELSE crash_count + 1
 					END,
 					circuit_open = CASE
-						WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 AND crash_count + 1 >= 5 THEN 1
+						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 0
+						WHEN crash_count + 1 >= 5 THEN 1
 						ELSE circuit_open
 					END,
 					last_crashed_at = ?,
 					last_error = ?,
 					updated_at = ?
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, now, now, crashReason, now, s.id, s.tenantID)
+				now, now, now, now, now, now, crashReason, now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
 			} else {
 				var circuitOpen int
 				r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
 				if circuitOpen == 1 {
-					log.Printf("reconciler: service %s circuit breaker OPEN", s.id)
+					log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
+					// CRITICAL: Actually stop the container when circuit opens.
+					// Docker's RestartPolicyUnlessStopped will keep restarting it otherwise.
+					_ = r.docker.StopContainer(ctx, s.containerID)
+					_ = r.docker.RemoveContainer(ctx, s.containerID)
 				}
 				log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
 				fixed++
@@ -243,6 +252,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	// 4. Repair split-brain: find containers with paasd.service label that exist
 	// in Docker but whose container_id is not in the DB (e.g. crash after RunContainer
 	// but before DB update). Update the DB to point to the actual container.
+	// Security: verify the container name matches the expected pattern paasd-<tenant>-<service>
+	// to prevent label spoofing attacks.
 	allSvcContainers, listErr := r.docker.ListContainersByLabel(ctx, "paasd.service", "")
 	if listErr == nil {
 		for _, cid := range allSvcContainers {
@@ -250,7 +261,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			if inspectErr != nil {
 				continue
 			}
-			// Get service ID and tenant ID from container labels
+			// Get service ID, tenant ID, and container name from labels
 			labels := r.docker.GetContainerLabels(ctx, cid)
 			if labels == nil {
 				continue
@@ -258,6 +269,15 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			svcID := labels["paasd.service"]
 			tenantID := labels["paasd.tenant"]
 			if svcID == "" || tenantID == "" {
+				continue
+			}
+			// Security: verify container name matches expected pattern to prevent
+			// label spoofing by attackers with Docker access
+			containerName := r.docker.GetContainerName(ctx, cid)
+			expectedName := fmt.Sprintf("paasd-%s-%s", tenantID, svcID)
+			if containerName != expectedName && containerName != "/"+expectedName {
+				log.Printf("reconciler: SECURITY: container %s has paasd labels but name %q doesn't match expected %q; skipping",
+					cid[:12], containerName, expectedName)
 				continue
 			}
 			// Check if DB has a different or empty container_id for this service

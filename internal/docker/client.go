@@ -321,6 +321,15 @@ func (c *Client) GetContainerLabels(ctx context.Context, containerID string) map
 	return info.Config.Labels
 }
 
+// GetContainerName returns the name of a container, or empty string on error.
+func (c *Client) GetContainerName(ctx context.Context, containerID string) string {
+	info, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return ""
+	}
+	return info.Name
+}
+
 // containerName generates a deterministic container name from tenant and service IDs.
 func containerName(tenantID, serviceID string) string {
 	return fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)

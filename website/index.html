@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>paasd — Agentic PaaS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0d;
+      --surface: #141414;
+      --border: #222;
+      --text: #e8e8e8;
+      --muted: #666;
+      --accent: #00ff88;
+      --accent-dim: rgba(0,255,136,0.1);
+      --font: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .logo {
+      font-family: var(--font);
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: -0.02em;
+    }
+
+    .logo span { color: var(--muted); }
+
+    nav { display: flex; gap: 1.5rem; }
+    nav a { color: var(--muted); font-size: 0.9rem; }
+    nav a:hover { color: var(--text); text-decoration: none; }
+
+    main { max-width: 860px; margin: 0 auto; padding: 5rem 2rem 4rem; }
+
+    .tag {
+      display: inline-block;
+      font-family: var(--font);
+      font-size: 0.72rem;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 0.2em 0.6em;
+      border-radius: 3px;
+      margin-bottom: 1.5rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      font-size: clamp(2.2rem, 5vw, 3.5rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      margin-bottom: 1.25rem;
+    }
+
+    h1 em {
+      font-style: normal;
+      color: var(--accent);
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 560px;
+      margin-bottom: 2.5rem;
+    }
+
+    .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 4rem; }
+
+    .btn {
+      display: inline-block;
+      padding: 0.65em 1.4em;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; text-decoration: none; }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+
+    .terminal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 4rem;
+    }
+
+    .terminal-bar {
+      background: #1a1a1a;
+      border-bottom: 1px solid var(--border);
+      padding: 0.6rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #febc2e; }
+    .dot-g { background: #28c840; }
+
+    .terminal-title {
+      font-family: var(--font);
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .terminal-body {
+      padding: 1.25rem 1.5rem;
+      font-family: var(--font);
+      font-size: 0.82rem;
+      line-height: 2;
+    }
+
+    .cmd::before { content: "$ "; color: var(--accent); }
+    .cmd { color: var(--text); }
+    .out { color: var(--muted); }
+    .hi { color: var(--accent); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 4rem;
+    }
+
+    .card {
+      background: var(--surface);
+      padding: 1.5rem;
+    }
+
+    .card-icon { font-size: 1.4rem; margin-bottom: 0.75rem; }
+
+    .card h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.4rem;
+    }
+
+    .card p {
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .stack {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 4rem;
+    }
+
+    .pill {
+      font-family: var(--font);
+      font-size: 0.75rem;
+      padding: 0.3em 0.75em;
+      border-radius: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .section-label {
+      font-family: var(--font);
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1rem;
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 1.5rem 2rem;
+      text-align: center;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">paasd<span>/daemon</span></div>
+  <nav>
+    <a href="https://github.com/dennisonbertram/agentic-paasd">GitHub</a>
+    <a href="https://github.com/dennisonbertram/agentic-paasd/blob/main/AGENT_RUNBOOK.md">Runbook</a>
+    <a href="https://github.com/dennisonbertram/agentic-paasd/blob/main/README.md">Docs</a>
+  </nav>
+</header>
+
+<main>
+  <div class="tag">Self-hosted PaaS</div>
+
+  <h1>Deploy apps.<br><em>No dashboard required.</em></h1>
+
+  <p class="subtitle">
+    paasd is a bare-metal PaaS designed for AI agents. REST API only --
+    no web UI, no click-ops. Build from git, provision databases, route traffic. All via curl.
+  </p>
+
+  <div class="actions">
+    <a href="https://github.com/dennisonbertram/agentic-paasd" class="btn btn-primary">View on GitHub</a>
+    <a href="https://github.com/dennisonbertram/agentic-paasd/blob/main/AGENT_RUNBOOK.md" class="btn btn-secondary">Agent Runbook</a>
+  </div>
+
+  <div class="terminal">
+    <div class="terminal-bar">
+      <div class="dot dot-r"></div>
+      <div class="dot dot-y"></div>
+      <div class="dot dot-g"></div>
+      <div class="terminal-title">paasd quickstart</div>
+    </div>
+    <div class="terminal-body">
+      <div class="cmd">curl -X POST $BASE_URL/v1/tenants/register \</div>
+      <div class="out">&nbsp;&nbsp;-H "X-Bootstrap-Token: $TOKEN" \</div>
+      <div class="out">&nbsp;&nbsp;-d '{"name":"my-app","email":"me@example.com"}'</div>
+      <div class="out">&nbsp;</div>
+      <div class="out">{"tenant_id":"ten_...", "api_key":"<span class="hi">keyid.secret</span>"}</div>
+      <div class="out">&nbsp;</div>
+      <div class="cmd">curl -X POST $BASE_URL/v1/services \</div>
+      <div class="out">&nbsp;&nbsp;-H "Authorization: Bearer $API_KEY" \</div>
+      <div class="out">&nbsp;&nbsp;-d '{"name":"web","image":"nginx:alpine","port":80}'</div>
+      <div class="out">&nbsp;</div>
+      <div class="out">{"id":"svc_...", "status":"<span class="hi">deploying</span>", "url":"https://web.example.com"}</div>
+    </div>
+  </div>
+
+  <p class="section-label">Features</p>
+  <div class="grid">
+    <div class="card">
+      <div class="card-icon">&#9889;</div>
+      <h3>Build from git</h3>
+      <p>Nixpacks auto-detects your stack. Push to GitHub, get a container. Zero config.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#128274;</div>
+      <h3>gVisor isolation</h3>
+      <p>Every container runs in a gVisor sandbox. Syscall interception, read-only rootfs, dropped capabilities.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#128452;</div>
+      <h3>Managed databases</h3>
+      <p>Provision Postgres or Redis in seconds. Encrypted connection strings returned immediately.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#128257;</div>
+      <h3>Self-healing</h3>
+      <p>Reconciler re-syncs every 60s. Circuit breaker stops crash loops. GC keeps the host clean.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#129302;</div>
+      <h3>Agentic-first</h3>
+      <p>Designed for AI agents. Idempotency keys, per-tenant rate limits, structured JSON everywhere.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#128230;</div>
+      <h3>Single binary</h3>
+      <p>One Go binary. SQLite for state. No Kubernetes, no etcd, no operator. Runs on any Linux box.</p>
+    </div>
+  </div>
+
+  <p class="section-label">Stack</p>
+  <div class="stack">
+    <span class="pill">Go</span>
+    <span class="pill">Docker</span>
+    <span class="pill">gVisor</span>
+    <span class="pill">Traefik</span>
+    <span class="pill">Nixpacks</span>
+    <span class="pill">SQLite</span>
+    <span class="pill">chi</span>
+    <span class="pill">AES-256-GCM</span>
+  </div>
+
+  <p class="section-label">Claude Code</p>
+  <div class="terminal">
+    <div class="terminal-bar">
+      <div class="dot dot-r"></div>
+      <div class="dot dot-y"></div>
+      <div class="dot dot-g"></div>
+      <div class="terminal-title">slash commands</div>
+    </div>
+    <div class="terminal-body">
+      <div class="cmd" style="color:#888"># Install the skill</div>
+      <div class="cmd">cp .claude/skills/paasd/SKILL.md ~/.claude/skills/paasd/</div>
+      <div class="out">&nbsp;</div>
+      <div class="cmd" style="color:#888"># Then use slash commands in Claude Code</div>
+      <div class="cmd">/paasd-deploy https://github.com/org/app web 3000</div>
+      <div class="out"><span class="hi">✓</span> Building with Nixpacks... deploying... <span class="hi">running</span></div>
+      <div class="out">&nbsp;</div>
+      <div class="cmd">/paasd-db web postgres</div>
+      <div class="out"><span class="hi">✓</span> Postgres provisioned → DATABASE_URL set → service restarted</div>
+      <div class="out">&nbsp;</div>
+      <div class="cmd">/paasd-status</div>
+      <div class="out">Disk: 24%  Docker: ok  gVisor: ok</div>
+      <div class="out"><span class="hi">✓</span> web &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;running</div>
+      <div class="out"><span class="hi">✓</span> web-postgres &nbsp;&nbsp;&nbsp;running</div>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-bottom:4rem">
+    <div class="card">
+      <div class="card-icon">🤖</div>
+      <h3>/paasd-deploy</h3>
+      <p>Deploy from a git URL (Nixpacks build) or Docker image. Streams build logs in real time.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📊</div>
+      <h3>/paasd-status</h3>
+      <p>Full dashboard — disk usage, all services, databases, and circuit breaker state.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🗄️</div>
+      <h3>/paasd-db</h3>
+      <p>Provision Postgres or Redis, fetch the connection string, and wire it to a service automatically.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📋</div>
+      <h3>/paasd-logs</h3>
+      <p>Stream build logs for any service by name. No IDs to look up.</p>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  paasd -- open source, MIT license --
+  <a href="https://github.com/dennisonbertram/agentic-paasd">github.com/dennisonbertram/agentic-paasd</a>
+</footer>
+
+</body>
+</html>

@@ -14,9 +14,18 @@ import (
 	"github.com/paasd/paasd/internal/services"
 )
 
-func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+// requireSvcManager is a guard that returns 503 if svcManager is nil.
+// All service handlers must call this before proceeding.
+func (s *Server) requireSvcManager(w http.ResponseWriter) bool {
 	if s.svcManager == nil {
-		writeError(w, http.StatusServiceUnavailable, "service deployment is not configured")
+		writeError(w, http.StatusServiceUnavailable, "service management is not available (Docker not configured)")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
 		return
 	}
 	tenantID := middleware.GetTenantID(r.Context())
@@ -83,6 +92,9 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 
 	svcs, err := s.svcManager.List(r.Context(), tenantID)
@@ -97,62 +109,111 @@ func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	svc, err := s.svcManager.Get(r.Context(), tenantID, serviceID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get service")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, svc)
 }
 
 func (s *Server) handleServiceDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Delete(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete service: "+err.Error())
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Start(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "tenant") {
+			writeError(w, http.StatusForbidden, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
 }
 
 func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Stop(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
 func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
 	if err := s.svcManager.Restart(r.Context(), tenantID, serviceID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, msg)
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, msg)
+		} else {
+			writeError(w, http.StatusBadRequest, msg)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
 }
 
 func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
@@ -166,7 +227,14 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 
 	reader, err := s.svcManager.Logs(r.Context(), tenantID, serviceID, follow, tail)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found or no container")
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else if strings.Contains(msg, "no container") {
+			writeError(w, http.StatusConflict, "service has no container yet")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get logs")
+		}
 		return
 	}
 	defer reader.Close()
@@ -196,19 +264,29 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceEnvGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 	reveal := r.URL.Query().Get("reveal") == "true"
 
 	vars, err := s.svcManager.GetEnv(r.Context(), tenantID, serviceID, reveal)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "service not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get env vars")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, vars)
 }
 
 func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
@@ -251,12 +329,19 @@ func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceEnvDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 	key := chi.URLParam(r, "key")
 
 	if err := s.svcManager.DeleteEnv(r.Context(), tenantID, serviceID, key); err != nil {
-		writeError(w, http.StatusNotFound, "env var not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "env var not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete env var")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

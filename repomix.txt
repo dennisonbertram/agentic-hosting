@@ -1,0 +1,3649 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+cmd/
+  paasd/
+    main.go
+internal/
+  api/
+    auth.go
+    health.go
+    server.go
+    services.go
+    tenants.go
+  crypto/
+    crypto.go
+  db/
+    migrations/
+      metering_001_init.sql
+      state_001_init.sql
+      state_002_service_env.sql
+      state_003_last_error.sql
+    db.go
+    schema.go
+  docker/
+    client.go
+  httpx/
+    httpx.go
+  middleware/
+    auth.go
+    helpers.go
+    idempotency.go
+    ratelimit.go
+  services/
+    services.go
+.gitignore
+go.mod
+Makefile
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="internal/db/migrations/state_001_init.sql">
+CREATE TABLE IF NOT EXISTS tenants (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  name TEXT NOT NULL,
+  key_prefix TEXT NOT NULL,
+  key_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  expires_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS services (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'stopped',
+  image TEXT,
+  source_type TEXT,
+  source_ref TEXT,
+  container_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tenant_quotas (
+  tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),
+  max_services INTEGER NOT NULL DEFAULT 5,
+  max_databases INTEGER NOT NULL DEFAULT 3,
+  max_memory_mb INTEGER NOT NULL DEFAULT 2048,
+  max_cpu_cores REAL NOT NULL DEFAULT 2.0,
+  max_disk_gb INTEGER NOT NULL DEFAULT 20,
+  api_rate_limit INTEGER NOT NULL DEFAULT 100
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE INDEX IF NOT EXISTS idx_services_tenant ON services(tenant_id);
+</file>
+
+<file path="internal/db/migrations/state_002_service_env.sql">
+-- Add port column to services table
+ALTER TABLE services ADD COLUMN port INTEGER NOT NULL DEFAULT 8000;
+
+-- Environment variables for services, encrypted with AES-256-GCM
+CREATE TABLE IF NOT EXISTS service_env (
+  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value_encrypted TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (service_id, key)
+);
+</file>
+
+<file path="internal/db/migrations/state_003_last_error.sql">
+-- Add last_error column to services for deploy error surfacing.
+ALTER TABLE services ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+</file>
+
+<file path="internal/db/schema.go">
+package db
+
+import "embed"
+
+//go:embed migrations/*.sql
+var MigrationsFS embed.FS
+</file>
+
+<file path="Makefile">
+.PHONY: build run clean
+
+build:
+	CGO_ENABLED=1 go build -o bin/paasd ./cmd/paasd
+
+run: build
+	./bin/paasd --port 8080 --db-path /var/lib/paasd/paasd.db --master-key-path /var/lib/paasd/master.key
+
+clean:
+	rm -rf bin/
+</file>
+
+<file path="README.md">
+# agentic-paasd
+
+An agentic-first self-hosted PaaS built for bare metal servers.
+
+## Stack
+- **Runtime**: Docker + gVisor (syscall interception for tenant isolation)
+- **Routing**: Traefik (automatic HTTPS, service discovery)
+- **Builds**: Nixpacks (source → container image, zero config)
+- **Data**: SQLite (state + metering, WAL mode)
+- **Control plane**: Single Go binary (`paasd`)
+
+## Design
+- No web dashboard — designed to be operated by AI agents via API
+- One happy path per primitive (Postgres, Redis, MinIO, env vars)
+- Multi-tenant with API key auth and namespace isolation
+- Build sandboxing via gVisor-restricted containers
+
+## Development
+See `docs/investigations/agentic-paas-design-v2.md` for the full architecture.
+
+```bash
+make build
+./bin/paasd --port 8080
+```
+</file>
+
+<file path="internal/db/migrations/metering_001_init.sql">
+CREATE TABLE IF NOT EXISTS usage_events (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  service_id TEXT,
+  event_type TEXT NOT NULL,
+  cpu_seconds REAL NOT NULL DEFAULT 0,
+  memory_mb_seconds REAL NOT NULL DEFAULT 0,
+  network_ingress_bytes INTEGER NOT NULL DEFAULT 0,
+  network_egress_bytes INTEGER NOT NULL DEFAULT 0,
+  disk_bytes INTEGER NOT NULL DEFAULT 0,
+  recorded_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_daily (
+  tenant_id TEXT NOT NULL,
+  service_id TEXT,
+  date TEXT NOT NULL,
+  cpu_seconds REAL NOT NULL DEFAULT 0,
+  memory_mb_seconds REAL NOT NULL DEFAULT 0,
+  network_ingress_bytes INTEGER NOT NULL DEFAULT 0,
+  network_egress_bytes INTEGER NOT NULL DEFAULT 0,
+  disk_bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, date, service_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_tenant ON usage_events(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_usage_events_recorded ON usage_events(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_tenant ON usage_daily(tenant_id, date);
+</file>
+
+<file path="internal/middleware/helpers.go">
+package middleware
+
+import (
+	"net/http"
+
+	"github.com/paasd/paasd/internal/httpx"
+)
+
+// writeJSONError delegates to the shared httpx.WriteError for consistent
+// error formatting across both middleware and API handler packages.
+func writeJSONError(w http.ResponseWriter, code int, message string) {
+	httpx.WriteError(w, code, message)
+}
+</file>
+
+<file path="go.mod">
+module github.com/paasd/paasd
+
+go 1.25.0
+
+require (
+	github.com/go-chi/chi/v5 v5.2.5
+	github.com/mattn/go-sqlite3 v1.14.34
+	golang.org/x/crypto v0.48.0
+	golang.org/x/time v0.15.0
+)
+
+require (
+	github.com/Microsoft/go-winio v0.4.21 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/containerd/log v0.1.0 // indirect
+	github.com/distribution/reference v0.6.0 // indirect
+	github.com/docker/docker v28.0.0+incompatible
+	github.com/docker/go-connections v0.6.0 // indirect
+	github.com/docker/go-units v0.5.0 // indirect
+	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/term v0.5.2 // indirect
+	github.com/morikuni/aec v1.1.0 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
+	github.com/opencontainers/image-spec v1.1.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
+	go.opentelemetry.io/otel v1.42.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.42.0 // indirect
+	go.opentelemetry.io/otel/metric v1.42.0 // indirect
+	go.opentelemetry.io/otel/trace v1.42.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	gotest.tools/v3 v3.5.2 // indirect
+)
+</file>
+
+<file path="internal/crypto/crypto.go">
+package crypto
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+func Encrypt(plaintext []byte, key []byte) (string, error) {
+	if len(key) < 32 {
+		return "", fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+	}
+	block, err := aes.NewCipher(key[:32])
+	if err != nil {
+		return "", fmt.Errorf("new cipher: %w", err)
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("new gcm: %w", err)
+	}
+
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("read nonce: %w", err)
+	}
+
+	ciphertext := aesGCM.Seal(nonce, nonce, plaintext, nil)
+	return hex.EncodeToString(ciphertext), nil
+}
+
+func Decrypt(ciphertextHex string, key []byte) ([]byte, error) {
+	if len(key) < 32 {
+		return nil, fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+	}
+	ciphertext, err := hex.DecodeString(ciphertextHex)
+	if err != nil {
+		return nil, fmt.Errorf("hex decode: %w", err)
+	}
+
+	block, err := aes.NewCipher(key[:32])
+	if err != nil {
+		return nil, fmt.Errorf("new cipher: %w", err)
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("new gcm: %w", err)
+	}
+
+	nonceSize := aesGCM.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+
+	return plaintext, nil
+}
+
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("bcrypt hash: %w", err)
+	}
+	return string(hash), nil
+}
+
+func VerifyPassword(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// HashAPIKey produces a fast, constant-time-comparable hash for API key verification.
+// Uses HMAC-SHA256 with a server secret to prevent offline brute-force if DB is leaked.
+func HashAPIKey(key string, secret []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyAPIKey compares an API key against a stored HMAC hash in constant time.
+func VerifyAPIKey(storedHash, key string, secret []byte) bool {
+	computed := HashAPIKey(key, secret)
+	return hmac.Equal([]byte(storedHash), []byte(computed))
+}
+
+// GenerateAPIKey generates a random 64-char hex API key secret.
+func GenerateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("generate api key: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// GenerateAPIKeyWithID generates an API key secret and a unique key ID.
+// Returns (secret, keyID, error). The caller combines them as "keyID.secret"
+// in the token given to the user, enabling O(1) lookup by key ID.
+func GenerateAPIKeyWithID() (string, string, error) {
+	secret, err := GenerateAPIKey()
+	if err != nil {
+		return "", "", err
+	}
+	idBytes := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
+		return "", "", fmt.Errorf("generate key id: %w", err)
+	}
+	keyID := hex.EncodeToString(idBytes)
+	return secret, keyID, nil
+}
+</file>
+
+<file path="internal/httpx/httpx.go">
+// Package httpx provides shared HTTP response helpers used by both the api
+// and middleware packages to ensure consistent error formatting.
+package httpx
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+)
+
+// WriteError writes a consistent JSON error response with correct headers.
+// All error responses across the codebase should use this function.
+func WriteError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("httpx: failed to encode error response: %v", err)
+	}
+}
+
+// WriteJSON writes a JSON success response with correct headers and status code.
+// All success responses across the codebase should use this function.
+func WriteJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("httpx: failed to encode JSON response: %v", err)
+	}
+}
+</file>
+
+<file path=".gitignore">
+bin/
+*.db
+*.db-shm
+*.db-wal
+master.key
+*.key
+.env
+vendor/
+</file>
+
+<file path="internal/api/services.go">
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/paasd/paasd/internal/middleware"
+	"github.com/paasd/paasd/internal/services"
+)
+
+func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
+	if s.svcManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "service deployment is not configured")
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+
+	var req services.CreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if len(req.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
+		return
+	}
+
+	// Validate image format and registry allowlist
+	if err := services.ValidateImage(req.Image); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate env vars if provided inline
+	if len(req.Env) > 0 {
+		if err := services.ValidateEnvVars(req.Env); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	svc, err := s.svcManager.Create(r.Context(), tenantID, req)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "service limit reached") {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
+		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if strings.Contains(msg, "tenant") {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create service")
+		return
+	}
+
+	// Deploy asynchronously — return immediately with status "deploying".
+	// Use context.Background() because r.Context() is canceled after the response.
+	go func(tid, sid string) {
+		if err := s.svcManager.Deploy(context.Background(), tid, sid); err != nil {
+			log.Printf("deploy failed for service %s: %v", sid, err)
+			return
+		}
+	}(tenantID, svc.ID)
+
+	svc.Status = "deploying"
+	writeJSON(w, http.StatusCreated, svc)
+}
+
+func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	svcs, err := s.svcManager.List(r.Context(), tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list services")
+		return
+	}
+	if svcs == nil {
+		svcs = []*services.Service{}
+	}
+	writeJSON(w, http.StatusOK, svcs)
+}
+
+func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	svc, err := s.svcManager.Get(r.Context(), tenantID, serviceID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "service not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, svc)
+}
+
+func (s *Server) handleServiceDelete(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	if err := s.svcManager.Delete(r.Context(), tenantID, serviceID); err != nil {
+		writeError(w, http.StatusNotFound, "service not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	if err := s.svcManager.Start(r.Context(), tenantID, serviceID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
+}
+
+func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	if err := s.svcManager.Stop(r.Context(), tenantID, serviceID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	if err := s.svcManager.Restart(r.Context(), tenantID, serviceID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
+}
+
+func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	follow := r.URL.Query().Get("follow") == "true"
+	tail := 100
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if v, err := strconv.Atoi(t); err == nil && v > 0 && v <= 10000 {
+			tail = v
+		}
+	}
+
+	reader, err := s.svcManager.Logs(r.Context(), tenantID, serviceID, follow, tail)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "service not found or no container")
+		return
+	}
+	defer reader.Close()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if follow {
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+	w.WriteHeader(http.StatusOK)
+
+	if f, ok := w.(http.Flusher); ok {
+		buf := make([]byte, 4096)
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				f.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, reader)
+	}
+}
+
+func (s *Server) handleServiceEnvGet(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+	reveal := r.URL.Query().Get("reveal") == "true"
+
+	vars, err := s.svcManager.GetEnv(r.Context(), tenantID, serviceID, reveal)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "service not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, vars)
+}
+
+func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	var vars map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&vars); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if len(vars) == 0 {
+		writeError(w, http.StatusBadRequest, "no environment variables provided")
+		return
+	}
+	if len(vars) > 100 {
+		writeError(w, http.StatusBadRequest, "too many environment variables (max 100)")
+		return
+	}
+
+	// Validate env var keys and values
+	if err := services.ValidateEnvVars(vars); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.svcManager.SetEnv(r.Context(), tenantID, serviceID, vars); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			writeError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		if strings.Contains(msg, "invalid") || strings.Contains(msg, "not allowed") || strings.Contains(msg, "env var") {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to set env vars")
+		return
+	}
+	log.Printf("AUDIT: tenant=%s set env vars for service=%s keys=%v", tenantID, serviceID, envKeys(vars))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "note": "restart service for changes to take effect"})
+}
+
+func (s *Server) handleServiceEnvDelete(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+	key := chi.URLParam(r, "key")
+
+	if err := s.svcManager.DeleteEnv(r.Context(), tenantID, serviceID, key); err != nil {
+		writeError(w, http.StatusNotFound, "env var not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// envKeys extracts just the keys from a map for audit logging (no values).
+func envKeys(vars map[string]string) []string {
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	return keys
+}
+</file>
+
+<file path="internal/docker/client.go">
+// Package docker wraps the Docker Engine API for paasd container lifecycle.
+package docker
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+)
+
+// Client wraps the Docker Engine API client with paasd-specific defaults.
+type Client struct {
+	cli *client.Client
+}
+
+// NewClient creates a Docker API client using the default socket.
+func NewClient() (*Client, error) {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return nil, fmt.Errorf("docker client: %w", err)
+	}
+	return &Client{cli: cli}, nil
+}
+
+// Close releases the Docker client resources.
+func (c *Client) Close() error {
+	return c.cli.Close()
+}
+
+// VerifyGVisorRuntime checks that the Docker daemon has gVisor (runsc) configured.
+// Returns an error if the runtime is not available.
+func (c *Client) VerifyGVisorRuntime(ctx context.Context) error {
+	info, err := c.cli.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("docker info: %w", err)
+	}
+	for name := range info.Runtimes {
+		if name == "runsc" {
+			return nil
+		}
+	}
+	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon; available runtimes: %v", runtimeNames(info.Runtimes))
+}
+
+// runtimeNames extracts runtime names from the map for error messages.
+func runtimeNames(runtimes map[string]system.RuntimeWithStatus) []string {
+	names := make([]string, 0, len(runtimes))
+	for k := range runtimes {
+		names = append(names, k)
+	}
+	return names
+}
+
+// ContainerInfo holds inspected container state.
+type ContainerInfo struct {
+	Status    string
+	StartedAt string
+	ExitCode  int
+}
+
+// EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
+func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error) {
+	networks, err := c.cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("list networks: %w", err)
+	}
+	for _, n := range networks {
+		if n.Name == name {
+			return n.ID, nil
+		}
+	}
+	// Internal bridge with ICC disabled:
+	// - Internal: no outbound internet access from containers
+	// - ICC disabled: containers on the same bridge cannot communicate with each other
+	// - Traefik is connected to this network for ingress routing
+	resp, err := c.cli.NetworkCreate(ctx, name, network.CreateOptions{
+		Driver:   "bridge",
+		Internal: true,
+		Options: map[string]string{
+			"com.docker.network.bridge.enable_icc": "false",
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create network %s: %w", name, err)
+	}
+	return resp.ID, nil
+}
+
+// ConnectNetwork connects a container to an additional network.
+func (c *Client) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
+	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+}
+
+// TenantNetworkName returns the deterministic network name for a tenant.
+func TenantNetworkName(tenantID string) string {
+	return "paasd-tenant-" + tenantID
+}
+
+// ResourceLimits holds per-container resource constraints from tenant quotas.
+type ResourceLimits struct {
+	MemoryMB int64
+	CPUCores float64
+}
+
+// RunContainer creates and starts a container with gVisor runtime.
+//
+// Network isolation architecture:
+//   - Container is placed on a per-tenant internal Docker network (Internal=true, ICC=false).
+//   - Internal network blocks all outbound internet access from containers.
+//   - ICC=false prevents containers on the same tenant bridge from communicating.
+//   - Traefik is connected to each per-tenant network for ingress routing.
+//   - Cross-tenant isolation: each tenant has a separate bridge network.
+//   - Defense-in-depth: gVisor (runsc) runtime, CapDrop ALL, no-new-privileges,
+//     ReadonlyRootfs, PidsLimit, MemorySwap=Memory (no swap).
+func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
+	name := containerName(tenantID, serviceID)
+
+	env := make([]string, 0, len(envVars))
+	for k, v := range envVars {
+		env = append(env, k+"="+v)
+	}
+
+	if port <= 0 {
+		port = 8000
+	}
+
+	labels := map[string]string{
+		"traefik.enable": "true",
+		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                     fmt.Sprintf("Host(`%s.localhost`)", serviceID),
+		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):              "web",
+		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
+		"paasd.tenant":  tenantID,
+		"paasd.service": serviceID,
+	}
+	for k, v := range extraLabels {
+		labels[k] = v
+	}
+
+	tenantNet := TenantNetworkName(tenantID)
+
+	// Apply resource limits from tenant quotas, with safe defaults
+	memoryBytes := int64(512 * 1024 * 1024) // default 512MB
+	nanoCPUs := int64(1_000_000_000)        // default 1 CPU
+	if limits != nil {
+		if limits.MemoryMB > 0 {
+			memoryBytes = limits.MemoryMB * 1024 * 1024
+		}
+		if limits.CPUCores > 0 {
+			nanoCPUs = int64(limits.CPUCores * 1_000_000_000)
+		}
+	}
+
+	hostCfg := &container.HostConfig{
+		Runtime: "runsc",
+		Resources: container.Resources{
+			Memory:     memoryBytes,
+			NanoCPUs:   nanoCPUs,
+			PidsLimit:  int64Ptr(256),
+			MemorySwap: memoryBytes, // no swap
+		},
+		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		NetworkMode:    container.NetworkMode(tenantNet),
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    []string{"no-new-privileges"},
+		ReadonlyRootfs: true,
+		Tmpfs: map[string]string{
+			"/tmp":     "rw,noexec,nosuid,size=64m",
+			"/var/run": "rw,noexec,nosuid,size=16m",
+		},
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx,
+		&container.Config{
+			Image:  img,
+			Env:    env,
+			Labels: labels,
+		},
+		hostCfg,
+		&network.NetworkingConfig{},
+		nil,
+		name,
+	)
+	if err != nil {
+		return "", fmt.Errorf("create container: %w", err)
+	}
+
+	// Connect Traefik to the per-tenant network for ingress routing.
+	// This is idempotent — Docker ignores if already connected.
+	// Note: Traefik gains L2 adjacency with tenant containers, but this is
+	// standard for Docker+Traefik deployments. The primary isolation boundaries
+	// are: gVisor runtime (syscall interception), CapDrop ALL, no-new-privileges,
+	// internal network (no outbound), ICC disabled (no inter-container comms).
+	traefikID, findErr := c.findTraefikContainer(ctx)
+	if findErr == nil && traefikID != "" {
+		_ = c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("start container: %w", err)
+	}
+
+	return resp.ID, nil
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+
+// findTraefikContainer finds the Traefik container by image or name.
+func (c *Client) findTraefikContainer(ctx context.Context) (string, error) {
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
+	if err != nil {
+		return "", err
+	}
+	for _, ctr := range containers {
+		if strings.Contains(ctr.Image, "traefik") {
+			return ctr.ID, nil
+		}
+		for _, name := range ctr.Names {
+			if strings.Contains(name, "traefik") {
+				return ctr.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("traefik container not found")
+}
+
+// StopContainer stops a running container with a 10s timeout.
+func (c *Client) StopContainer(ctx context.Context, containerID string) error {
+	timeout := 10
+	return c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+}
+
+// StartContainer starts a stopped container.
+func (c *Client) StartContainer(ctx context.Context, containerID string) error {
+	return c.cli.ContainerStart(ctx, containerID, container.StartOptions{})
+}
+
+// RemoveContainer force-removes a container.
+func (c *Client) RemoveContainer(ctx context.Context, containerID string) error {
+	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+}
+
+// LogsContainer returns a reader for container logs.
+func (c *Client) LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
+	tailStr := "all"
+	if tail > 0 {
+		tailStr = fmt.Sprintf("%d", tail)
+	}
+	return c.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     follow,
+		Tail:       tailStr,
+		Timestamps: true,
+	})
+}
+
+// InspectContainer returns the container's current state.
+func (c *Client) InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error) {
+	info, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect container: %w", err)
+	}
+	return &ContainerInfo{
+		Status:    strings.ToLower(info.State.Status),
+		StartedAt: info.State.StartedAt,
+		ExitCode:  info.State.ExitCode,
+	}, nil
+}
+
+// PullImage pulls an image with a 5-minute timeout.
+func (c *Client) PullImage(ctx context.Context, img string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	reader, err := c.cli.ImagePull(ctx, img, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull image %s: %w", img, err)
+	}
+	defer reader.Close()
+	_, _ = io.Copy(io.Discard, reader)
+	return nil
+}
+
+// ListContainersByLabel lists containers matching a label filter.
+func (c *Client) ListContainersByLabel(ctx context.Context, label, value string) ([]string, error) {
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{
+		All: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	var ids []string
+	for _, ctr := range containers {
+		if v, ok := ctr.Labels[label]; ok && v == value {
+			ids = append(ids, ctr.ID)
+		}
+	}
+	return ids, nil
+}
+
+// containerName generates a deterministic container name from tenant and service IDs.
+func containerName(tenantID, serviceID string) string {
+	return fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)
+}
+</file>
+
+<file path="internal/services/services.go">
+// Package services coordinates DB records with Docker containers.
+package services
+
+import (
+	"context"
+	cryptoRand "crypto/rand"
+	"database/sql"
+	"fmt"
+	"io"
+	"log"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/paasd/paasd/internal/crypto"
+	"github.com/paasd/paasd/internal/docker"
+)
+
+// Service represents a deployed service.
+type Service struct {
+	ID          string `json:"id"`
+	TenantID    string `json:"tenant_id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Image       string `json:"image"`
+	ContainerID string `json:"container_id,omitempty"`
+	Port        int    `json:"port"`
+	URL         string `json:"url,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+// CreateRequest holds parameters for creating a new service.
+type CreateRequest struct {
+	Name  string            `json:"name"`
+	Image string            `json:"image"`
+	Port  int               `json:"port"`
+	Env   map[string]string `json:"env"`
+}
+
+// maxConcurrentDeploys limits simultaneous deploy operations globally.
+const maxConcurrentDeploys = 5
+
+// maxQueuedDeploys limits how many deploys can be waiting for a slot.
+// If the queue is full, new deploy requests are rejected with backpressure.
+const maxQueuedDeploys = 20
+
+// imageAllowPattern restricts images to Docker Hub library (official) and
+// standard namespace/repo:tag format. Blocks registry prefixes (e.g., evil.com/img).
+var imageAllowPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)?(?::[a-zA-Z0-9._-]+)?$`)
+
+// envKeyPattern validates environment variable key names.
+var envKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,127}$`)
+
+// maxEnvValueLen is the maximum length of an environment variable value.
+const maxEnvValueLen = 32768 // 32KB
+
+// deniedEnvKeys are environment variable names that cannot be set by tenants.
+var deniedEnvKeys = map[string]bool{
+	"LD_PRELOAD":     true,
+	"LD_LIBRARY_PATH": true,
+	"PATH":           true,
+}
+
+// Manager coordinates service lifecycle between DB and Docker.
+type Manager struct {
+	db          *sql.DB
+	docker      *docker.Client
+	masterKey   []byte
+	deploySem   chan struct{} // bounded deploy concurrency
+	deployQueue chan struct{} // bounded queue for waiting deploys
+}
+
+// NewManager creates a service manager.
+func NewManager(db *sql.DB, docker *docker.Client, masterKey []byte) *Manager {
+	return &Manager{
+		db:          db,
+		docker:      docker,
+		masterKey:   masterKey,
+		deploySem:   make(chan struct{}, maxConcurrentDeploys),
+		deployQueue: make(chan struct{}, maxQueuedDeploys),
+	}
+}
+
+// checkTenantActive verifies the tenant is not suspended/deleted.
+// Returns an error if tenant is not in active state.
+func (m *Manager) checkTenantActive(ctx context.Context, tenantID string) error {
+	var status string
+	err := m.db.QueryRowContext(ctx,
+		`SELECT status FROM tenants WHERE id = ?`, tenantID,
+	).Scan(&status)
+	if err != nil {
+		return fmt.Errorf("tenant not found")
+	}
+	if status != "active" {
+		return fmt.Errorf("tenant is %s", status)
+	}
+	return nil
+}
+
+// ValidateImage checks that an image reference is allowed.
+func ValidateImage(img string) error {
+	if img == "" {
+		return fmt.Errorf("image is required")
+	}
+	if len(img) > 256 {
+		return fmt.Errorf("image reference too long")
+	}
+	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
+		prefix := img[:slashIdx]
+		if strings.ContainsAny(prefix, ".:") {
+			return fmt.Errorf("custom registries not allowed; use Docker Hub images only")
+		}
+	}
+	if !imageAllowPattern.MatchString(img) {
+		return fmt.Errorf("invalid image format")
+	}
+	return nil
+}
+
+// ValidateEnvVars checks env var keys and values for format and safety.
+func ValidateEnvVars(vars map[string]string) error {
+	for k, v := range vars {
+		if !envKeyPattern.MatchString(k) {
+			return fmt.Errorf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]{0,127}", k)
+		}
+		if deniedEnvKeys[strings.ToUpper(k)] {
+			return fmt.Errorf("env var %q is not allowed", k)
+		}
+		if len(v) > maxEnvValueLen {
+			return fmt.Errorf("env var %q value too long (max %d bytes)", k, maxEnvValueLen)
+		}
+		if strings.ContainsAny(v, "\x00") {
+			return fmt.Errorf("env var %q value contains null bytes", k)
+		}
+	}
+	return nil
+}
+
+// Create inserts a new service record (status=created, not yet running).
+// Enforces tenant quota (max_services).
+func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest) (*Service, error) {
+	if err := m.checkTenantActive(ctx, tenantID); err != nil {
+		return nil, err
+	}
+	if err := ValidateImage(req.Image); err != nil {
+		return nil, err
+	}
+
+	// Validate env vars if provided
+	if len(req.Env) > 0 {
+		if err := ValidateEnvVars(req.Env); err != nil {
+			return nil, err
+		}
+	}
+
+	// Enforce tenant quota
+	var maxServices int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT max_services FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxServices)
+	if err != nil {
+		return nil, fmt.Errorf("check quota: %w", err)
+	}
+
+	var currentCount int
+	err = m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`, tenantID,
+	).Scan(&currentCount)
+	if err != nil {
+		return nil, fmt.Errorf("count services: %w", err)
+	}
+	if currentCount >= maxServices {
+		return nil, fmt.Errorf("service limit reached (max %d)", maxServices)
+	}
+
+	id, err := generateID()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	port := req.Port
+	if port <= 0 {
+		port = 8000
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("port must be between 1 and 65535")
+	}
+
+	_, err = m.db.ExecContext(ctx,
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, 'created', ?, ?, '', ?, ?)`,
+		id, tenantID, req.Name, req.Image, port, now, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert service: %w", err)
+	}
+
+	if len(req.Env) > 0 {
+		if err := m.setEnvVars(ctx, id, req.Env); err != nil {
+			return nil, fmt.Errorf("set env vars: %w", err)
+		}
+	}
+
+	return &Service{
+		ID:        id,
+		TenantID:  tenantID,
+		Name:      req.Name,
+		Status:    "created",
+		Image:     req.Image,
+		Port:      port,
+		URL:       fmt.Sprintf("http://%s.localhost", id),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
+}
+
+// Deploy pulls the image, reads env vars, creates and starts the container.
+// Uses a bounded semaphore with a bounded queue for backpressure.
+func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	if err := m.checkTenantActive(ctx, tenantID); err != nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", err.Error())
+		return err
+	}
+	// Try to enter the deploy queue; reject immediately if full (backpressure)
+	select {
+	case m.deployQueue <- struct{}{}:
+		defer func() { <-m.deployQueue }()
+	default:
+		m.updateStatusWithError(ctx, serviceID, "failed", "deploy queue full; try again later")
+		return fmt.Errorf("deploy queue full; try again later")
+	}
+
+	// Acquire deploy slot (bounded concurrency)
+	select {
+	case m.deploySem <- struct{}{}:
+		defer func() { <-m.deploySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return err
+	}
+
+	m.updateStatus(ctx, serviceID, "deploying")
+
+	// Ensure per-tenant network exists for isolation
+	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
+	if err != nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
+		return fmt.Errorf("ensure tenant network: %w", err)
+	}
+
+	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
+		return fmt.Errorf("pull image: %w", err)
+	}
+
+	envVars, err := m.getEnvVars(ctx, serviceID)
+	if err != nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
+		return fmt.Errorf("load env vars: %w", err)
+	}
+
+	port := svc.Port
+	if port <= 0 {
+		port = 8000
+	}
+	if p, ok := envVars["PORT"]; ok {
+		if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
+			port = 8000
+		}
+	}
+
+	// Load resource limits from tenant quotas
+	limits := m.getResourceLimits(ctx, tenantID)
+
+	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil, limits)
+	if err != nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
+		return fmt.Errorf("run container: %w", err)
+	}
+
+	now := time.Now().Unix()
+	_, err = m.db.ExecContext(ctx,
+		`UPDATE services SET status = 'running', container_id = ?, updated_at = ? WHERE id = ?`,
+		containerID, now, serviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("update service: %w", err)
+	}
+	return nil
+}
+
+// getResourceLimits reads per-service resource limits from tenant quotas.
+func (m *Manager) getResourceLimits(ctx context.Context, tenantID string) *docker.ResourceLimits {
+	var maxMemMB int
+	var maxCPUCores float64
+	err := m.db.QueryRowContext(ctx,
+		`SELECT max_memory_mb, max_cpu_cores FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxMemMB, &maxCPUCores)
+	if err != nil {
+		log.Printf("services: failed to load resource limits for tenant %s: %v (using defaults)", tenantID, err)
+		return nil // use defaults
+	}
+	limits := &docker.ResourceLimits{}
+	if maxMemMB > 0 {
+		limits.MemoryMB = int64(maxMemMB)
+	}
+	if maxCPUCores > 0 {
+		limits.CPUCores = maxCPUCores
+	}
+	return limits
+}
+
+// Stop stops a running service container.
+func (m *Manager) Stop(ctx context.Context, tenantID, serviceID string) error {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return err
+	}
+	if svc.ContainerID == "" {
+		return fmt.Errorf("service has no container")
+	}
+
+	if err := m.docker.StopContainer(ctx, svc.ContainerID); err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+	m.updateStatus(ctx, serviceID, "stopped")
+	return nil
+}
+
+// Start starts a stopped service container.
+func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
+	if err := m.checkTenantActive(ctx, tenantID); err != nil {
+		return err
+	}
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return err
+	}
+	if svc.ContainerID == "" {
+		return fmt.Errorf("service has no container")
+	}
+
+	if err := m.docker.StartContainer(ctx, svc.ContainerID); err != nil {
+		return fmt.Errorf("start container: %w", err)
+	}
+	m.updateStatus(ctx, serviceID, "running")
+	return nil
+}
+
+// Restart stops and starts a service container.
+func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return err
+	}
+	if svc.ContainerID == "" {
+		return fmt.Errorf("service has no container")
+	}
+
+	if err := m.docker.StopContainer(ctx, svc.ContainerID); err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+	if err := m.docker.StartContainer(ctx, svc.ContainerID); err != nil {
+		return fmt.Errorf("start container: %w", err)
+	}
+	m.updateStatus(ctx, serviceID, "running")
+	return nil
+}
+
+// Delete stops and removes the container, then deletes the DB record.
+func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return err
+	}
+
+	if svc.ContainerID != "" {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		_ = m.docker.RemoveContainer(ctx, svc.ContainerID)
+	}
+
+	_, err = m.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND tenant_id = ?`, serviceID, tenantID)
+	if err != nil {
+		return fmt.Errorf("delete service: %w", err)
+	}
+	return nil
+}
+
+// StopAllForTenant stops and removes all containers belonging to a tenant.
+func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, container_id FROM services WHERE tenant_id = ?`, tenantID,
+	)
+	if err != nil {
+		log.Printf("services: failed to list services for tenant %s: %v", tenantID, err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var svcID string
+		var containerID sql.NullString
+		if err := rows.Scan(&svcID, &containerID); err != nil {
+			continue
+		}
+		if containerID.Valid && containerID.String != "" {
+			_ = m.docker.StopContainer(ctx, containerID.String)
+			_ = m.docker.RemoveContainer(ctx, containerID.String)
+		}
+		m.updateStatus(ctx, svcID, "stopped")
+	}
+}
+
+// Logs returns a reader for the service container logs.
+func (m *Manager) Logs(ctx context.Context, tenantID, serviceID string, follow bool, tail int) (io.ReadCloser, error) {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if svc.ContainerID == "" {
+		return nil, fmt.Errorf("service has no container")
+	}
+	return m.docker.LogsContainer(ctx, svc.ContainerID, follow, tail)
+}
+
+// List returns all services for a tenant.
+func (m *Manager) List(ctx context.Context, tenantID string) ([]*Service, error) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, created_at, updated_at
+		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	defer rows.Close()
+
+	var svcs []*Service
+	for rows.Next() {
+		s := &Service{}
+		var containerID sql.NullString
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan service: %w", err)
+		}
+		if containerID.Valid {
+			s.ContainerID = containerID.String
+		}
+		s.URL = fmt.Sprintf("http://%s.localhost", s.ID)
+		svcs = append(svcs, s)
+	}
+	return svcs, rows.Err()
+}
+
+// Get returns a single service by ID, scoped to tenant.
+func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service, error) {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+
+	if svc.ContainerID != "" {
+		info, err := m.docker.InspectContainer(ctx, svc.ContainerID)
+		if err == nil {
+			svc.Status = info.Status
+		}
+	}
+	svc.URL = fmt.Sprintf("http://%s.localhost", svc.ID)
+	return svc, nil
+}
+
+// SetEnv sets or updates environment variables for a service.
+func (m *Manager) SetEnv(ctx context.Context, tenantID, serviceID string, vars map[string]string) error {
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return err
+	}
+	if err := ValidateEnvVars(vars); err != nil {
+		return err
+	}
+	return m.setEnvVars(ctx, serviceID, vars)
+}
+
+// GetEnv returns env var keys for a service. If reveal is true, returns decrypted values.
+// Audit logs reveal operations for security monitoring.
+func (m *Manager) GetEnv(ctx context.Context, tenantID, serviceID string, reveal bool) (map[string]string, error) {
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return nil, err
+	}
+	if reveal {
+		log.Printf("AUDIT: tenant=%s revealed env vars for service=%s", tenantID, serviceID)
+		return m.getEnvVars(ctx, serviceID)
+	}
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT key FROM service_env WHERE service_id = ? ORDER BY key`,
+		serviceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list env keys: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		result[key] = "********"
+	}
+	return result, rows.Err()
+}
+
+// DeleteEnv removes a single environment variable.
+func (m *Manager) DeleteEnv(ctx context.Context, tenantID, serviceID, key string) error {
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return err
+	}
+	res, err := m.db.ExecContext(ctx,
+		`DELETE FROM service_env WHERE service_id = ? AND key = ?`,
+		serviceID, key,
+	)
+	if err != nil {
+		return fmt.Errorf("delete env var: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("env var not found")
+	}
+	log.Printf("AUDIT: tenant=%s deleted env var %q for service=%s", tenantID, key, serviceID)
+	return nil
+}
+
+// getOwned loads a service and verifies tenant ownership.
+func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Service, error) {
+	s := &Service{}
+	var containerID sql.NullString
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, created_at, updated_at
+		 FROM services WHERE id = ? AND tenant_id = ?`,
+		serviceID, tenantID,
+	).Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CreatedAt, &s.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("service not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get service: %w", err)
+	}
+	if containerID.Valid {
+		s.ContainerID = containerID.String
+	}
+	return s, nil
+}
+
+func (m *Manager) updateStatus(ctx context.Context, serviceID, status string) {
+	m.db.ExecContext(ctx,
+		`UPDATE services SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().Unix(), serviceID,
+	)
+}
+
+func (m *Manager) updateStatusWithError(ctx context.Context, serviceID, status, lastError string) {
+	m.db.ExecContext(ctx,
+		`UPDATE services SET status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		status, lastError, time.Now().Unix(), serviceID,
+	)
+}
+
+func (m *Manager) setEnvVars(ctx context.Context, serviceID string, vars map[string]string) error {
+	now := time.Now().Unix()
+	for k, v := range vars {
+		encrypted, err := crypto.Encrypt([]byte(v), m.masterKey)
+		if err != nil {
+			return fmt.Errorf("encrypt env var %s: %w", k, err)
+		}
+		_, err = m.db.ExecContext(ctx,
+			`INSERT INTO service_env (service_id, key, value_encrypted, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(service_id, key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at`,
+			serviceID, k, encrypted, now, now,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert env var %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) getEnvVars(ctx context.Context, serviceID string) (map[string]string, error) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT key, value_encrypted FROM service_env WHERE service_id = ?`,
+		serviceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query env vars: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var key, encrypted string
+		if err := rows.Scan(&key, &encrypted); err != nil {
+			return nil, err
+		}
+		plaintext, err := crypto.Decrypt(encrypted, m.masterKey)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt env var %s: %w", key, err)
+		}
+		result[key] = string(plaintext)
+	}
+	return result, rows.Err()
+}
+
+func generateID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := cryptoRand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	return fmt.Sprintf("%x", b), nil
+}
+</file>
+
+<file path="internal/db/db.go">
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"io/fs"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type Store struct {
+	StateDB    *sql.DB
+	MeteringDB *sql.DB
+}
+
+func Open(dbPath string) (*Store, error) {
+	stateDB, err := openDB(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open state db: %w", err)
+	}
+
+	meteringPath := strings.TrimSuffix(dbPath, ".db") + "-metering.db"
+	meteringDB, err := openDB(meteringPath)
+	if err != nil {
+		stateDB.Close()
+		return nil, fmt.Errorf("open metering db: %w", err)
+	}
+
+	store := &Store{StateDB: stateDB, MeteringDB: meteringDB}
+
+	if err := store.runMigrations(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+
+	return store, nil
+}
+
+func openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	// WAL mode allows concurrent readers with a single writer.
+	// Allow a small pool so reads don't block on writes.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+
+	return db, nil
+}
+
+func (s *Store) runMigrations() error {
+	// Ensure migration tracking tables exist on both databases
+	for _, db := range []*sql.DB{s.StateDB, s.MeteringDB} {
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at INTEGER NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create schema_migrations table: %w", err)
+		}
+	}
+
+	entries, err := fs.ReadDir(MigrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Migration files must be prefixed with their target database:
+		// "state_*.sql" -> StateDB, "metering_*.sql" -> MeteringDB.
+		// Any other naming is rejected to prevent silent misrouting.
+		var target *sql.DB
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "state_"):
+			target = s.StateDB
+		case strings.HasPrefix(name, "metering_"):
+			target = s.MeteringDB
+		default:
+			return fmt.Errorf("migration %q must start with state_ or metering_", name)
+		}
+
+		// Skip already-applied migrations
+		var count int
+		if err := target.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
+		}
+		if count > 0 {
+			log.Printf("migration already applied: %s", entry.Name())
+			continue
+		}
+
+		data, err := fs.ReadFile(MigrationsFS, "migrations/"+entry.Name())
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+		}
+
+		tx, err := target.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", entry.Name(), err)
+		}
+
+		// Execute the entire migration file as a single exec (SQLite3 driver
+		// supports multi-statement execution). This avoids fragile semicolon
+		// splitting that breaks on semicolons inside strings or triggers.
+		if _, err := tx.Exec(string(data)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("exec migration %s: %w", entry.Name(), err)
+		}
+
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			entry.Name(), time.Now().Unix()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
+		}
+
+		log.Printf("migration applied: %s", entry.Name())
+	}
+
+	return nil
+}
+
+func (s *Store) Close() error {
+	var errs []error
+	if s.StateDB != nil {
+		if err := s.StateDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.MeteringDB != nil {
+		if err := s.MeteringDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %v", errs)
+	}
+	return nil
+}
+</file>
+
+<file path="internal/middleware/ratelimit.go">
+package middleware
+
+import (
+	"fmt"
+	"math"
+	"net/http"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+const maxRateLimitEntries = 10000
+
+type rateLimitEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+type RateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rateLimitEntry
+	rate    rate.Limit
+	burst   int
+}
+
+func NewRateLimiter(rps float64, burst int) *RateLimiter {
+	rl := &RateLimiter{
+		entries: make(map[string]*rateLimitEntry),
+		rate:    rate.Limit(rps),
+		burst:   burst,
+	}
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-1 * time.Hour)
+		for k, v := range rl.entries {
+			if v.lastSeen.Before(cutoff) {
+				delete(rl.entries, k)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	entry, exists := rl.entries[key]
+	if exists {
+		entry.lastSeen = time.Now()
+		return entry.limiter
+	}
+
+	// Evict oldest if at capacity
+	if len(rl.entries) >= maxRateLimitEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rl.entries {
+			if oldestKey == "" || v.lastSeen.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastSeen
+			}
+		}
+		if oldestKey != "" {
+			delete(rl.entries, oldestKey)
+		}
+	}
+
+	limiter := rate.NewLimiter(rl.rate, rl.burst)
+	rl.entries[key] = &rateLimitEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
+	}
+	return limiter
+}
+
+func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenantID := GetTenantID(r.Context())
+		if tenantID == "" {
+			// Fail closed: reject if tenant ID is missing (should never happen
+			// in authenticated routes, but prevents bypass if context is lost)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		limiter := rl.getLimiter(tenantID)
+		if !limiter.Allow() {
+			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter))
+			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// GlobalRateLimiter enforces a single rate limit across all tenants to prevent
+// multi-tenant aggregate abuse (e.g., attacker creating many tenants to multiply throughput).
+type GlobalRateLimiter struct {
+	limiter *rate.Limiter
+}
+
+func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
+	return &GlobalRateLimiter{
+		limiter: rate.NewLimiter(rate.Limit(rps), burst),
+	}
+}
+
+func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !gl.limiter.Allow() {
+			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter))
+			writeJSONError(w, http.StatusTooManyRequests, "global rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// retryAfterFromLimiter computes a Retry-After value (in seconds) based on
+// the token bucket's refill rate. Uses Reserve/Cancel to peek at the delay
+// without consuming a token.
+func retryAfterFromLimiter(l *rate.Limiter) string {
+	r := l.Reserve()
+	delay := r.Delay()
+	r.Cancel()
+	secs := int(math.Ceil(delay.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 60 {
+		secs = 60 // cap at 60s to avoid unreasonable backoff
+	}
+	return fmt.Sprintf("%d", secs)
+}
+</file>
+
+<file path="internal/api/health.go">
+package api
+
+import (
+	"context"
+	"math"
+	"net/http"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/paasd/paasd/internal/middleware"
+)
+
+type HealthResponse struct {
+	Status string `json:"status"`
+}
+
+type DetailedHealthResponse struct {
+	Status string     `json:"status"`
+	Docker DockerInfo `json:"docker"`
+	GVisor GVisorInfo `json:"gvisor"`
+	Disk   DiskInfo   `json:"disk"`
+}
+
+type DockerInfo struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+}
+
+type GVisorInfo struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+}
+
+type DiskInfo struct {
+	TotalGB     float64 `json:"total_gb"`
+	FreeGB      float64 `json:"free_gb"`
+	UsedPercent float64 `json:"used_percent"`
+}
+
+var (
+	detailedHealthCache     DetailedHealthResponse
+	detailedHealthCacheValid bool
+	detailedHealthCacheMu   sync.RWMutex
+	detailedHealthCacheTime time.Time
+	detailedHealthCacheTTL  = 30 * time.Second
+)
+
+// handleHealth returns minimal constant-time status for public (unauthenticated) requests.
+// No DB calls — avoids DoS via unauthenticated health check flooding.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
+}
+
+// handleHealthDetailed returns full system info (authenticated only).
+func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
+
+	detailedHealthCacheMu.RLock()
+	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
+		resp := detailedHealthCache // copy by value under lock
+		detailedHealthCacheMu.RUnlock()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	detailedHealthCacheMu.RUnlock()
+
+	resp := s.buildDetailedHealth()
+
+	detailedHealthCacheMu.Lock()
+	detailedHealthCache = resp // store by value
+	detailedHealthCacheValid = true
+	detailedHealthCacheTime = time.Now()
+	detailedHealthCacheMu.Unlock()
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) buildDetailedHealth() DetailedHealthResponse {
+	resp := DetailedHealthResponse{
+		Status: "ok",
+		Docker: DockerInfo{Available: false},
+		GVisor: GVisorInfo{Available: false},
+	}
+
+	// Check Docker with 5s timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
+		resp.Docker = DockerInfo{Available: true, Version: strings.TrimSpace(string(out))}
+	}
+
+	// Check gVisor with 5s timeout
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if out, err := exec.CommandContext(ctx2, "runsc", "--version").Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		version := ""
+		for _, line := range lines {
+			if strings.HasPrefix(line, "runsc version") {
+				version = strings.TrimPrefix(line, "runsc version ")
+				break
+			}
+		}
+		if version == "" {
+			// Fallback: use first non-empty line if standard prefix not found
+			version = strings.TrimSpace(string(out))
+		}
+		resp.GVisor = GVisorInfo{Available: version != "", Version: version}
+	}
+
+	// Check disk (no exec, safe syscall)
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err == nil {
+		totalBytes := stat.Blocks * uint64(stat.Bsize)
+		freeBytes := stat.Bavail * uint64(stat.Bsize)
+		totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
+		freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
+		usedPercent := 0.0
+		if totalGB > 0 {
+			usedPercent = ((totalGB - freeGB) / totalGB) * 100
+		}
+		resp.Disk = DiskInfo{
+			TotalGB:     round2(totalGB),
+			FreeGB:      round2(freeGB),
+			UsedPercent: round2(usedPercent),
+		}
+	}
+
+	if s.store == nil || s.store.StateDB == nil {
+		resp.Status = "degraded"
+	} else if err := s.store.StateDB.Ping(); err != nil {
+		resp.Status = "degraded"
+	}
+
+	return resp
+}
+
+func round2(f float64) float64 {
+	return math.Round(f*100) / 100
+}
+</file>
+
+<file path="internal/api/auth.go">
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/paasd/paasd/internal/crypto"
+	"github.com/paasd/paasd/internal/middleware"
+)
+
+const maxKeysPerTenant = 20
+
+type CreateKeyRequest struct {
+	Name      string `json:"name"`
+	ExpiresIn *int64 `json:"expires_in,omitempty"`
+}
+
+type CreateKeyResponse struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	APIKey  string `json:"api_key"`
+	Prefix  string `json:"prefix"`
+	Expires *int64 `json:"expires_at,omitempty"`
+}
+
+type KeyInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Prefix     string `json:"prefix"`
+	CreatedAt  int64  `json:"created_at"`
+	LastUsedAt *int64 `json:"last_used_at,omitempty"`
+	ExpiresAt  *int64 `json:"expires_at,omitempty"`
+}
+
+func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	var req CreateKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if req.Name == "" {
+		req.Name = "unnamed"
+	}
+
+	if req.ExpiresIn != nil {
+		if *req.ExpiresIn <= 0 {
+			writeError(w, http.StatusBadRequest, "expires_in must be positive (seconds)")
+			return
+		}
+		// Cap at 10 years to prevent effectively never-expiring keys
+		const maxExpiresIn = 10 * 365 * 24 * 3600 // ~10 years in seconds
+		if *req.ExpiresIn > maxExpiresIn {
+			writeError(w, http.StatusBadRequest, "expires_in exceeds maximum (10 years)")
+			return
+		}
+	}
+
+	var keyCount int
+	err := s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
+		tenantID,
+	).Scan(&keyCount)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if keyCount >= maxKeysPerTenant {
+		writeError(w, http.StatusForbidden, "maximum API keys reached, revoke unused keys first")
+		return
+	}
+
+	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
+	// Use keyID prefix as the display hint, not the secret's prefix
+	if len(keyID) < 8 {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	prefix := keyID[:8]
+	now := time.Now().Unix()
+
+	var expiresAt *int64
+	if req.ExpiresIn != nil {
+		exp := now + *req.ExpiresIn
+		expiresAt = &exp
+	}
+
+	_, err = s.store.StateDB.Exec(
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		keyID, tenantID, req.Name, prefix, keyHash, now, expiresAt,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create key")
+		return
+	}
+
+	// Return token in format "keyID.secret" for O(1) lookup
+	token := keyID + "." + apiKey
+
+	writeJSON(w, http.StatusCreated, CreateKeyResponse{
+		ID:      keyID,
+		Name:    req.Name,
+		APIKey:  token,
+		Prefix:  prefix,
+		Expires: expiresAt,
+	})
+}
+
+func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	rows, err := s.store.StateDB.Query(
+		`SELECT id, name, key_prefix, created_at, last_used_at, expires_at
+		 FROM api_keys
+		 WHERE tenant_id = ? AND revoked_at IS NULL
+		 ORDER BY created_at DESC
+		 LIMIT 100`,
+		tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list keys")
+		return
+	}
+	defer rows.Close()
+
+	keys := []KeyInfo{}
+	for rows.Next() {
+		var k KeyInfo
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.CreatedAt, &k.LastUsedAt, &k.ExpiresAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list keys")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, keys)
+}
+
+func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	keyID := chi.URLParam(r, "keyID")
+
+	result, err := s.store.StateDB.Exec(
+		`UPDATE api_keys SET revoked_at = ? WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
+		time.Now().Unix(), keyID, tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke key")
+		return
+	}
+
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+
+	// Evict from auth cache so revocation takes effect immediately
+	if s.authInvalidator != nil {
+		s.authInvalidator.InvalidateKey(keyID)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+</file>
+
+<file path="cmd/paasd/main.go">
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/paasd/paasd/internal/api"
+	"github.com/paasd/paasd/internal/db"
+	"github.com/paasd/paasd/internal/docker"
+)
+
+func main() {
+	port := flag.String("port", "8080", "HTTP port")
+	listenAddr := flag.String("listen-addr", "", "Listen address (default: 127.0.0.1; use 0.0.0.0 to bind all interfaces)")
+	dbPath := flag.String("db-path", "/var/lib/paasd/paasd.db", "Path to state SQLite database")
+	masterKeyPath := flag.String("master-key-path", "/var/lib/paasd/master.key", "Path to master encryption key")
+	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
+	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
+	flag.Parse()
+
+	// Bootstrap token is always required unless --dev + --open-registration
+	bootstrapToken := strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
+	if bootstrapToken == "" {
+		if !*devMode {
+			log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set (or use --dev --open-registration)")
+		}
+		if !*openRegistration {
+			log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set. Use --open-registration with --dev to allow open registration.")
+		}
+		log.Printf("WARNING: open registration enabled — anyone can create tenants")
+	} else if len(bootstrapToken) < 32 {
+		log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be at least 32 characters for brute-force resistance (got %d)", len(bootstrapToken))
+	}
+
+	if *openRegistration && !*devMode {
+		log.Fatalf("--open-registration requires --dev")
+	}
+
+	// In production (non-dev) mode, refuse to bind to non-loopback addresses.
+	// The server must be behind a TLS-terminating reverse proxy on loopback.
+	if !*devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
+		log.Fatalf("FATAL: non-loopback listen address (%s) is not allowed in production mode. Use --dev for development or bind to 127.0.0.1 behind a reverse proxy.", *listenAddr)
+	}
+	// Warn in dev mode about non-loopback
+	if *devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
+		log.Printf("WARNING: dev mode with non-loopback listen address (%s) disables HTTPS enforcement.", *listenAddr)
+	}
+
+	// Read master key
+	masterKeyData, err := os.ReadFile(*masterKeyPath)
+	if err != nil {
+		log.Fatalf("failed to read master key from %s: %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
+	}
+	masterKeyHex := strings.TrimSpace(string(masterKeyData))
+	masterKey, err := hex.DecodeString(masterKeyHex)
+	if err != nil {
+		log.Fatalf("master key in %s must be hex-encoded (got invalid hex): %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
+	}
+	if len(masterKey) < 32 {
+		log.Fatalf("master key in %s must be at least 32 bytes after hex decoding (got %d bytes from %d hex chars).\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, len(masterKey), len(masterKeyHex), *masterKeyPath)
+	}
+
+	// Open databases
+	store, err := db.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("failed to open database: %v", err)
+	}
+	defer store.Close()
+
+	// Create Docker client
+	dockerClient, err := docker.NewClient()
+	if err != nil {
+		log.Fatalf("failed to create Docker client: %v", err)
+	}
+	defer dockerClient.Close()
+
+	// Verify gVisor runtime is available (fail closed in production)
+	if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
+		if !*devMode {
+			log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+		}
+		log.Printf("WARNING: %v. Containers will fail to start without gVisor.", err)
+	} else {
+		log.Printf("gVisor (runsc) runtime verified")
+	}
+
+	// Create server
+	srv := api.NewServer(api.ServerConfig{
+		Store:            store,
+		MasterKey:        masterKey[:32],
+		DevMode:          *devMode,
+		BootstrapToken:   bootstrapToken,
+		OpenRegistration: *openRegistration,
+		Docker:           dockerClient,
+	})
+
+	// Default to 127.0.0.1 in ALL modes (loopback only).
+	// Must explicitly pass --listen-addr=0.0.0.0 to bind all interfaces.
+	addr := "127.0.0.1:" + *port
+	if *listenAddr != "" {
+		addr = *listenAddr + ":" + *port
+	}
+
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           srv,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	// Graceful shutdown
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+	log.Printf("paasd listening on %s", addr)
+	if *devMode {
+		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled")
+	} else {
+		log.Printf("HTTPS enforcement is ON. The server must be behind a TLS-terminating proxy (e.g. Traefik) that connects via loopback (127.0.0.1). X-Forwarded-Proto is only trusted from loopback RemoteAddr.")
+	}
+
+	<-done
+	log.Println("shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Fatalf("shutdown error: %v", err)
+	}
+	log.Println("shutdown complete")
+}
+</file>
+
+<file path="internal/middleware/auth.go">
+package middleware
+
+import (
+	"context"
+	"database/sql"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/paasd/paasd/internal/crypto"
+)
+
+type contextKey string
+
+const TenantIDKey contextKey = "tenant_id"
+
+const (
+	lastUsedInterval = 5 * time.Minute
+	lastUsedMaxKeys  = 10000
+	authCacheTTL     = 30 * time.Second
+	authCacheMaxKeys = 5000
+)
+
+// authCacheEntry caches a validated key's DB result to reduce SQLite load.
+// The HMAC verification still runs on every request (fast, in-memory).
+type authCacheEntry struct {
+	tenantID  string
+	keyHash   string
+	status    string
+	expiresAt *int64 // key expiration time (nil = no expiry)
+	cachedAt  time.Time
+}
+
+type authCache struct {
+	mu      sync.RWMutex
+	entries map[string]*authCacheEntry
+}
+
+func newAuthCache() *authCache {
+	c := &authCache{
+		entries: make(map[string]*authCacheEntry),
+	}
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		for range ticker.C {
+			c.mu.Lock()
+			now := time.Now()
+			for k, v := range c.entries {
+				if now.Sub(v.cachedAt) > authCacheTTL {
+					delete(c.entries, k)
+				}
+			}
+			c.mu.Unlock()
+		}
+	}()
+	return c
+}
+
+func (c *authCache) get(keyID string) (*authCacheEntry, bool) {
+	c.mu.RLock()
+	entry, exists := c.entries[keyID]
+	c.mu.RUnlock()
+	if !exists || time.Since(entry.cachedAt) > authCacheTTL {
+		return nil, false
+	}
+	return entry, true
+}
+
+func (c *authCache) set(keyID string, entry *authCacheEntry) {
+	c.mu.Lock()
+	// Evict oldest if at capacity
+	if len(c.entries) >= authCacheMaxKeys {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range c.entries {
+			if oldestKey == "" || v.cachedAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.cachedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(c.entries, oldestKey)
+		}
+	}
+	c.entries[keyID] = entry
+	c.mu.Unlock()
+}
+
+func (c *authCache) invalidate(keyID string) {
+	c.mu.Lock()
+	delete(c.entries, keyID)
+	c.mu.Unlock()
+}
+
+// AuthCacheInvalidator allows callers to evict entries from the auth cache
+// when keys are revoked or tenants are suspended.
+type AuthCacheInvalidator struct {
+	cache *authCache
+}
+
+// InvalidateKey removes a single key from the auth cache.
+func (a *AuthCacheInvalidator) InvalidateKey(keyID string) {
+	a.cache.invalidate(keyID)
+}
+
+// InvalidateTenant removes all cached keys belonging to the given tenant.
+func (a *AuthCacheInvalidator) InvalidateTenant(tenantID string) {
+	a.cache.mu.Lock()
+	for k, v := range a.cache.entries {
+		if v.tenantID == tenantID {
+			delete(a.cache.entries, k)
+		}
+	}
+	a.cache.mu.Unlock()
+}
+
+// lastUsedTracker samples last_used_at updates with bounded map.
+type lastUsedTracker struct {
+	mu       sync.Mutex
+	lastSeen map[string]time.Time
+	db       *sql.DB
+}
+
+func newLastUsedTracker(db *sql.DB) *lastUsedTracker {
+	t := &lastUsedTracker{
+		lastSeen: make(map[string]time.Time),
+		db:       db,
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		for range ticker.C {
+			t.mu.Lock()
+			cutoff := time.Now().Add(-24 * time.Hour)
+			for k, v := range t.lastSeen {
+				if v.Before(cutoff) {
+					delete(t.lastSeen, k)
+				}
+			}
+			t.mu.Unlock()
+		}
+	}()
+	return t
+}
+
+func (t *lastUsedTracker) maybeUpdate(keyID string) {
+	t.mu.Lock()
+	last, exists := t.lastSeen[keyID]
+	now := time.Now()
+	if exists && now.Sub(last) < lastUsedInterval {
+		t.mu.Unlock()
+		return
+	}
+	if !exists && len(t.lastSeen) >= lastUsedMaxKeys {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range t.lastSeen {
+			if oldestKey == "" || v.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v
+			}
+		}
+		if oldestKey != "" {
+			delete(t.lastSeen, oldestKey)
+		}
+	}
+	t.lastSeen[keyID] = now
+	t.mu.Unlock()
+
+	if _, err := t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID); err != nil {
+		log.Printf("auth: failed to update last_used_at for key %s: %v", keyID, err)
+	}
+}
+
+func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
+	tracker := newLastUsedTracker(db)
+	cache := newAuthCache()
+	invalidator := &AuthCacheInvalidator{cache: cache}
+
+	mw := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				writeJSONError(w, http.StatusUnauthorized, "missing authorization header")
+				return
+			}
+
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				writeJSONError(w, http.StatusUnauthorized, "invalid authorization format, expected: Bearer <token>")
+				return
+			}
+			token := strings.TrimSpace(parts[1])
+
+			// Token format: "keyID.secret" for O(1) lookup
+			dotIdx := strings.IndexByte(token, '.')
+			if dotIdx < 1 || dotIdx >= len(token)-1 {
+				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+			keyID := token[:dotIdx]
+			secret := token[dotIdx+1:]
+
+			if len(keyID) > 64 || len(secret) > 256 {
+				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+
+			var tenantID, keyHash, status string
+
+			// Check auth cache first to reduce DB load
+			if cached, ok := cache.get(keyID); ok {
+				// Verify expiry locally even on cache hit
+				if cached.expiresAt != nil && time.Now().Unix() > *cached.expiresAt {
+					cache.invalidate(keyID) // force DB re-check on next request
+					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+					return
+				}
+				tenantID = cached.tenantID
+				keyHash = cached.keyHash
+				status = cached.status
+			} else {
+				now := time.Now().Unix()
+				var expiresAt *int64
+				err := db.QueryRowContext(r.Context(),
+					`SELECT ak.tenant_id, ak.key_hash, t.status, ak.expires_at
+					 FROM api_keys ak
+					 JOIN tenants t ON t.id = ak.tenant_id
+					 WHERE ak.id = ?
+					   AND ak.revoked_at IS NULL
+					   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
+					keyID, now,
+				).Scan(&tenantID, &keyHash, &status, &expiresAt)
+				if err == sql.ErrNoRows {
+					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+					return
+				}
+				if err != nil {
+					writeJSONError(w, http.StatusServiceUnavailable, "service temporarily unavailable")
+					return
+				}
+
+				cache.set(keyID, &authCacheEntry{
+					tenantID:  tenantID,
+					keyHash:   keyHash,
+					status:    status,
+					expiresAt: expiresAt,
+					cachedAt:  time.Now(),
+				})
+			}
+
+			if status != "active" {
+				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+
+			if !crypto.VerifyAPIKey(keyHash, secret, masterKey) {
+				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+
+			tracker.maybeUpdate(keyID)
+
+			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+
+	return mw, invalidator
+}
+
+func GetTenantID(ctx context.Context) string {
+	v, _ := ctx.Value(TenantIDKey).(string)
+	return v
+}
+</file>
+
+<file path="internal/middleware/idempotency.go">
+package middleware
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	maxIdempotencyEntries   = 500
+	maxIdempotencyPerTenant = 50
+	maxIdempotencyKeyLen    = 128
+	maxIdempotencyBodyLen   = 8 * 1024 // 8KB max stored response
+	idempotencyTTL          = 10 * time.Minute
+)
+
+type idempotencyEntry struct {
+	statusCode  int
+	contentType string // preserved from original response
+	body        []byte
+	bodyHash    string // SHA-256 hex of request body for mismatch detection
+	createdAt   time.Time
+	expiresAt   time.Time
+}
+
+type IdempotencyStore struct {
+	mu      sync.RWMutex
+	entries map[string]*idempotencyEntry
+}
+
+func NewIdempotencyStore() *IdempotencyStore {
+	s := &IdempotencyStore{
+		entries: make(map[string]*idempotencyEntry),
+	}
+	go s.cleanup()
+	return s
+}
+
+func (s *IdempotencyStore) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		s.mu.Lock()
+		now := time.Now()
+		for k, v := range s.entries {
+			if now.After(v.expiresAt) {
+				delete(s.entries, k)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	statusCode    int
+	wroteHeader   bool
+	body          []byte
+	overflow      bool // true if body exceeded maxIdempotencyBodyLen
+}
+
+func (rr *responseRecorder) WriteHeader(code int) {
+	if rr.wroteHeader {
+		return
+	}
+	rr.statusCode = code
+	rr.wroteHeader = true
+	rr.ResponseWriter.WriteHeader(code)
+}
+
+func (rr *responseRecorder) Write(b []byte) (int, error) {
+	// Implicit 200 if WriteHeader was never called (per net/http spec)
+	if !rr.wroteHeader {
+		rr.statusCode = http.StatusOK
+		rr.wroteHeader = true
+		rr.ResponseWriter.WriteHeader(http.StatusOK)
+	}
+	// Cap in-memory buffering to prevent memory exhaustion from large responses.
+	// Once overflow, stop buffering but continue writing to the client.
+	if !rr.overflow {
+		if len(rr.body)+len(b) <= maxIdempotencyBodyLen {
+			rr.body = append(rr.body, b...)
+		} else {
+			rr.overflow = true
+			rr.body = nil // release buffered bytes
+		}
+	}
+	return rr.ResponseWriter.Write(b)
+}
+
+// Flush proxies to the underlying ResponseWriter if it supports http.Flusher.
+func (rr *responseRecorder) Flush() {
+	if f, ok := rr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter for middleware that uses
+// http.ResponseController or similar unwrapping patterns.
+func (rr *responseRecorder) Unwrap() http.ResponseWriter {
+	return rr.ResponseWriter
+}
+
+const maxHashBodySize = 1 << 20 // 1MB — matches server max body size
+
+// errBodyTooLarge is returned when the request body exceeds maxHashBodySize.
+var errBodyTooLarge = fmt.Errorf("request body too large")
+
+// hashRequestBody reads the request body (up to maxHashBodySize), computes
+// SHA-256, and replaces r.Body with a new reader so downstream handlers can
+// still read it. Returns errBodyTooLarge if the body exceeds the limit.
+func hashRequestBody(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "empty", nil
+	}
+	lr := io.LimitReader(r.Body, maxHashBodySize+1)
+	bodyBytes, err := io.ReadAll(lr)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(bodyBytes)) > maxHashBodySize {
+		return "", errBodyTooLarge
+	}
+	r.Body.Close()
+	// Replace body so downstream handlers can read it
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	h := sha256.Sum256(bodyBytes)
+	return hex.EncodeToString(h[:]), nil
+}
+
+func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only apply idempotency to POST and PUT
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := r.Header.Get("Idempotency-Key")
+		if key == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Never cache auth key creation responses (contain secrets)
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Validate key length
+		if len(key) > maxIdempotencyKeyLen {
+			writeJSONError(w, http.StatusBadRequest, "idempotency key too long")
+			return
+		}
+
+		// Scope by tenant + method + path + query string.
+		// Fail closed: reject if tenant ID is missing when idempotency key is
+		// present, to prevent silent bypass of idempotency guarantees.
+		tenantID := GetTenantID(r.Context())
+		if tenantID == "" {
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		fullKey := tenantID + ":" + r.Method + ":" + r.URL.RequestURI() + ":" + key
+
+		// Hash request body for payload mismatch detection.
+		// Body is already capped by maxBodySize middleware (1MB).
+		reqBodyHash, err := hashRequestBody(r)
+		if err != nil {
+			if err == errBodyTooLarge {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			} else {
+				writeJSONError(w, http.StatusBadRequest, "failed to read request body")
+			}
+			return
+		}
+
+		s.mu.RLock()
+		entry, exists := s.entries[fullKey]
+		s.mu.RUnlock()
+
+		if exists && time.Now().Before(entry.expiresAt) {
+			// Detect payload mismatch: same idempotency key but different body
+			if entry.bodyHash != reqBodyHash {
+				writeJSONError(w, http.StatusConflict, "idempotency key reused with different request body")
+				return
+			}
+			w.Header().Set("Idempotency-Replayed", "true")
+			// Always set security header for consistency with httpx helpers
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			if len(entry.body) > 0 {
+				if entry.contentType != "" {
+					w.Header().Set("Content-Type", entry.contentType)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+				}
+			}
+			w.WriteHeader(entry.statusCode)
+			if len(entry.body) > 0 {
+				w.Write(entry.body)
+			}
+			return
+		}
+
+		rec := &responseRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+
+		// Default to 200 if handler never called WriteHeader (per net/http spec)
+		if !rec.wroteHeader {
+			rec.statusCode = http.StatusOK
+		}
+
+		// Only cache successful (2xx) responses within size bounds.
+		// Error responses are not cached to prevent "sticky failure" attacks.
+		if rec.statusCode >= 200 && rec.statusCode < 300 && !rec.overflow && len(rec.body) <= maxIdempotencyBodyLen {
+			s.mu.Lock()
+			// Enforce per-tenant limit to prevent single-tenant memory abuse
+			tenantPrefix := tenantID + ":"
+			tenantEntryCount := 0
+			for k := range s.entries {
+				if len(k) > len(tenantPrefix) && k[:len(tenantPrefix)] == tenantPrefix {
+					tenantEntryCount++
+				}
+			}
+			if tenantEntryCount < maxIdempotencyPerTenant {
+				// Enforce global max entries - evict oldest if at capacity
+				if len(s.entries) >= maxIdempotencyEntries {
+					var oldestKey string
+					var oldestTime time.Time
+					for k, v := range s.entries {
+						if oldestKey == "" || v.createdAt.Before(oldestTime) {
+							oldestKey = k
+							oldestTime = v.createdAt
+						}
+					}
+					if oldestKey != "" {
+						delete(s.entries, oldestKey)
+					}
+				}
+				now := time.Now()
+				s.entries[fullKey] = &idempotencyEntry{
+					statusCode:  rec.statusCode,
+					contentType: rec.Header().Get("Content-Type"),
+					body:        rec.body,
+					bodyHash:    reqBodyHash,
+					createdAt:   now,
+					expiresAt:   now.Add(idempotencyTTL),
+				}
+			}
+			s.mu.Unlock()
+		}
+	})
+}
+</file>
+
+<file path="internal/api/server.go">
+package api
+
+import (
+	"errors"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/paasd/paasd/internal/db"
+	"github.com/paasd/paasd/internal/docker"
+	"github.com/paasd/paasd/internal/httpx"
+	"github.com/paasd/paasd/internal/middleware"
+	"github.com/paasd/paasd/internal/services"
+)
+
+type ServerConfig struct {
+	Store            *db.Store
+	MasterKey        []byte
+	DevMode          bool
+	BootstrapToken   string
+	OpenRegistration bool
+	Docker           *docker.Client
+}
+
+type Server struct {
+	store            *db.Store
+	masterKey        []byte
+	devMode          bool
+	bootstrapToken   string
+	openRegistration bool
+	router           chi.Router
+	authMW           func(http.Handler) http.Handler
+	authInvalidator  *middleware.AuthCacheInvalidator
+	svcManager       *services.Manager
+}
+
+func NewServer(cfg ServerConfig) *Server {
+	if cfg.Store == nil || cfg.Store.StateDB == nil {
+		panic("paasd: NewServer requires a non-nil Store with StateDB")
+	}
+	// Initialize auth middleware and cache invalidator early so they are
+	// guaranteed non-nil before any request can arrive.
+	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, cfg.MasterKey)
+
+	var svcMgr *services.Manager
+	if cfg.Docker != nil {
+		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+	}
+
+	s := &Server{
+		store:            cfg.Store,
+		masterKey:        cfg.MasterKey,
+		devMode:          cfg.DevMode,
+		bootstrapToken:   cfg.BootstrapToken,
+		openRegistration: cfg.OpenRegistration,
+		authInvalidator:  authInvalidator,
+		authMW:           authMW,
+		svcManager:       svcMgr,
+	}
+	s.setupRoutes()
+	return s
+}
+
+func (s *Server) setupRoutes() {
+	r := chi.NewRouter()
+
+	r.Use(chimw.RequestID)
+	// chi.Logger logs method/path/status/latency only — never headers or body.
+	// Authorization and bootstrap tokens are never logged.
+	r.Use(chimw.Logger)
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Timeout(30 * time.Second))
+	r.Use(maxBodySize(1 << 20))
+	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
+	r.Use(chimw.Throttle(200))
+
+	// Strip forwarded headers from non-loopback requests to prevent spoofing.
+	// This runs unconditionally (including dev mode) as a defense-in-depth measure.
+	r.Use(stripUntrustedForwardedHeaders)
+
+	// Enforce HTTPS: only trust X-Forwarded-Proto from loopback (trusted proxy).
+	// Server binds to 127.0.0.1 by default; even if --listen-addr overrides this,
+	// the HTTPS check only trusts the header from loopback RemoteAddr.
+	if !s.devMode {
+		r.Use(requireHTTPS)
+	}
+
+	// Public routes
+	r.Get("/v1/system/health", s.handleHealth)
+	r.Post("/v1/tenants/register", s.handleTenantRegister)
+
+	// Authenticated routes
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMW)
+		// Per-tenant rate limiter
+		rl := middleware.NewRateLimiter(100, 200)
+		r.Use(rl.Middleware)
+		// Global aggregate rate limiter across all tenants (prevents multi-tenant abuse)
+		globalRL := middleware.NewGlobalRateLimiter(500, 1000)
+		r.Use(globalRL.Middleware)
+		idem := middleware.NewIdempotencyStore()
+		r.Use(idem.Middleware)
+
+		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
+
+		r.Get("/v1/tenant", s.handleTenantGet)
+		r.Patch("/v1/tenant", s.handleTenantUpdate)
+		r.Delete("/v1/tenant", s.handleTenantDelete)
+
+		r.Post("/v1/auth/keys", s.handleKeyCreate)
+		r.Get("/v1/auth/keys", s.handleKeyList)
+		r.Delete("/v1/auth/keys/{keyID}", s.handleKeyRevoke)
+
+		// Service routes
+		r.Post("/v1/services", s.handleServiceCreate)
+		r.Get("/v1/services", s.handleServiceList)
+		r.Get("/v1/services/{serviceID}", s.handleServiceGet)
+		r.Delete("/v1/services/{serviceID}", s.handleServiceDelete)
+		r.Post("/v1/services/{serviceID}/start", s.handleServiceStart)
+		r.Post("/v1/services/{serviceID}/stop", s.handleServiceStop)
+		r.Post("/v1/services/{serviceID}/restart", s.handleServiceRestart)
+		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
+		r.Get("/v1/services/{serviceID}/env", s.handleServiceEnvGet)
+		r.Post("/v1/services/{serviceID}/env", s.handleServiceEnvSet)
+		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)
+	})
+
+	s.router = r
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
+}
+
+
+// writeError delegates to httpx.WriteError for consistent JSON error responses.
+// All handlers in the api package should use this.
+func writeError(w http.ResponseWriter, code int, message string) {
+	httpx.WriteError(w, code, message)
+}
+
+// writeJSON delegates to httpx.WriteJSON for consistent JSON success responses.
+// All handlers in the api package should use this.
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	httpx.WriteJSON(w, code, v)
+}
+
+// writeDecodeError writes a 413 if the error is from MaxBytesReader, otherwise 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid request body")
+}
+
+func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// isLoopback checks if the remote address is from a loopback interface.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// stripUntrustedForwardedHeaders removes proxy headers from non-loopback
+// requests to prevent spoofing. Runs unconditionally (including dev mode).
+func stripUntrustedForwardedHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopback(r.RemoteAddr) {
+			r.Header.Del("X-Forwarded-For")
+			r.Header.Del("X-Forwarded-Proto")
+			r.Header.Del("X-Real-Ip")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireHTTPS rejects requests not arriving via TLS-terminating proxy.
+// Only trusts X-Forwarded-Proto when RemoteAddr is loopback (i.e., from the
+// local Traefik proxy). Direct external connections cannot spoof this header.
+// Header stripping is handled by stripUntrustedForwardedHeaders above.
+func requireHTTPS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopback(r.RemoteAddr) {
+			proto := r.Header.Get("X-Forwarded-Proto")
+			if proto != "https" {
+				writeError(w, http.StatusForbidden, "HTTPS required")
+				return
+			}
+		} else {
+			if r.TLS == nil {
+				writeError(w, http.StatusForbidden, "HTTPS required")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+
+
+// normalizeIP extracts a validated IP string from a value that may be
+// "ip", "ip:port", or "[ip]:port". Returns "" if no valid IP is found.
+func normalizeIP(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Try host:port split first
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		s = host
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// trustedRealIP extracts client IP from X-Real-Ip ONLY when the request comes
+// from a trusted loopback proxy. X-Forwarded-For is NOT used because clients can
+// spoof it and some proxy configs preserve the client-provided chain.
+// Traefik always overwrites X-Real-Ip with the direct connection IP, making it
+// the only trustworthy source. Falls back to RemoteAddr.
+func trustedRealIP(r *http.Request) string {
+	if isLoopback(r.RemoteAddr) {
+		// Behind trusted proxy: prefer X-Real-Ip.
+		if ip := normalizeIP(r.Header.Get("X-Real-Ip")); ip != "" {
+			return ip
+		}
+		// If X-Real-Ip is not set (e.g., direct connection without proxy),
+		// use RemoteAddr. This is safe because stripUntrustedForwardedHeaders
+		// already stripped any spoofed headers from non-loopback sources.
+		// Note: callers should check for empty return and reject if needed.
+		return normalizeIP(r.RemoteAddr)
+	}
+	return normalizeIP(r.RemoteAddr)
+}
+</file>
+
+<file path="internal/api/tenants.go">
+package api
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/paasd/paasd/internal/crypto"
+	"github.com/paasd/paasd/internal/middleware"
+)
+
+type RegisterRequest struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+type RegisterResponse struct {
+	TenantID string `json:"tenant_id"`
+	APIKey   string `json:"api_key"`
+}
+
+type TenantResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+type UpdateTenantRequest struct {
+	Name *string `json:"name,omitempty"`
+}
+
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+type registrationLimiter struct {
+	mu             sync.Mutex
+	entries        map[string]*regEntry
+	globalCount    int
+	globalWindowAt time.Time
+}
+
+type regEntry struct {
+	count    int
+	windowAt time.Time
+}
+
+const (
+	regMaxPerIPPerHour = 5
+	regGlobalPerHour   = 20
+	regMaxEntries      = 10000
+	regWindow          = 1 * time.Hour
+	maxTenants         = 1000
+)
+
+var regLimiter = &registrationLimiter{
+	entries: make(map[string]*regEntry),
+	// globalWindowAt zero-value: first request starts the window
+}
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		for range ticker.C {
+			regLimiter.mu.Lock()
+			now := time.Now()
+			for k, v := range regLimiter.entries {
+				if now.After(v.windowAt) {
+					delete(regLimiter.entries, k)
+				}
+			}
+			regLimiter.mu.Unlock()
+		}
+	}()
+}
+
+// allow returns whether the request is permitted and, if blocked, how long
+// until the relevant window resets.
+func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+
+	if rl.globalWindowAt.IsZero() || now.After(rl.globalWindowAt) {
+		rl.globalCount = 0
+		rl.globalWindowAt = now.Add(regWindow)
+	}
+	if rl.globalCount >= regGlobalPerHour {
+		return false, time.Until(rl.globalWindowAt)
+	}
+
+	if len(rl.entries) >= regMaxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rl.entries {
+			if oldestKey == "" || v.windowAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.windowAt
+			}
+		}
+		if oldestKey != "" {
+			delete(rl.entries, oldestKey)
+		}
+	}
+
+	entry, exists := rl.entries[ip]
+	if !exists || now.After(entry.windowAt) {
+		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
+		rl.globalCount++
+		return true, 0
+	}
+	if entry.count >= regMaxPerIPPerHour {
+		return false, time.Until(entry.windowAt)
+	}
+	entry.count++
+	rl.globalCount++
+	return true, 0
+}
+
+func generateID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
+	// Rate limit ALL registration attempts (including invalid tokens) to prevent
+	// brute-force of the bootstrap token. Uses trusted real IP from proxy headers.
+	ip := trustedRealIP(r)
+	if ok, wait := regLimiter.allow(ip); !ok {
+		secs := int(math.Ceil(wait.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+		return
+	}
+
+	// Bootstrap token gate — open registration (--dev --open-registration) is
+	// the only path that skips this. Without that explicit flag, bootstrapToken
+	// is always required (main.go fatals if unset outside dev+open-registration).
+	if !s.openRegistration {
+		// Fail closed: reject if bootstrap token is not configured
+		if s.bootstrapToken == "" {
+			writeError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
+			return
+		}
+		provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
+		// HMAC-compare to prevent length-leak from ConstantTimeCompare
+		if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+			return
+		}
+	}
+
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if len(req.Name) < 2 {
+		writeError(w, http.StatusBadRequest, "name must be at least 2 characters")
+		return
+	}
+	if len(req.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
+		return
+	}
+
+	if !emailRegex.MatchString(req.Email) {
+		writeError(w, http.StatusBadRequest, "invalid email format")
+		return
+	}
+	if len(req.Email) > 256 {
+		writeError(w, http.StatusBadRequest, "email too long")
+		return
+	}
+
+	// Enforce max tenant count AFTER input validation to minimize DB load
+	// from malformed requests. Only counts active tenants.
+	var tenantCount int
+	if err := s.store.StateDB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE status = 'active'`).Scan(&tenantCount); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if tenantCount >= maxTenants {
+		writeError(w, http.StatusForbidden, "maximum tenants reached")
+		return
+	}
+
+	tenantID, err := generateID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	now := time.Now().Unix()
+
+	tx, err := s.store.StateDB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES (?, ?, ?, 'active', ?, ?)`,
+		tenantID, req.Name, req.Email, now, now,
+	)
+	if err != nil {
+		// Return generic non-500 error to prevent email enumeration while still
+		// signaling to the client that registration failed for a fixable reason.
+		// Operators can check server logs for the actual constraint violation.
+		writeError(w, http.StatusUnprocessableEntity, "registration failed, please check your details and try again")
+		return
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`,
+		tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
+	// Use keyID prefix as display hint, not the secret's prefix
+	if len(keyID) < 8 {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	prefix := keyID[:8]
+
+	_, err = tx.Exec(
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+		 VALUES (?, ?, 'default', ?, ?, ?)`,
+		keyID, tenantID, prefix, keyHash, now,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Return token in format "keyID.secret" for O(1) lookup
+	token := keyID + "." + apiKey
+
+	writeJSON(w, http.StatusCreated, RegisterResponse{
+		TenantID: tenantID,
+		APIKey:   token,
+	})
+}
+
+func (s *Server) handleTenantGet(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	var t TenantResponse
+	err := s.store.StateDB.QueryRow(
+		`SELECT id, name, email, status, created_at, updated_at FROM tenants WHERE id = ?`,
+		tenantID,
+	).Scan(&t.ID, &t.Name, &t.Email, &t.Status, &t.CreatedAt, &t.UpdatedAt)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleTenantUpdate(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	var req UpdateTenantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if req.Name != nil {
+		if len(*req.Name) < 2 || len(*req.Name) > 128 {
+			writeError(w, http.StatusBadRequest, "name must be 2-128 characters")
+			return
+		}
+		_, err := s.store.StateDB.Exec(
+			`UPDATE tenants SET name = ?, updated_at = ? WHERE id = ?`,
+			*req.Name, time.Now().Unix(), tenantID,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update tenant")
+			return
+		}
+	}
+
+	s.handleTenantGet(w, r)
+}
+
+func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+	now := time.Now().Unix()
+
+	tx, err := s.store.StateDB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
+		`UPDATE tenants SET status = 'suspended', updated_at = ? WHERE id = ?`,
+		now, tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete tenant")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	// Revoke all API keys for the suspended tenant
+	_, err = tx.Exec(
+		`UPDATE api_keys SET revoked_at = ? WHERE tenant_id = ? AND revoked_at IS NULL`,
+		now, tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Evict all cached keys for this tenant so suspension takes effect immediately
+	if s.authInvalidator != nil {
+		s.authInvalidator.InvalidateTenant(tenantID)
+	}
+
+	// Stop and remove all running containers for this tenant
+	if s.svcManager != nil {
+		s.svcManager.StopAllForTenant(r.Context(), tenantID)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// hmacEqual compares two strings in constant time regardless of length.
+// Unlike subtle.ConstantTimeCompare, this does not leak the length of either input.
+// Uses the server's master key as the HMAC key for domain separation.
+func hmacEqual(a, b string, key []byte) bool {
+	macA := hmac.New(sha256.New, key)
+	macA.Write([]byte(a))
+	macB := hmac.New(sha256.New, key)
+	macB.Write([]byte(b))
+	return hmac.Equal(macA.Sum(nil), macB.Sum(nil))
+}
+</file>
+
+</files>

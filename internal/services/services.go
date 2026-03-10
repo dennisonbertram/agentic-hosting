@@ -259,6 +259,12 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("pull image: %w", err)
 	}
 
+	// Re-verify service still exists after the slow image pull.
+	// The user may have deleted the service while we were pulling.
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return fmt.Errorf("service deleted during deploy")
+	}
+
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
 		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
@@ -286,7 +292,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	now := time.Now().Unix()
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ?`,
 		containerID, now, serviceID,
 	)
 	if err != nil {

@@ -82,6 +82,16 @@ func main() {
 	}
 	defer dockerClient.Close()
 
+	// Verify gVisor runtime is available (fail closed in production)
+	if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
+		if !*devMode {
+			log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+		}
+		log.Printf("WARNING: %v. Containers will fail to start without gVisor.", err)
+	} else {
+		log.Printf("gVisor (runsc) runtime verified")
+	}
+
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
 		Store:            store,

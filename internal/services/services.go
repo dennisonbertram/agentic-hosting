@@ -183,6 +183,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	if port <= 0 {
 		port = 8000
 	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("port must be between 1 and 65535")
+	}
 
 	_, err = m.db.ExecContext(ctx,
 		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)

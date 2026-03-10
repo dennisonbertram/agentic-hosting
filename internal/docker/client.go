@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -31,6 +32,30 @@ func NewClient() (*Client, error) {
 // Close releases the Docker client resources.
 func (c *Client) Close() error {
 	return c.cli.Close()
+}
+
+// VerifyGVisorRuntime checks that the Docker daemon has gVisor (runsc) configured.
+// Returns an error if the runtime is not available.
+func (c *Client) VerifyGVisorRuntime(ctx context.Context) error {
+	info, err := c.cli.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("docker info: %w", err)
+	}
+	for name := range info.Runtimes {
+		if name == "runsc" {
+			return nil
+		}
+	}
+	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon; available runtimes: %v", runtimeNames(info.Runtimes))
+}
+
+// runtimeNames extracts runtime names from the map for error messages.
+func runtimeNames(runtimes map[string]system.RuntimeWithStatus) []string {
+	names := make([]string, 0, len(runtimes))
+	for k := range runtimes {
+		names = append(names, k)
+	}
+	return names
 }
 
 // ContainerInfo holds inspected container state.

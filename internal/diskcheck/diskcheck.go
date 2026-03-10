@@ -16,13 +16,19 @@ func Check(path string, warnPct, blockPct float64) error {
 		return fmt.Errorf("check disk space: %w", err)
 	}
 
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	totalBytes := float64(stat.Blocks) * float64(stat.Bsize)
+	freeBytes := float64(stat.Bavail) * float64(stat.Bsize)
 	if totalBytes == 0 {
 		return nil // can't determine, allow
 	}
 
-	usedPct := float64(totalBytes-freeBytes) / float64(totalBytes) * 100
+	// Convert to float64 before subtraction to prevent uint64 underflow.
+	// Bavail can theoretically exceed Blocks on some filesystems.
+	usedBytes := totalBytes - freeBytes
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+	usedPct := usedBytes / totalBytes * 100
 
 	if usedPct >= blockPct {
 		return fmt.Errorf("insufficient disk space (%.1f%% used, threshold %.0f%%)", usedPct, blockPct)

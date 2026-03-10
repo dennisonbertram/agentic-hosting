@@ -1638,7 +1638,14 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("port must be between 1 and 65535")
 	}
 
-	_, err = m.db.ExecContext(ctx,
+	// Use a transaction so service insert + env vars are atomic.
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
 		 VALUES (?, ?, ?, 'created', ?, ?, '', ?, ?)`,
 		id, tenantID, req.Name, req.Image, port, now, now,
@@ -1648,9 +1655,25 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	if len(req.Env) > 0 {
-		if err := m.setEnvVars(ctx, id, req.Env); err != nil {
-			return nil, fmt.Errorf("set env vars: %w", err)
+		for k, v := range req.Env {
+			encrypted, encErr := crypto.Encrypt([]byte(v), m.masterKey)
+			if encErr != nil {
+				return nil, fmt.Errorf("encrypt env var %s: %w", k, encErr)
+			}
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO service_env (service_id, key, value_encrypted, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(service_id, key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at`,
+				id, k, encrypted, now, now,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("insert env var %s: %w", k, err)
+			}
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit service create: %w", err)
 	}
 
 	return &Service{
@@ -1837,8 +1860,12 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 	}
 
 	if svc.ContainerID != "" {
-		_ = m.docker.StopContainer(ctx, svc.ContainerID)
-		_ = m.docker.RemoveContainer(ctx, svc.ContainerID)
+		if stopErr := m.docker.StopContainer(ctx, svc.ContainerID); stopErr != nil {
+			log.Printf("WARNING: failed to stop container %s for service %s: %v", svc.ContainerID, serviceID, stopErr)
+		}
+		if rmErr := m.docker.RemoveContainer(ctx, svc.ContainerID); rmErr != nil {
+			log.Printf("WARNING: failed to remove container %s for service %s: %v (orphan container may remain)", svc.ContainerID, serviceID, rmErr)
+		}
 	}
 
 	_, err = m.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND tenant_id = ?`, serviceID, tenantID)
@@ -1866,8 +1893,12 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 			continue
 		}
 		if containerID.Valid && containerID.String != "" {
-			_ = m.docker.StopContainer(ctx, containerID.String)
-			_ = m.docker.RemoveContainer(ctx, containerID.String)
+			if stopErr := m.docker.StopContainer(ctx, containerID.String); stopErr != nil {
+				log.Printf("WARNING: failed to stop container %s for tenant %s: %v", containerID.String, tenantID, stopErr)
+			}
+			if rmErr := m.docker.RemoveContainer(ctx, containerID.String); rmErr != nil {
+				log.Printf("WARNING: failed to remove container %s for tenant %s: %v (orphan may remain)", containerID.String, tenantID, rmErr)
+			}
 		}
 		m.updateStatus(ctx, svcID, "stopped")
 	}
@@ -2012,17 +2043,23 @@ func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Se
 }
 
 func (m *Manager) updateStatus(ctx context.Context, serviceID, status string) {
-	m.db.ExecContext(ctx,
+	_, err := m.db.ExecContext(ctx,
 		`UPDATE services SET status = ?, updated_at = ? WHERE id = ?`,
 		status, time.Now().Unix(), serviceID,
 	)
+	if err != nil {
+		log.Printf("ERROR: failed to update status for service %s to %s: %v", serviceID, status, err)
+	}
 }
 
 func (m *Manager) updateStatusWithError(ctx context.Context, serviceID, status, lastError string) {
-	m.db.ExecContext(ctx,
+	_, err := m.db.ExecContext(ctx,
 		`UPDATE services SET status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
 		status, lastError, time.Now().Unix(), serviceID,
 	)
+	if err != nil {
+		log.Printf("ERROR: failed to update status/error for service %s to %s: %v", serviceID, status, err)
+	}
 }
 
 func (m *Manager) setEnvVars(ctx context.Context, serviceID string, vars map[string]string) error {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paasd/paasd/internal/middleware"
@@ -79,9 +80,11 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deploy asynchronously — return immediately with status "deploying".
-	// Use context.Background() because r.Context() is canceled after the response.
+	// Use a bounded context (10 min) to prevent goroutine leaks from stuck deploys.
 	go func(tid, sid string) {
-		if err := s.svcManager.Deploy(context.Background(), tid, sid); err != nil {
+		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
 			log.Printf("deploy failed for service %s: %v", sid, err)
 			return
 		}

@@ -242,6 +242,10 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 // Deploy pulls the image, reads env vars, creates and starts the container.
 // Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	if m.docker == nil {
+		m.updateStatusWithError(ctx, serviceID, "failed", "Docker client not configured")
+		return fmt.Errorf("docker client not configured")
+	}
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
 		m.updateStatusWithError(ctx, serviceID, "failed", err.Error())
 		return err
@@ -314,12 +318,22 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 
 	now := time.Now().Unix()
-	_, err = m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ?`,
-		containerID, now, serviceID,
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		containerID, now, serviceID, tenantID,
 	)
 	if err != nil {
+		// Container is running but DB update failed; try to clean up
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
 		return fmt.Errorf("update service: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Service was deleted while we were deploying; clean up the container
+		log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+		return fmt.Errorf("service deleted during deploy")
 	}
 	return nil
 }

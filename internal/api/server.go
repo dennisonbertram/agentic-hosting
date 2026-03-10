@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -110,6 +111,16 @@ func writeError(w http.ResponseWriter, code int, message string) {
 // All handlers in the api package should use this.
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	httpx.WriteJSON(w, code, v)
+}
+
+// writeDecodeError writes a 413 if the error is from MaxBytesReader, otherwise 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid request body")
 }
 
 func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {

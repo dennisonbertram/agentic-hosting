@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -167,7 +168,9 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 	t.lastSeen[keyID] = now
 	t.mu.Unlock()
 
-	t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID)
+	if _, err := t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID); err != nil {
+		log.Printf("auth: failed to update last_used_at for key %s: %v", keyID, err)
+	}
 }
 
 func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
@@ -210,6 +213,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 			if cached, ok := cache.get(keyID); ok {
 				// Verify expiry locally even on cache hit
 				if cached.expiresAt != nil && time.Now().Unix() > *cached.expiresAt {
+					cache.invalidate(keyID) // force DB re-check on next request
 					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 					return
 				}

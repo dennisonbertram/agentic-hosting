@@ -79,7 +79,11 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildDetailedHealth() DetailedHealthResponse {
-	resp := DetailedHealthResponse{Status: "ok"}
+	resp := DetailedHealthResponse{
+		Status: "ok",
+		Docker: DockerInfo{Available: false},
+		GVisor: GVisorInfo{Available: false},
+	}
 
 	// Check Docker with 5s timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

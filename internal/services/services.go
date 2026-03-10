@@ -246,7 +246,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 // Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
 	if m.docker == nil {
-		m.updateStatusWithError(ctx, serviceID, "failed", "Docker client not configured")
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "Docker client not configured")
 		return fmt.Errorf("docker client not configured")
 	}
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
@@ -258,7 +258,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	case m.deployQueue <- struct{}{}:
 		defer func() { <-m.deployQueue }()
 	default:
-		m.updateStatusWithError(ctx, serviceID, "failed", "deploy queue full; try again later")
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "deploy queue full; try again later")
 		return fmt.Errorf("deploy queue full; try again later")
 	}
 
@@ -275,17 +275,17 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return err
 	}
 
-	m.updateStatus(ctx, serviceID, "deploying")
+	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
 
 	// Ensure per-tenant network exists for isolation
 	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
 	if err != nil {
-		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
 	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
-		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
 		return fmt.Errorf("pull image: %w", err)
 	}
 
@@ -297,7 +297,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
-		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
@@ -316,7 +316,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil, limits)
 	if err != nil {
-		m.updateStatusWithError(ctx, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		return fmt.Errorf("run container: %w", err)
 	}
 
@@ -628,10 +628,30 @@ func (m *Manager) updateStatus(ctx context.Context, serviceID, status string) {
 	}
 }
 
+func (m *Manager) updateStatusScoped(ctx context.Context, tenantID, serviceID, status string) {
+	_, err := m.db.ExecContext(ctx,
+		`UPDATE services SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		status, time.Now().Unix(), serviceID, tenantID,
+	)
+	if err != nil {
+		log.Printf("ERROR: failed to update status for service %s to %s: %v", serviceID, status, err)
+	}
+}
+
 func (m *Manager) updateStatusWithError(ctx context.Context, serviceID, status, lastError string) {
 	_, err := m.db.ExecContext(ctx,
 		`UPDATE services SET status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
 		status, lastError, time.Now().Unix(), serviceID,
+	)
+	if err != nil {
+		log.Printf("ERROR: failed to update status/error for service %s to %s: %v", serviceID, status, err)
+	}
+}
+
+func (m *Manager) updateStatusWithErrorScoped(ctx context.Context, tenantID, serviceID, status, lastError string) {
+	_, err := m.db.ExecContext(ctx,
+		`UPDATE services SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		status, lastError, time.Now().Unix(), serviceID, tenantID,
 	)
 	if err != nil {
 		log.Printf("ERROR: failed to update status/error for service %s to %s: %v", serviceID, status, err)

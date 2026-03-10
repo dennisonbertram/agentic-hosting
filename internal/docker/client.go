@@ -191,7 +191,7 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 	} else if traefikID != "" {
 		if connErr := c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil); connErr != nil {
 			// "already connected" is expected and safe to ignore
-			if !strings.Contains(connErr.Error(), "already exists") {
+			if !strings.Contains(connErr.Error(), "already") {
 				log.Printf("WARNING: failed to connect Traefik to network %s: %v", tenantNet, connErr)
 			}
 		}

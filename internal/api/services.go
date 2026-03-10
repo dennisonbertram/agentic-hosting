@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paasd/paasd/internal/middleware"
@@ -29,17 +30,20 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
 		return
 	}
-	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
-		return
-	}
-	if len(req.Image) > 512 {
-		writeError(w, http.StatusBadRequest, "image must be at most 512 characters")
+
+	// Validate image format and registry allowlist
+	if err := services.ValidateImage(req.Image); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	svc, err := s.svcManager.Create(r.Context(), tenantID, req)
 	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "service limit reached") {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create service")
 		return
 	}

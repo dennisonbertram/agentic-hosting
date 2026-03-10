@@ -370,6 +370,11 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		s.authInvalidator.InvalidateTenant(tenantID)
 	}
 
+	// Stop and remove all running containers for this tenant
+	if s.svcManager != nil {
+		s.svcManager.StopAllForTenant(r.Context(), tenantID)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -7,6 +7,9 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/paasd/paasd/internal/crypto"
@@ -35,20 +38,83 @@ type CreateRequest struct {
 	Env   map[string]string `json:"env"`
 }
 
+// maxConcurrentDeploys limits simultaneous deploy operations globally.
+const maxConcurrentDeploys = 5
+
+// imageAllowPattern restricts images to Docker Hub library (official) and
+// standard namespace/repo:tag format. Blocks registry prefixes (e.g., evil.com/img)
+// and SHA-less digests for now. Tenants cannot pull from arbitrary registries.
+var imageAllowPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)?(?::[a-zA-Z0-9._-]+)?$`)
+
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
 	db        *sql.DB
 	docker    *docker.Client
 	masterKey []byte
+	deploySem chan struct{} // bounded deploy concurrency
 }
 
 // NewManager creates a service manager.
 func NewManager(db *sql.DB, docker *docker.Client, masterKey []byte) *Manager {
-	return &Manager{db: db, docker: docker, masterKey: masterKey}
+	return &Manager{
+		db:        db,
+		docker:    docker,
+		masterKey: masterKey,
+		deploySem: make(chan struct{}, maxConcurrentDeploys),
+	}
+}
+
+// ValidateImage checks that an image reference is allowed.
+// Blocks registry-prefixed images (must be Docker Hub only).
+func ValidateImage(img string) error {
+	if img == "" {
+		return fmt.Errorf("image is required")
+	}
+	if len(img) > 256 {
+		return fmt.Errorf("image reference too long")
+	}
+	// Block images with registry prefix (contains "." before first "/")
+	// e.g., "evil.com/image:tag" or "registry.io:5000/img"
+	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
+		prefix := img[:slashIdx]
+		if strings.ContainsAny(prefix, ".:") {
+			return fmt.Errorf("custom registries not allowed; use Docker Hub images only")
+		}
+	}
+	if !imageAllowPattern.MatchString(img) {
+		return fmt.Errorf("invalid image format")
+	}
+	return nil
 }
 
 // Create inserts a new service record (status=created, not yet running).
+// Enforces tenant quota (max_services).
 func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest) (*Service, error) {
+	// Validate image before anything else
+	if err := ValidateImage(req.Image); err != nil {
+		return nil, err
+	}
+
+	// Enforce tenant quota
+	var maxServices int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT max_services FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxServices)
+	if err != nil {
+		return nil, fmt.Errorf("check quota: %w", err)
+	}
+
+	var currentCount int
+	err = m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`, tenantID,
+	).Scan(&currentCount)
+	if err != nil {
+		return nil, fmt.Errorf("count services: %w", err)
+	}
+	if currentCount >= maxServices {
+		return nil, fmt.Errorf("service limit reached (max %d)", maxServices)
+	}
+
 	id, err := generateID()
 	if err != nil {
 		return nil, err
@@ -89,13 +155,29 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 }
 
 // Deploy pulls the image, reads env vars, creates and starts the container.
+// Uses a bounded semaphore to limit concurrent deploys.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	// Acquire deploy slot (bounded concurrency)
+	select {
+	case m.deploySem <- struct{}{}:
+		defer func() { <-m.deploySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	svc, err := m.getOwned(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
 	}
 
 	m.updateStatus(ctx, serviceID, "deploying")
+
+	// Ensure per-tenant network exists for isolation
+	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
+	if err != nil {
+		m.updateStatus(ctx, serviceID, "failed")
+		return fmt.Errorf("ensure tenant network: %w", err)
+	}
 
 	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
 		m.updateStatus(ctx, serviceID, "failed")
@@ -116,7 +198,6 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 	if p, ok := envVars["PORT"]; ok {
 		if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
-			// Ignore invalid PORT env var, use default
 			port = 8000
 		}
 	}
@@ -210,6 +291,33 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("delete service: %w", err)
 	}
 	return nil
+}
+
+// StopAllForTenant stops and removes all containers belonging to a tenant.
+// Called when a tenant is suspended/deleted to ensure no orphaned workloads.
+func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
+	// Find all services for this tenant
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, container_id FROM services WHERE tenant_id = ?`, tenantID,
+	)
+	if err != nil {
+		log.Printf("services: failed to list services for tenant %s: %v", tenantID, err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var svcID string
+		var containerID sql.NullString
+		if err := rows.Scan(&svcID, &containerID); err != nil {
+			continue
+		}
+		if containerID.Valid && containerID.String != "" {
+			_ = m.docker.StopContainer(ctx, containerID.String)
+			_ = m.docker.RemoveContainer(ctx, containerID.String)
+		}
+		m.updateStatus(ctx, svcID, "stopped")
+	}
 }
 
 // Logs returns a reader for the service container logs.

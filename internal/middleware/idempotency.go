@@ -93,6 +93,19 @@ func (rr *responseRecorder) Write(b []byte) (int, error) {
 	return rr.ResponseWriter.Write(b)
 }
 
+// Flush proxies to the underlying ResponseWriter if it supports http.Flusher.
+func (rr *responseRecorder) Flush() {
+	if f, ok := rr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter for middleware that uses
+// http.ResponseController or similar unwrapping patterns.
+func (rr *responseRecorder) Unwrap() http.ResponseWriter {
+	return rr.ResponseWriter
+}
+
 const maxHashBodySize = 1 << 20 // 1MB — matches server max body size
 
 // errBodyTooLarge is returned when the request body exceeds maxHashBodySize.

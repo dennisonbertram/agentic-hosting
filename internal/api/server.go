@@ -33,6 +33,9 @@ type Server struct {
 }
 
 func NewServer(cfg ServerConfig) *Server {
+	if cfg.Store == nil || cfg.Store.StateDB == nil {
+		panic("paasd: NewServer requires a non-nil Store with StateDB")
+	}
 	s := &Server{
 		store:            cfg.Store,
 		masterKey:        cfg.MasterKey,

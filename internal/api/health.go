@@ -129,7 +129,9 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 		}
 	}
 
-	if err := s.store.StateDB.Ping(); err != nil {
+	if s.store == nil || s.store.StateDB == nil {
+		resp.Status = "degraded"
+	} else if err := s.store.StateDB.Ping(); err != nil {
 		resp.Status = "degraded"
 	}
 

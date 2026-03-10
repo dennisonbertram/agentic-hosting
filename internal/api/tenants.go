@@ -43,19 +43,15 @@ type UpdateTenantRequest struct {
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
-// bootstrapToken is loaded from PAASD_BOOTSTRAP_TOKEN env var.
-// If set, registration requires this token in X-Bootstrap-Token header.
 var bootstrapToken string
 
 func init() {
 	bootstrapToken = strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
 }
 
-// IP-based rate limiter for registration with bounded map and cleanup.
 type registrationLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*regEntry
-	// Global counter
+	mu             sync.Mutex
+	entries        map[string]*regEntry
 	globalCount    int
 	globalWindowAt time.Time
 }
@@ -77,7 +73,6 @@ const (
 )
 
 func init() {
-	// Periodic cleanup of expired entries
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
@@ -99,7 +94,6 @@ func (rl *registrationLimiter) allow(ip string) bool {
 
 	now := time.Now()
 
-	// Global rate limit
 	if now.After(rl.globalWindowAt) {
 		rl.globalCount = 0
 		rl.globalWindowAt = now.Add(regWindow)
@@ -108,7 +102,6 @@ func (rl *registrationLimiter) allow(ip string) bool {
 		return false
 	}
 
-	// Evict oldest if at capacity
 	if len(rl.entries) >= regMaxEntries {
 		var oldestKey string
 		var oldestTime time.Time
@@ -146,7 +139,6 @@ func generateID() (string, error) {
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
-	// Bootstrap token gate (if configured)
 	if bootstrapToken != "" {
 		provided := r.Header.Get("X-Bootstrap-Token")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(bootstrapToken)) != 1 {
@@ -155,7 +147,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// IP-based + global rate limiting
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if ip == "" {
 		ip = r.RemoteAddr
@@ -172,7 +163,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate name
 	if len(req.Name) < 2 {
 		http.Error(w, `{"error":"name must be at least 2 characters"}`, http.StatusBadRequest)
 		return
@@ -182,7 +172,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate email format
 	if !emailRegex.MatchString(req.Email) {
 		http.Error(w, `{"error":"invalid email format"}`, http.StatusBadRequest)
 		return
@@ -212,12 +201,10 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		tenantID, req.Name, req.Email, now, now,
 	)
 	if err != nil {
-		// Generic message to prevent email enumeration
 		http.Error(w, `{"error":"registration failed"}`, http.StatusConflict)
 		return
 	}
 
-	// Create default quotas
 	_, err = tx.Exec(
 		`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`,
 		tenantID,
@@ -227,18 +214,14 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate API key
 	apiKey, err := crypto.GenerateAPIKey()
 	if err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	keyHash, err := crypto.HashPassword(apiKey)
-	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
-	}
+	// Use HMAC-SHA256 instead of bcrypt for API key hashing (fast, constant-time)
+	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
 
 	keyID, err := generateID()
 	if err != nil {

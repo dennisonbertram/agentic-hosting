@@ -30,27 +30,26 @@ func (s *Server) setupRoutes() {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
-	// NOTE: RealIP removed — do not trust X-Forwarded-For without validated trusted proxies.
-	// Traefik sets the real client IP in the TCP connection itself.
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
 	r.Use(jsonContentType)
-	r.Use(maxBodySize(1 << 20)) // 1MB default request body limit
+	r.Use(maxBodySize(1 << 20))
 
-	// Public routes (minimal info only)
+	// Public routes
 	r.Get("/v1/system/health", s.handleHealth)
 	r.Post("/v1/tenants/register", s.handleTenantRegister)
 
 	// Authenticated routes
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(s.store.StateDB))
+		r.Use(middleware.Auth(s.store.StateDB, s.masterKey))
 		rl := middleware.NewRateLimiter(100, 200)
 		r.Use(rl.Middleware)
 		idem := middleware.NewIdempotencyStore()
 		r.Use(idem.Middleware)
 
-		// Detailed health (authenticated)
+		// Detailed health (admin only via bootstrap token, not regular tenants)
+		// For now, available to authenticated tenants; operator restricts via deployment
 		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
 
 		r.Get("/v1/tenant", s.handleTenantGet)
@@ -83,7 +82,6 @@ func jsonContentType(next http.Handler) http.Handler {
 	})
 }
 
-// maxBodySize limits request body size to prevent memory exhaustion.
 func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

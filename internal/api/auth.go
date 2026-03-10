@@ -14,7 +14,7 @@ const maxKeysPerTenant = 20
 
 type CreateKeyRequest struct {
 	Name      string `json:"name"`
-	ExpiresIn *int64 `json:"expires_in,omitempty"` // seconds
+	ExpiresIn *int64 `json:"expires_in,omitempty"`
 }
 
 type CreateKeyResponse struct {
@@ -47,13 +47,11 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		req.Name = "unnamed"
 	}
 
-	// Validate ExpiresIn if provided
 	if req.ExpiresIn != nil && *req.ExpiresIn <= 0 {
 		http.Error(w, `{"error":"expires_in must be positive"}`, http.StatusBadRequest)
 		return
 	}
 
-	// Enforce per-tenant key quota
 	var keyCount int
 	err := s.store.StateDB.QueryRow(
 		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
@@ -74,11 +72,8 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keyHash, err := crypto.HashPassword(apiKey)
-	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
-	}
+	// Use HMAC-SHA256 for fast, constant-time API key hashing
+	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
 
 	keyID, err := generateID()
 	if err != nil {

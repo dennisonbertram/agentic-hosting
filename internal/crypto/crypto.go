@@ -3,7 +3,9 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -12,6 +14,9 @@ import (
 )
 
 func Encrypt(plaintext []byte, key []byte) (string, error) {
+	if len(key) < 32 {
+		return "", fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+	}
 	block, err := aes.NewCipher(key[:32])
 	if err != nil {
 		return "", fmt.Errorf("new cipher: %w", err)
@@ -32,6 +37,9 @@ func Encrypt(plaintext []byte, key []byte) (string, error) {
 }
 
 func Decrypt(ciphertextHex string, key []byte) ([]byte, error) {
+	if len(key) < 32 {
+		return nil, fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+	}
 	ciphertext, err := hex.DecodeString(ciphertextHex)
 	if err != nil {
 		return nil, fmt.Errorf("hex decode: %w", err)
@@ -71,6 +79,20 @@ func HashPassword(password string) (string, error) {
 
 func VerifyPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// HashAPIKey produces a fast, constant-time-comparable hash for API key verification.
+// Uses HMAC-SHA256 with a server secret to prevent offline brute-force if DB is leaked.
+func HashAPIKey(key string, secret []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyAPIKey compares an API key against a stored HMAC hash in constant time.
+func VerifyAPIKey(storedHash, key string, secret []byte) bool {
+	computed := HashAPIKey(key, secret)
+	return hmac.Equal([]byte(storedHash), []byte(computed))
 }
 
 func GenerateAPIKey() (string, error) {

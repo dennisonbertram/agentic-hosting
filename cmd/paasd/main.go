@@ -19,7 +19,17 @@ func main() {
 	port := flag.String("port", "8080", "HTTP port")
 	dbPath := flag.String("db-path", "/var/lib/paasd/paasd.db", "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", "/var/lib/paasd/master.key", "Path to master encryption key")
+	devMode := flag.Bool("dev", false, "Development mode (relaxes security requirements)")
 	flag.Parse()
+
+	// Check bootstrap token requirement
+	bootstrapToken := strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
+	if bootstrapToken == "" && !*devMode {
+		log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set (or use --dev for development mode)")
+	}
+	if bootstrapToken == "" {
+		log.Printf("WARNING: running in dev mode without bootstrap token — registration is open")
+	}
 
 	// Read master key
 	masterKeyData, err := os.ReadFile(*masterKeyPath)
@@ -48,7 +58,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1MB
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Graceful shutdown
@@ -61,6 +71,7 @@ func main() {
 		}
 	}()
 	log.Printf("paasd listening on :%s", *port)
+	log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
 
 	<-done
 	log.Println("shutting down...")

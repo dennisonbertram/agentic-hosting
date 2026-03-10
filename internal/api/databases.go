@@ -1,11 +1,9 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paasd/paasd/internal/databases"
@@ -33,9 +31,7 @@ func (s *Server) handleDatabaseCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	db, err := s.dbManager.Create(ctx, tenantID, req)
+	db, err := s.dbManager.Create(r.Context(), tenantID, req)
 	if err != nil {
 		log.Printf("database create error: %v", err)
 		if isUserError(err) {

@@ -141,18 +141,18 @@ func (s *Server) setupRoutes() {
 		// Build log streaming is in a separate group (no 30s timeout)
 		r.Delete("/v1/services/{serviceID}/builds/{buildID}", s.handleBuildCancel)
 
-		// Database routes
-		r.Post("/v1/databases", s.handleDatabaseCreate)
+		// Database routes (except POST which needs longer timeout)
 		r.Get("/v1/databases", s.handleDatabaseList)
 		r.Get("/v1/databases/{dbID}", s.handleDatabaseGet)
 		r.Get("/v1/databases/{dbID}/connection-string", s.handleDatabaseConnectionString)
 		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
 	})
 
-	// Streaming endpoints — auth required but no 30s timeout (for ?follow=true)
+	// Long-running endpoints — auth required but no 30s timeout
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMW)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
+		r.Post("/v1/databases", s.handleDatabaseCreate)
 	})
 
 	s.router = r

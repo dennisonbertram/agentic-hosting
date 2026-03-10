@@ -54,10 +54,52 @@ func NewManager(db *sql.DB, dockerClient *docker.Client, masterKey []byte) *Mana
 	if dockerClient == nil {
 		panic("databases: NewManager requires non-nil docker client")
 	}
-	return &Manager{
+	mgr := &Manager{
 		db:        db,
 		docker:    dockerClient,
 		masterKey: masterKey,
+	}
+	mgr.ReconcileStale()
+	return mgr
+}
+
+// ReconcileStale marks databases stuck in "provisioning" as "failed" and
+// attempts to clean up their Docker resources. Called on startup.
+func (m *Manager) ReconcileStale() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, container_id, volume_name FROM databases WHERE status = 'provisioning'`)
+	if err != nil {
+		log.Printf("databases: reconcile query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var stale []struct{ id, containerID, volumeName string }
+	for rows.Next() {
+		var s struct{ id, containerID, volumeName string }
+		if err := rows.Scan(&s.id, &s.containerID, &s.volumeName); err != nil {
+			log.Printf("databases: reconcile scan failed: %v", err)
+			continue
+		}
+		stale = append(stale, s)
+	}
+
+	for _, s := range stale {
+		log.Printf("databases: reconciling stale database %s", s.id)
+		if s.containerID != "" {
+			_ = m.docker.StopContainer(ctx, s.containerID)
+			_ = m.docker.RemoveContainer(ctx, s.containerID)
+		}
+		if s.volumeName != "" {
+			_ = m.docker.RemoveVolume(ctx, s.volumeName)
+		}
+		m.updateStatus(ctx, s.id, "failed")
+	}
+	if len(stale) > 0 {
+		log.Printf("databases: reconciled %d stale databases", len(stale))
 	}
 }
 
@@ -70,21 +112,31 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("name is required (max 128 chars)")
 	}
 
-	// Check quota
-	var count int
-	if err := m.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`, tenantID,
-	).Scan(&count); err != nil {
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= 3 {
-		return nil, fmt.Errorf("database quota exceeded (max 3)")
-	}
-
 	id, err := generateID()
 	if err != nil {
 		return nil, err
 	}
+
+	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
+	// from both seeing count < 3
+	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	// Force write lock with a dummy write (SQLite IMMEDIATE)
+	_, _ = tx.ExecContext(ctx, `UPDATE databases SET updated_at = updated_at WHERE id = 'lock'`)
+	var count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`, tenantID,
+	).Scan(&count); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("check quota: %w", err)
+	}
+	if count >= 3 {
+		tx.Rollback()
+		return nil, fmt.Errorf("database quota exceeded (max 3)")
+	}
+	tx.Commit()
 
 	// Generate password
 	password, err := randomHex(32)
@@ -299,6 +351,7 @@ func (m *Manager) GetConnectionString(ctx context.Context, tenantID, dbID string
 }
 
 // Delete destroys a database: stops container, removes volume, deletes record.
+// Only deletes the DB record after Docker cleanup succeeds to avoid orphaning resources.
 func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 	d, err := m.Get(ctx, tenantID, dbID)
 	if err != nil {
@@ -309,20 +362,30 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 	if d.ContainerID != "" {
 		if err := m.docker.StopContainer(ctx, d.ContainerID); err != nil {
 			log.Printf("databases: stop container %s: %v", d.ContainerID, err)
+			// Container may not exist (already stopped/removed) — continue
 		}
 		if err := m.docker.RemoveContainer(ctx, d.ContainerID); err != nil {
-			log.Printf("databases: remove container %s: %v", d.ContainerID, err)
+			// If container removal fails (not just "not found"), keep the record
+			if !strings.Contains(err.Error(), "No such container") &&
+				!strings.Contains(err.Error(), "not found") {
+				log.Printf("databases: remove container %s failed, keeping record: %v", d.ContainerID, err)
+				return fmt.Errorf("failed to remove database container")
+			}
 		}
 	}
 
 	// Remove volume
 	if d.VolumeName != "" {
 		if err := m.docker.RemoveVolume(ctx, d.VolumeName); err != nil {
-			log.Printf("databases: remove volume %s: %v", d.VolumeName, err)
+			if !strings.Contains(err.Error(), "no such volume") &&
+				!strings.Contains(err.Error(), "not found") {
+				log.Printf("databases: remove volume %s failed, keeping record: %v", d.VolumeName, err)
+				return fmt.Errorf("failed to remove database volume")
+			}
 		}
 	}
 
-	// Delete record
+	// Delete record only after Docker cleanup succeeded
 	_, err = m.db.ExecContext(ctx, `DELETE FROM databases WHERE id = ? AND tenant_id = ?`, dbID, tenantID)
 	if err != nil {
 		return fmt.Errorf("delete database record: %w", err)

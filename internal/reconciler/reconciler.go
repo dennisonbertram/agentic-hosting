@@ -240,6 +240,65 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 	}
 
+	// 4. Repair split-brain: find containers with paasd.service label that exist
+	// in Docker but whose container_id is not in the DB (e.g. crash after RunContainer
+	// but before DB update). Update the DB to point to the actual container.
+	allSvcContainers, listErr := r.docker.ListContainersByLabel(ctx, "paasd.service", "")
+	if listErr == nil {
+		for _, cid := range allSvcContainers {
+			info, inspectErr := r.docker.InspectContainer(ctx, cid)
+			if inspectErr != nil {
+				continue
+			}
+			// Get service ID and tenant ID from container labels
+			labels := r.docker.GetContainerLabels(ctx, cid)
+			if labels == nil {
+				continue
+			}
+			svcID := labels["paasd.service"]
+			tenantID := labels["paasd.tenant"]
+			if svcID == "" || tenantID == "" {
+				continue
+			}
+			// Check if DB has a different or empty container_id for this service
+			var dbContainerID sql.NullString
+			var dbStatus string
+			err := r.db.QueryRowContext(ctx,
+				`SELECT container_id, status FROM services WHERE id = ? AND tenant_id = ?`,
+				svcID, tenantID).Scan(&dbContainerID, &dbStatus)
+			if err != nil {
+				continue // service not in DB, GC will handle orphan container
+			}
+			currentDBCID := ""
+			if dbContainerID.Valid {
+				currentDBCID = dbContainerID.String
+			}
+			if currentDBCID != cid {
+				// Split-brain detected: container exists but DB points elsewhere
+				if info.Status == "running" {
+					// Container is running — repair DB to point to it
+					log.Printf("reconciler: SPLIT-BRAIN REPAIR: service %s has running container %s but DB has container_id=%q; repairing",
+						svcID, cid[:12], currentDBCID)
+					_, repairErr := r.db.ExecContext(ctx,
+						`UPDATE services SET container_id = ?, status = 'running', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+						cid, time.Now().Unix(), svcID, tenantID)
+					if repairErr != nil {
+						log.Printf("reconciler: failed to repair split-brain for service %s: %v", svcID, repairErr)
+					} else {
+						fixed++
+					}
+				} else {
+					// Container exists but not running — stop+remove it, let normal flow handle
+					log.Printf("reconciler: SPLIT-BRAIN CLEANUP: service %s has non-running container %s (status=%s) not in DB; removing",
+						svcID, cid[:12], info.Status)
+					_ = r.docker.StopContainer(ctx, cid)
+					_ = r.docker.RemoveContainer(ctx, cid)
+					fixed++
+				}
+			}
+		}
+	}
+
 	if checked > 0 || fixed > 0 {
 		log.Printf("reconciler: checked=%d fixed=%d", checked, fixed)
 	}

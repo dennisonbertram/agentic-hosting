@@ -312,6 +312,15 @@ func (c *Client) ListContainersByLabel(ctx context.Context, label, value string)
 	return ids, nil
 }
 
+// GetContainerLabels returns the labels for a container, or nil on error.
+func (c *Client) GetContainerLabels(ctx context.Context, containerID string) map[string]string {
+	info, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil
+	}
+	return info.Config.Labels
+}
+
 // containerName generates a deterministic container name from tenant and service IDs.
 func containerName(tenantID, serviceID string) string {
 	return fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)
@@ -354,9 +363,17 @@ func (c *Client) CreateVolume(ctx context.Context, name string) error {
 	return nil
 }
 
-// RemoveVolume removes a named Docker volume.
+// RemoveVolume removes a named Docker volume (force).
 func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 	return c.cli.VolumeRemove(ctx, name, true)
+}
+
+// RemoveVolumeSafe removes a named Docker volume without force.
+// This will fail if the volume is still in use by a container, which is the
+// desired behavior for GC — we never want to force-remove a volume that might
+// be attached to a running container.
+func (c *Client) RemoveVolumeSafe(ctx context.Context, name string) error {
+	return c.cli.VolumeRemove(ctx, name, false)
 }
 
 // RunDatabase creates and starts a database container with host port mapping
@@ -414,6 +431,19 @@ func (c *Client) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string
 	}
 
 	return resp.ID, nil
+}
+
+// StopAndRemoveByName stops and removes a container by its name.
+// Returns nil if the container doesn't exist.
+func (c *Client) StopAndRemoveByName(ctx context.Context, name string) error {
+	// Try to inspect by name
+	info, err := c.cli.ContainerInspect(ctx, name)
+	if err != nil {
+		return err // container doesn't exist or other error
+	}
+	timeout := 10
+	_ = c.cli.ContainerStop(ctx, info.ID, container.StopOptions{Timeout: &timeout})
+	return c.cli.ContainerRemove(ctx, info.ID, container.RemoveOptions{Force: true})
 }
 
 // ListVolumes returns volume names matching the given prefix.

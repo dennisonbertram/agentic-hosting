@@ -67,6 +67,18 @@ var deniedEnvKeys = map[string]bool{
 	"PATH":           true,
 }
 
+// isNotFoundError returns true if the error indicates a container definitively
+// does not exist (Docker 404). Transient errors return false.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "No such container") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "404")
+}
+
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
 	db          *sql.DB
@@ -306,8 +318,17 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	// Re-verify service still exists after the slow image pull.
 	// The user may have deleted the service while we were pulling.
-	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+	svc, err = m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
 		return fmt.Errorf("service deleted during deploy")
+	}
+
+	// Remove existing container before creating new one to prevent
+	// "name already in use" errors on redeploy.
+	if svc.ContainerID != "" {
+		log.Printf("services: removing existing container %s before redeploy of %s", svc.ContainerID[:12], serviceID)
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		_ = m.docker.RemoveContainer(ctx, svc.ContainerID)
 	}
 
 	envVars, err := m.getEnvVars(ctx, serviceID)
@@ -456,6 +477,13 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 			log.Printf("WARNING: failed to remove container %s for service %s: %v (orphan container may remain)", svc.ContainerID, serviceID, rmErr)
 		}
 	}
+	// Also try cleanup by deterministic container name to catch split-brain orphans
+	// where a container exists but DB doesn't have its ID.
+	expectedName := fmt.Sprintf("paasd-%s-%s", tenantID, serviceID)
+	if cleanupErr := m.docker.StopAndRemoveByName(ctx, expectedName); cleanupErr != nil {
+		// Not an error — container may not exist by this name
+		log.Printf("services: cleanup by name %s: %v", expectedName, cleanupErr)
+	}
 
 	_, err = m.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND tenant_id = ?`, serviceID, tenantID)
 	if err != nil {
@@ -465,7 +493,16 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 }
 
 // StopAllForTenant stops and removes all containers belonging to a tenant.
+// Also cleans up any split-brain orphan containers by label.
 func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
+	// First, clean up any containers with this tenant's label (catches split-brain orphans)
+	if labelContainers, err := m.docker.ListContainersByLabel(ctx, "paasd.tenant", tenantID); err == nil {
+		for _, cid := range labelContainers {
+			_ = m.docker.StopContainer(ctx, cid)
+			_ = m.docker.RemoveContainer(ctx, cid)
+		}
+	}
+
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, container_id FROM services WHERE tenant_id = ?`, tenantID,
 	)
@@ -700,20 +737,31 @@ func (m *Manager) ResetCircuitBreaker(ctx context.Context, tenantID, serviceID s
 	}
 
 	// If container exists, stop it before resetting.
-	// Verify the stop actually worked to avoid DB/Docker split-brain.
+	// Treat "not found" as success (container already gone is a valid terminal state).
 	if svc.ContainerID != "" {
 		if stopErr := m.docker.StopContainer(ctx, svc.ContainerID); stopErr != nil {
-			// Check if container is genuinely gone (not found) vs stop failed
-			info, inspectErr := m.docker.InspectContainer(ctx, svc.ContainerID)
-			if inspectErr != nil {
-				// Can't verify container state — fail closed to avoid split-brain
-				return fmt.Errorf("cannot verify container state after stop failure: %v (stop error: %v)", inspectErr, stopErr)
+			if isNotFoundError(stopErr) {
+				// Container is already gone — safe to proceed
+				log.Printf("services: container %s already removed during reset", svc.ContainerID[:12])
+			} else {
+				// Stop failed for non-404 reason — check container state
+				info, inspectErr := m.docker.InspectContainer(ctx, svc.ContainerID)
+				if inspectErr != nil {
+					if isNotFoundError(inspectErr) {
+						// Container gone between stop and inspect — safe
+						log.Printf("services: container %s disappeared during reset", svc.ContainerID[:12])
+					} else {
+						// Can't verify container state — fail closed
+						return fmt.Errorf("cannot verify container state after stop failure: %v (stop error: %v)", inspectErr, stopErr)
+					}
+				} else if info.Status == "running" {
+					return fmt.Errorf("failed to stop container before reset: %w", stopErr)
+				}
+				// Container exists but not running — safe to proceed
 			}
-			if info.Status == "running" {
-				return fmt.Errorf("failed to stop container before reset: %w", stopErr)
-			}
-			// Container exists but not running — safe to proceed
 		}
+		// Also try to remove the container to clean up
+		_ = m.docker.RemoveContainer(ctx, svc.ContainerID)
 	}
 
 	_, err = m.db.ExecContext(ctx,

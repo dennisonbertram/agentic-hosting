@@ -99,7 +99,7 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	} else {
 		for _, name := range orphanedVolumes {
 			log.Printf("gc: removing orphaned volume %s", name)
-			if err := g.docker.RemoveVolume(ctx, name); err != nil {
+			if err := g.docker.RemoveVolumeSafe(ctx, name); err != nil {
 				log.Printf("gc: failed to remove volume %s: %v", name, err)
 			} else {
 				removed++
@@ -190,6 +190,11 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 
 	var orphaned []string
 	for _, name := range volumes {
+		// Strict prefix match — Docker name filter can be substring-based
+		if !strings.HasPrefix(name, "paasd-db-") {
+			continue
+		}
+
 		var count int
 		err := g.db.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM databases WHERE volume_name = ?`, name).Scan(&count)

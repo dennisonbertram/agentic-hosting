@@ -63,10 +63,11 @@ type responseRecorder struct {
 }
 
 func (rr *responseRecorder) WriteHeader(code int) {
-	if !rr.wroteHeader {
-		rr.statusCode = code
-		rr.wroteHeader = true
+	if rr.wroteHeader {
+		return
 	}
+	rr.statusCode = code
+	rr.wroteHeader = true
 	rr.ResponseWriter.WriteHeader(code)
 }
 

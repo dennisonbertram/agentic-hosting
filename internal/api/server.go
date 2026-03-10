@@ -28,6 +28,7 @@ type Server struct {
 	bootstrapToken   string
 	openRegistration bool
 	router           chi.Router
+	authInvalidator  *middleware.AuthCacheInvalidator
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -68,7 +69,9 @@ func (s *Server) setupRoutes() {
 
 	// Authenticated routes
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(s.store.StateDB, s.masterKey))
+		authMW, authInvalidator := middleware.Auth(s.store.StateDB, s.masterKey)
+		s.authInvalidator = authInvalidator
+		r.Use(authMW)
 		// Per-tenant rate limiter
 		rl := middleware.NewRateLimiter(100, 200)
 		r.Use(rl.Middleware)

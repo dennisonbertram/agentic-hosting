@@ -170,5 +170,10 @@ func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Evict from auth cache so revocation takes effect immediately
+	if s.authInvalidator != nil {
+		s.authInvalidator.InvalidateKey(keyID)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

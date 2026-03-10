@@ -83,17 +83,21 @@ func (s *Store) runMigrations() error {
 			continue
 		}
 
-		// Migration files must be prefixed with their target database.
-		// Files containing "metering" in name target MeteringDB, all others target StateDB.
+		// Migration files must be prefixed with their target database:
+		// "state_*.sql" -> StateDB, "metering_*.sql" -> MeteringDB.
+		// Any other naming is rejected to prevent silent misrouting.
 		var target *sql.DB
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".sql") {
 			continue
 		}
-		if strings.HasPrefix(name, "metering_") || strings.Contains(name, "_metering") {
-			target = s.MeteringDB
-		} else {
+		switch {
+		case strings.HasPrefix(name, "state_"):
 			target = s.StateDB
+		case strings.HasPrefix(name, "metering_"):
+			target = s.MeteringDB
+		default:
+			return fmt.Errorf("migration %q must start with state_ or metering_", name)
 		}
 
 		// Skip already-applied migrations

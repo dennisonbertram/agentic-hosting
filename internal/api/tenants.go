@@ -347,6 +347,11 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Evict all cached keys for this tenant so suspension takes effect immediately
+	if s.authInvalidator != nil {
+		s.authInvalidator.InvalidateTenant(tenantID)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -87,6 +87,35 @@ func (c *authCache) set(keyID string, entry *authCacheEntry) {
 	c.mu.Unlock()
 }
 
+func (c *authCache) invalidate(keyID string) {
+	c.mu.Lock()
+	delete(c.entries, keyID)
+	c.mu.Unlock()
+}
+
+// AuthCacheInvalidator allows callers to evict entries from the auth cache
+// when keys are revoked or tenants are suspended.
+type AuthCacheInvalidator struct {
+	cache *authCache
+	db    *sql.DB
+}
+
+// InvalidateKey removes a single key from the auth cache.
+func (a *AuthCacheInvalidator) InvalidateKey(keyID string) {
+	a.cache.invalidate(keyID)
+}
+
+// InvalidateTenant removes all cached keys belonging to the given tenant.
+func (a *AuthCacheInvalidator) InvalidateTenant(tenantID string) {
+	a.cache.mu.Lock()
+	for k, v := range a.cache.entries {
+		if v.tenantID == tenantID {
+			delete(a.cache.entries, k)
+		}
+	}
+	a.cache.mu.Unlock()
+}
+
 // lastUsedTracker samples last_used_at updates with bounded map.
 type lastUsedTracker struct {
 	mu       sync.Mutex
@@ -142,11 +171,12 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 	t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID)
 }
 
-func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
+func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
 	tracker := newLastUsedTracker(db)
 	cache := newAuthCache()
+	invalidator := &AuthCacheInvalidator{cache: cache, db: db}
 
-	return func(next http.Handler) http.Handler {
+	mw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
@@ -233,6 +263,8 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+
+	return mw, invalidator
 }
 
 func GetTenantID(ctx context.Context) string {

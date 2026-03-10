@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"regexp"
 	"sync"
@@ -131,11 +130,9 @@ func generateID() (string, error) {
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
-	// Rate limit BEFORE token check to prevent brute-force
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
+	// Rate limit BEFORE token check to prevent brute-force.
+	// Use trusted real IP (from X-Forwarded-For when behind loopback proxy).
+	ip := trustedRealIP(r)
 	if !regLimiter.allow(ip) {
 		w.Header().Set("Retry-After", "3600")
 		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)

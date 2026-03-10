@@ -165,6 +165,8 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 		Tmpfs: map[string]string{
 			"/tmp":     "rw,noexec,nosuid,size=64m",
 			"/var/run": "rw,noexec,nosuid,size=16m",
+			"/var/tmp": "rw,noexec,nosuid,size=16m",
+			"/run":     "rw,noexec,nosuid,size=16m",
 		},
 	}
 

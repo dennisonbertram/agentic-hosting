@@ -133,10 +133,11 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Scope by tenant + method + path + query string.
-		// Fail closed: skip caching if tenant ID is missing to prevent cross-tenant collisions.
+		// Fail closed: reject if tenant ID is missing when idempotency key is
+		// present, to prevent silent bypass of idempotency guarantees.
 		tenantID := GetTenantID(r.Context())
 		if tenantID == "" {
-			next.ServeHTTP(w, r)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		fullKey := tenantID + ":" + r.Method + ":" + r.URL.RequestURI() + ":" + key

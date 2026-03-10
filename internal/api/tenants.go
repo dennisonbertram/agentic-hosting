@@ -54,10 +54,6 @@ type regEntry struct {
 	windowAt time.Time
 }
 
-var regLimiter = &registrationLimiter{
-	entries: make(map[string]*regEntry),
-}
-
 const (
 	regMaxPerIPPerHour = 5
 	regGlobalPerHour   = 20
@@ -65,6 +61,11 @@ const (
 	regWindow          = 1 * time.Hour
 	maxTenants         = 1000
 )
+
+var regLimiter = &registrationLimiter{
+	entries:        make(map[string]*regEntry),
+	globalWindowAt: time.Now().Add(regWindow),
+}
 
 func init() {
 	go func() {

@@ -41,7 +41,8 @@ type DiskInfo struct {
 }
 
 var (
-	detailedHealthCache     *DetailedHealthResponse
+	detailedHealthCache     DetailedHealthResponse
+	detailedHealthCacheValid bool
 	detailedHealthCacheMu   sync.RWMutex
 	detailedHealthCacheTime time.Time
 	detailedHealthCacheTTL  = 30 * time.Second
@@ -58,8 +59,8 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
 
 	detailedHealthCacheMu.RLock()
-	if detailedHealthCache != nil && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
-		resp := *detailedHealthCache
+	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
+		resp := detailedHealthCache // copy by value under lock
 		detailedHealthCacheMu.RUnlock()
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -69,7 +70,8 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	resp := s.buildDetailedHealth()
 
 	detailedHealthCacheMu.Lock()
-	detailedHealthCache = &resp
+	detailedHealthCache = resp // store by value
+	detailedHealthCacheValid = true
 	detailedHealthCacheTime = time.Now()
 	detailedHealthCacheMu.Unlock()
 

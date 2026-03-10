@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/paasd/paasd/internal/builder"
 )
+
+const maxLogSize = 5 * 1024 * 1024 // 5MB max log per build
 
 // Build represents a build record.
 type Build struct {
@@ -50,33 +53,24 @@ type Manager struct {
 	deployFn DeployFunc
 	logMu    sync.Mutex
 	logSubs  map[string][]chan string // buildID -> subscribers
+	logSizes map[string]int          // buildID -> current log size in bytes
 }
 
 // NewManager creates a build manager.
 func NewManager(db *sql.DB, b *builder.Builder, deployFn DeployFunc) *Manager {
 	return &Manager{
-		db:      db,
-		builder: b,
+		db:       db,
+		builder:  b,
 		deployFn: deployFn,
-		logSubs: make(map[string][]chan string),
+		logSubs:  make(map[string][]chan string),
+		logSizes: make(map[string]int),
 	}
 }
 
 // ImageTag generates a deterministic image tag for local registry.
+// Uses full IDs to prevent collisions between tenants.
 func ImageTag(tenantID, serviceID, buildID string) string {
-	tPrefix := tenantID
-	if len(tPrefix) > 8 {
-		tPrefix = tPrefix[:8]
-	}
-	sPrefix := serviceID
-	if len(sPrefix) > 8 {
-		sPrefix = sPrefix[:8]
-	}
-	bPrefix := buildID
-	if len(bPrefix) > 8 {
-		bPrefix = bPrefix[:8]
-	}
-	return fmt.Sprintf("127.0.0.1:5000/paasd/%s-%s:%s", tPrefix, sPrefix, bPrefix)
+	return fmt.Sprintf("127.0.0.1:5000/paasd/%s-%s:%s", tenantID, serviceID, buildID)
 }
 
 // StartBuild creates a build record and starts the build asynchronously.
@@ -154,6 +148,12 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.BuildRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
+	defer func() {
+		// Clean up log size tracking
+		m.logMu.Lock()
+		delete(m.logSizes, buildID)
+		m.logMu.Unlock()
+	}()
 
 	now := time.Now().Unix()
 	m.db.ExecContext(ctx,
@@ -199,6 +199,17 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 }
 
 func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
+	// Enforce max log size
+	m.logMu.Lock()
+	currentSize := m.logSizes[buildID]
+	lineBytes := len(line) + 1 // +1 for newline
+	if currentSize+lineBytes > maxLogSize {
+		m.logMu.Unlock()
+		return // silently drop — log is full
+	}
+	m.logSizes[buildID] = currentSize + lineBytes
+	m.logMu.Unlock()
+
 	_, err := m.db.ExecContext(ctx,
 		`UPDATE builds SET log = log || ? || char(10) WHERE id = ?`,
 		line, buildID,
@@ -354,6 +365,32 @@ func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) err
 	return nil
 }
 
+// isPrivateIP checks if an IP address is in a private, loopback, link-local, or reserved range.
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"127.0.0.0/8",    // loopback
+		"10.0.0.0/8",     // RFC1918
+		"172.16.0.0/12",  // RFC1918
+		"192.168.0.0/16", // RFC1918
+		"169.254.0.0/16", // link-local (cloud metadata)
+		"100.64.0.0/10",  // carrier-grade NAT
+		"0.0.0.0/8",      // unspecified
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+	}
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateGitURL(rawURL string) error {
 	if len(rawURL) > 2048 {
 		return fmt.Errorf("source_url too long (max 2048)")
@@ -367,15 +404,33 @@ func validateGitURL(rawURL string) error {
 		return fmt.Errorf("invalid git URL: %w", err)
 	}
 
-	host := strings.ToLower(u.Hostname())
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" ||
-		strings.HasPrefix(host, "10.") || strings.HasPrefix(host, "192.168.") ||
-		strings.HasPrefix(host, "172.") {
-		return fmt.Errorf("private/localhost URLs are not allowed")
-	}
-
 	if u.User != nil {
 		return fmt.Errorf("credentials in URL are not allowed")
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty hostname in URL")
+	}
+
+	// Block localhost/loopback hostnames
+	if strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("localhost URLs are not allowed")
+	}
+
+	// Resolve hostname and check all IPs against private ranges
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve hostname %q: %w", host, err)
+	}
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return fmt.Errorf("invalid IP for hostname %q: %s", host, ipStr)
+		}
+		if isPrivateIP(ip) {
+			return fmt.Errorf("hostname %q resolves to private/reserved IP %s", host, ipStr)
+		}
 	}
 
 	return nil

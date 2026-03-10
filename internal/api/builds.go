@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"log"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -48,6 +49,7 @@ func (s *Server) handleBuildCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, msg)
 			return
 		}
+		log.Printf("build create error: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to start build")
 		return
 	}

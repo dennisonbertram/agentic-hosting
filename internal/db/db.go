@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -58,6 +59,16 @@ func openDB(path string) (*sql.DB, error) {
 }
 
 func (s *Store) runMigrations() error {
+	// Ensure migration tracking tables exist on both databases
+	for _, db := range []*sql.DB{s.StateDB, s.MeteringDB} {
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at INTEGER NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create schema_migrations table: %w", err)
+		}
+	}
+
 	entries, err := fs.ReadDir(MigrationsFS, "migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -71,10 +82,6 @@ func (s *Store) runMigrations() error {
 		if entry.IsDir() {
 			continue
 		}
-		data, err := fs.ReadFile(MigrationsFS, "migrations/"+entry.Name())
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
-		}
 
 		var target *sql.DB
 		if strings.Contains(entry.Name(), "metering") {
@@ -83,16 +90,48 @@ func (s *Store) runMigrations() error {
 			target = s.StateDB
 		}
 
+		// Skip already-applied migrations
+		var count int
+		if err := target.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
+		}
+		if count > 0 {
+			log.Printf("migration already applied: %s", entry.Name())
+			continue
+		}
+
+		data, err := fs.ReadFile(MigrationsFS, "migrations/"+entry.Name())
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+		}
+
+		tx, err := target.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", entry.Name(), err)
+		}
+
 		statements := strings.Split(string(data), ";")
 		for _, stmt := range statements {
 			stmt = strings.TrimSpace(stmt)
 			if stmt == "" {
 				continue
 			}
-			if _, err := target.Exec(stmt); err != nil {
+			if _, err := tx.Exec(stmt); err != nil {
+				tx.Rollback()
 				return fmt.Errorf("exec migration %s: %w", entry.Name(), err)
 			}
 		}
+
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			entry.Name(), time.Now().Unix()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
+		}
+
 		log.Printf("migration applied: %s", entry.Name())
 	}
 

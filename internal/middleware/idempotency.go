@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	maxIdempotencyEntries = 5000
+	maxIdempotencyEntries = 1000
 	maxIdempotencyKeyLen  = 128
-	maxIdempotencyBodyLen = 64 * 1024 // 64KB max stored response
+	maxIdempotencyBodyLen = 16 * 1024 // 16KB max stored response
 	idempotencyTTL        = 1 * time.Hour
 )
 

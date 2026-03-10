@@ -59,10 +59,11 @@ func main() {
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
-		Store:          store,
-		MasterKey:      masterKey[:32],
-		DevMode:        *devMode,
-		BootstrapToken: bootstrapToken,
+		Store:            store,
+		MasterKey:        masterKey[:32],
+		DevMode:          *devMode,
+		BootstrapToken:   bootstrapToken,
+		OpenRegistration: *openRegistration,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

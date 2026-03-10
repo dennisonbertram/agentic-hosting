@@ -14,26 +14,29 @@ import (
 )
 
 type ServerConfig struct {
-	Store          *db.Store
-	MasterKey      []byte
-	DevMode        bool
-	BootstrapToken string
+	Store            *db.Store
+	MasterKey        []byte
+	DevMode          bool
+	BootstrapToken   string
+	OpenRegistration bool
 }
 
 type Server struct {
-	store          *db.Store
-	masterKey      []byte
-	devMode        bool
-	bootstrapToken string
-	router         chi.Router
+	store            *db.Store
+	masterKey        []byte
+	devMode          bool
+	bootstrapToken   string
+	openRegistration bool
+	router           chi.Router
 }
 
 func NewServer(cfg ServerConfig) *Server {
 	s := &Server{
-		store:          cfg.Store,
-		masterKey:      cfg.MasterKey,
-		devMode:        cfg.DevMode,
-		bootstrapToken: cfg.BootstrapToken,
+		store:            cfg.Store,
+		masterKey:        cfg.MasterKey,
+		devMode:          cfg.DevMode,
+		bootstrapToken:   cfg.BootstrapToken,
+		openRegistration: cfg.OpenRegistration,
 	}
 	s.setupRoutes()
 	return s
@@ -91,7 +94,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ListenAndServe(addr string) error {
 	log.Printf("starting server on %s", addr)
 	if !s.devMode {
-		log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
+		log.Printf("HTTPS enforcement is ON. The server must be behind a TLS-terminating proxy (e.g. Traefik) that connects via loopback (127.0.0.1). X-Forwarded-Proto is only trusted from loopback RemoteAddr. If the proxy connects from a non-loopback address, requests will be rejected.")
 	}
 	return http.ListenAndServe(addr, s)
 }

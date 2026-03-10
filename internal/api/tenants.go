@@ -135,7 +135,10 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// Bootstrap token gate first — reject unauthenticated requests without
 	// consuming rate limit budget. This prevents unauthenticated DoS on the
 	// global rate limit counter.
-	if s.bootstrapToken != "" {
+	// Open registration (--dev --open-registration) is the only path that
+	// skips this gate. Without that explicit flag, bootstrapToken is always
+	// required (main.go fatals if unset outside dev+open-registration).
+	if !s.openRegistration {
 		provided := r.Header.Get("X-Bootstrap-Token")
 		// HMAC-compare to prevent length-leak from ConstantTimeCompare
 		if !hmacEqual(provided, s.bootstrapToken) {

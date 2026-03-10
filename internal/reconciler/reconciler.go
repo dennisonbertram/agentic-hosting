@@ -152,11 +152,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 		if shouldMarkCrashed {
 			now := time.Now().Unix()
-			// Proper sliding window circuit breaker:
-			// crash_window_start tracks when the current crash window began.
-			// If the window has expired (>= 600s since window start), reset to 1 and close circuit.
-			// If within window, increment. Open circuit at 5 crashes in one window.
-			// When window resets, circuit_open is explicitly set to 0 (auto-close).
+			// Two-step circuit breaker to avoid SQLite column evaluation order issues:
+			// Step 1: Update crash window and count
 			_, err := r.db.ExecContext(ctx, `
 				UPDATE services SET
 					status = 'crashed',
@@ -168,31 +165,38 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 1
 						ELSE crash_count + 1
 					END,
-					circuit_open = CASE
-						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 0
-						WHEN crash_count + 1 >= 5 THEN 1
-						ELSE circuit_open
-					END,
 					last_crashed_at = ?,
 					last_error = ?,
 					updated_at = ?
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, now, now, now, crashReason, now, s.id, s.tenantID)
+				now, now, now, now, crashReason, now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
-			} else {
-				var circuitOpen int
-				r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
-				if circuitOpen == 1 {
-					log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
-					// CRITICAL: Actually stop the container when circuit opens.
-					// Docker's RestartPolicyUnlessStopped will keep restarting it otherwise.
-					_ = r.docker.StopContainer(ctx, s.containerID)
-					_ = r.docker.RemoveContainer(ctx, s.containerID)
-				}
-				log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
-				fixed++
+				continue
 			}
+			// Step 2: Evaluate circuit_open based on the now-updated values
+			_, err = r.db.ExecContext(ctx, `
+				UPDATE services SET
+					circuit_open = CASE
+						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN 1
+						WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) >= 600 THEN 0
+						ELSE circuit_open
+					END
+				WHERE id = ? AND tenant_id = ?`,
+				now, now, s.id, s.tenantID)
+			if err != nil {
+				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
+			}
+			var circuitOpen int
+			r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+			if circuitOpen == 1 {
+				log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
+				// Stop the container when circuit opens to defeat Docker restart policy.
+				_ = r.docker.StopContainer(ctx, s.containerID)
+				_ = r.docker.RemoveContainer(ctx, s.containerID)
+			}
+			log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
+			fixed++
 		}
 	}
 

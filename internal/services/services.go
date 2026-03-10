@@ -765,7 +765,7 @@ func (m *Manager) ResetCircuitBreaker(ctx context.Context, tenantID, serviceID s
 	}
 
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE services SET crash_count = 0, circuit_open = 0, status = 'stopped',
+		`UPDATE services SET crash_count = 0, circuit_open = 0, crash_window_start = NULL, status = 'stopped',
 		 last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
 		time.Now().Unix(), serviceID, tenantID)
 	if err != nil {

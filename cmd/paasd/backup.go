@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/paasd/paasd/internal/diskcheck"
@@ -43,7 +44,38 @@ func runBackup(dbPath string) {
 		}
 	}
 
+	// Enforce backup retention: keep only the 10 most recent backups
+	enforceRetention(backupDir, 10)
+
 	log.Printf("backup complete: %s", backupDir)
+}
+
+// enforceRetention keeps only the N most recent .db.gz files in the directory.
+func enforceRetention(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var backupFiles []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".db.gz") {
+			backupFiles = append(backupFiles, e.Name())
+		}
+	}
+	if len(backupFiles) <= keep {
+		return
+	}
+	// Sort ascending (oldest first) — timestamped names sort naturally
+	sort.Strings(backupFiles)
+	toDelete := backupFiles[:len(backupFiles)-keep]
+	for _, name := range toDelete {
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			log.Printf("backup: failed to remove old backup %s: %v", name, err)
+		} else {
+			log.Printf("backup: pruned old backup %s", name)
+		}
+	}
 }
 
 // backupSQLite creates a consistent backup using SQLite's VACUUM INTO,

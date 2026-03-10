@@ -256,7 +256,7 @@ func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {
 				continue
 			}
 			absBase, _ := filepath.Abs(basePath)
-			if !strings.HasPrefix(resolved, absBase) {
+			if !strings.HasPrefix(resolved, absBase+string(os.PathSeparator)) && resolved != absBase {
 				log.Printf("gc: SECURITY: path %s resolves outside base %s, skipping", path, basePath)
 				continue
 			}

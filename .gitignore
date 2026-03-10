@@ -1,0 +1,8 @@
+bin/
+*.db
+*.db-shm
+*.db-wal
+master.key
+*.key
+.env
+vendor/

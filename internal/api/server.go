@@ -120,6 +120,12 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	httpx.WriteError(w, code, message)
 }
 
+// writeJSON delegates to httpx.WriteJSON for consistent JSON success responses.
+// All handlers in the api package should use this.
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	httpx.WriteJSON(w, code, v)
+}
+
 func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

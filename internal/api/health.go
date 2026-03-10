@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"math"
 	"net/http"
 	"os/exec"
@@ -51,7 +50,7 @@ var (
 // handleHealth returns minimal constant-time status for public (unauthenticated) requests.
 // No DB calls — avoids DoS via unauthenticated health check flooding.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
 }
 
 // handleHealthDetailed returns full system info (authenticated only).
@@ -62,7 +61,7 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	if detailedHealthCache != nil && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
 		resp := *detailedHealthCache
 		detailedHealthCacheMu.RUnlock()
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	detailedHealthCacheMu.RUnlock()
@@ -74,7 +73,7 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	detailedHealthCacheTime = time.Now()
 	detailedHealthCacheMu.Unlock()
 
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) buildDetailedHealth() DetailedHealthResponse {

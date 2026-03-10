@@ -50,11 +50,11 @@ func main() {
 	// Read master key
 	masterKeyData, err := os.ReadFile(*masterKeyPath)
 	if err != nil {
-		log.Fatalf("failed to read master key: %v", err)
+		log.Fatalf("failed to read master key from %s: %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
 	}
 	masterKey := []byte(strings.TrimSpace(string(masterKeyData)))
 	if len(masterKey) < 32 {
-		log.Fatalf("master key must be at least 32 bytes, got %d", len(masterKey))
+		log.Fatalf("master key in %s must be at least 32 bytes after trimming whitespace (got %d).\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, len(masterKey), *masterKeyPath)
 	}
 
 	// Open databases

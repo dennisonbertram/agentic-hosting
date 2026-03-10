@@ -1,9 +1,10 @@
 package api
 
 import (
-	"crypto/rand"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -253,8 +254,7 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// Return token in format "keyID.secret" for O(1) lookup
 	token := keyID + "." + apiKey
 
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(RegisterResponse{
+	writeJSON(w, http.StatusCreated, RegisterResponse{
 		TenantID: tenantID,
 		APIKey:   token,
 	})
@@ -268,12 +268,16 @@ func (s *Server) handleTenantGet(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, name, email, status, created_at, updated_at FROM tenants WHERE id = ?`,
 		tenantID,
 	).Scan(&t.ID, &t.Name, &t.Email, &t.Status, &t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "tenant not found")
 		return
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusOK, t)
 }
 
 func (s *Server) handleTenantUpdate(w http.ResponseWriter, r *http.Request) {

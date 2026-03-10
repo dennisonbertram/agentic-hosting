@@ -104,8 +104,7 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	// Return token in format "keyID.secret" for O(1) lookup
 	token := keyID + "." + apiKey
 
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(CreateKeyResponse{
+	writeJSON(w, http.StatusCreated, CreateKeyResponse{
 		ID:      keyID,
 		Name:    req.Name,
 		APIKey:  token,
@@ -144,7 +143,7 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(keys)
+	writeJSON(w, http.StatusOK, keys)
 }
 
 func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {

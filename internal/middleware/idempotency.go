@@ -56,17 +56,26 @@ func (s *IdempotencyStore) cleanup() {
 
 type responseRecorder struct {
 	http.ResponseWriter
-	statusCode int
-	body       []byte
-	overflow   bool // true if body exceeded maxIdempotencyBodyLen
+	statusCode    int
+	wroteHeader   bool
+	body          []byte
+	overflow      bool // true if body exceeded maxIdempotencyBodyLen
 }
 
 func (rr *responseRecorder) WriteHeader(code int) {
-	rr.statusCode = code
+	if !rr.wroteHeader {
+		rr.statusCode = code
+		rr.wroteHeader = true
+	}
 	rr.ResponseWriter.WriteHeader(code)
 }
 
 func (rr *responseRecorder) Write(b []byte) (int, error) {
+	// Implicit 200 if WriteHeader was never called (per net/http spec)
+	if !rr.wroteHeader {
+		rr.statusCode = http.StatusOK
+		rr.wroteHeader = true
+	}
 	// Cap in-memory buffering to prevent memory exhaustion from large responses.
 	// Once overflow, stop buffering but continue writing to the client.
 	if !rr.overflow {
@@ -162,7 +171,7 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		rec := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 
 		// Only cache successful (2xx) responses within size bounds.

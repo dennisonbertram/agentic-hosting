@@ -148,7 +148,7 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Never cache auth key creation responses (contain secrets)
-		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") {
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") || strings.HasPrefix(r.URL.Path, "/v1/databases") {
 			next.ServeHTTP(w, r)
 			return
 		}

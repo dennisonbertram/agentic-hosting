@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,23 +86,14 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Find a free port
-	port, err := m.findFreePort(req.Type)
-	if err != nil {
-		return nil, fmt.Errorf("find free port: %w", err)
-	}
-
 	// Generate password
 	password, err := randomHex(32)
 	if err != nil {
 		return nil, fmt.Errorf("generate password: %w", err)
 	}
 
-	volumeName := fmt.Sprintf("paasd-db-%s", id[:8])
-	containerName := fmt.Sprintf("paasd-db-%s-%s", tenantID[:8], id[:8])
-
-	var dbName, username, connStr string
-	now := time.Now().Unix()
+	volumeName := fmt.Sprintf("paasd-db-%s", id)
+	containerName := fmt.Sprintf("paasd-db-%s-%s", tenantID[:8], id[:16])
 
 	// Encrypt password
 	passwordEnc, err := crypto.Encrypt([]byte(password), m.masterKey)
@@ -109,30 +101,49 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("encrypt password: %w", err)
 	}
 
-	switch req.Type {
-	case "postgres":
-		dbName = "paasd"
-		username = "paasd"
-		connStr = fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", username, password, port, dbName)
-	case "redis":
-		connStr = fmt.Sprintf("redis://:%s@127.0.0.1:%d/0", password, port)
-	}
+	// Find free port and insert atomically — retry on UNIQUE constraint violation
+	var port int
+	var dbName, username, connStr string
+	now := time.Now().Unix()
+	const maxPortRetries = 5
+	for attempt := 0; attempt < maxPortRetries; attempt++ {
+		port, err = m.findFreePort(req.Type)
+		if err != nil {
+			return nil, fmt.Errorf("find free port: %w", err)
+		}
 
-	connStrEnc, err := crypto.Encrypt([]byte(connStr), m.masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt connection string: %w", err)
-	}
+		switch req.Type {
+		case "postgres":
+			dbName = "paasd"
+			username = "paasd"
+			connStr = fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", username, password, port, dbName)
+		case "redis":
+			connStr = fmt.Sprintf("redis://:%s@127.0.0.1:%d/0", password, port)
+		}
 
-	// Insert DB record
-	_, err = m.db.ExecContext(ctx,
-		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
-		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tenantID, req.Name, req.Type, port, dbName, username,
-		passwordEnc, connStrEnc, volumeName, now, now,
-	)
+		connStrEnc, encErr := crypto.Encrypt([]byte(connStr), m.masterKey)
+		if encErr != nil {
+			return nil, fmt.Errorf("encrypt connection string: %w", encErr)
+		}
+
+		// Insert DB record — UNIQUE index on port prevents race conditions
+		_, err = m.db.ExecContext(ctx,
+			`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+			 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, tenantID, req.Name, req.Type, port, dbName, username,
+			passwordEnc, connStrEnc, volumeName, now, now,
+		)
+		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				continue // retry with different port
+			}
+			return nil, fmt.Errorf("insert database: %w", err)
+		}
+		break // success
+	}
 	if err != nil {
-		return nil, fmt.Errorf("insert database: %w", err)
+		return nil, fmt.Errorf("insert database after %d retries: %w", maxPortRetries, err)
 	}
 
 	// Create Docker volume
@@ -317,7 +328,7 @@ func (m *Manager) findFreePort(dbType string) (int, error) {
 	}
 
 	// Check which ports are already allocated in DB
-	rows, err := m.db.Query(`SELECT port FROM databases WHERE port IS NOT NULL`)
+	rows, err := m.db.Query(`SELECT port FROM databases WHERE port IS NOT NULL AND status NOT IN ('failed')`)
 	if err != nil {
 		return 0, err
 	}

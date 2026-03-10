@@ -70,8 +70,12 @@ func (s *Server) setupRoutes() {
 	// Authenticated routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(s.store.StateDB, s.masterKey))
+		// Per-tenant rate limiter
 		rl := middleware.NewRateLimiter(100, 200)
 		r.Use(rl.Middleware)
+		// Global aggregate rate limiter across all tenants (prevents multi-tenant abuse)
+		globalRL := middleware.NewGlobalRateLimiter(500, 1000)
+		r.Use(globalRL.Middleware)
 		idem := middleware.NewIdempotencyStore()
 		r.Use(idem.Middleware)
 

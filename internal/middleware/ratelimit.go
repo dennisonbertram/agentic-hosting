@@ -96,3 +96,25 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// GlobalRateLimiter enforces a single rate limit across all tenants to prevent
+// multi-tenant aggregate abuse (e.g., attacker creating many tenants to multiply throughput).
+type GlobalRateLimiter struct {
+	limiter *rate.Limiter
+}
+
+func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
+	return &GlobalRateLimiter{
+		limiter: rate.NewLimiter(rate.Limit(rps), burst),
+	}
+}
+
+func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !gl.limiter.Allow() {
+			http.Error(w, `{"error":"global rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

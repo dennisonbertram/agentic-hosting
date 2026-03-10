@@ -34,10 +34,17 @@ func main() {
 			log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set. Use --open-registration with --dev to allow open registration.")
 		}
 		log.Printf("WARNING: open registration enabled — anyone can create tenants")
+	} else if len(bootstrapToken) < 32 {
+		log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be at least 32 characters for brute-force resistance (got %d)", len(bootstrapToken))
 	}
 
 	if *openRegistration && !*devMode {
 		log.Fatalf("--open-registration requires --dev")
+	}
+
+	// Prevent --dev from being used with non-loopback listen address
+	if *devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
+		log.Printf("CRITICAL WARNING: --dev mode with non-loopback listen address (%s) disables HTTPS enforcement. This is unsafe for anything other than local development.", *listenAddr)
 	}
 
 	// Read master key

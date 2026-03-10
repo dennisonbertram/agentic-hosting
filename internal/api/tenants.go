@@ -208,7 +208,8 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		tenantID, req.Name, req.Email, now, now,
 	)
 	if err != nil {
-		http.Error(w, `{"error":"registration failed"}`, http.StatusConflict)
+		// Use generic error to prevent email enumeration via duplicate detection
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 

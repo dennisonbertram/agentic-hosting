@@ -17,19 +17,27 @@ import (
 
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
-	listenAddr := flag.String("listen-addr", "", "Listen address (default: 127.0.0.1 in prod, 127.0.0.1 in dev; use 0.0.0.0 to bind all interfaces)")
+	listenAddr := flag.String("listen-addr", "", "Listen address (default: 127.0.0.1; use 0.0.0.0 to bind all interfaces)")
 	dbPath := flag.String("db-path", "/var/lib/paasd/paasd.db", "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", "/var/lib/paasd/master.key", "Path to master encryption key")
-	devMode := flag.Bool("dev", false, "Development mode (relaxes security requirements)")
+	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
+	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
 
-	// Check bootstrap token requirement
+	// Bootstrap token is always required unless --dev + --open-registration
 	bootstrapToken := strings.TrimSpace(os.Getenv("PAASD_BOOTSTRAP_TOKEN"))
-	if bootstrapToken == "" && !*devMode {
-		log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set (or use --dev for development mode)")
-	}
 	if bootstrapToken == "" {
-		log.Printf("WARNING: running in dev mode without bootstrap token — registration is open")
+		if !*devMode {
+			log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set (or use --dev --open-registration)")
+		}
+		if !*openRegistration {
+			log.Fatalf("PAASD_BOOTSTRAP_TOKEN must be set. Use --open-registration with --dev to allow open registration.")
+		}
+		log.Printf("WARNING: open registration enabled — anyone can create tenants")
+	}
+
+	if *openRegistration && !*devMode {
+		log.Fatalf("--open-registration requires --dev")
 	}
 
 	// Read master key
@@ -49,7 +57,7 @@ func main() {
 	}
 	defer store.Close()
 
-	// Create server — pass bootstrap token via config, not env
+	// Create server
 	srv := api.NewServer(api.ServerConfig{
 		Store:          store,
 		MasterKey:      masterKey[:32],

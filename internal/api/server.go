@@ -165,12 +165,17 @@ func stripForwardedHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// trustedRealIP extracts client IP from X-Forwarded-For only when the
-// request comes from a trusted loopback proxy. Otherwise uses RemoteAddr.
+// trustedRealIP extracts client IP from X-Real-Ip or X-Forwarded-For only
+// when the request comes from a trusted loopback proxy. Otherwise uses RemoteAddr.
+// Traefik overwrites X-Real-Ip with the direct client IP, making it the most
+// reliable source. Falls back to leftmost X-Forwarded-For entry.
 func trustedRealIP(r *http.Request) string {
 	if isLoopback(r.RemoteAddr) {
+		// Prefer X-Real-Ip (set by Traefik to the direct client IP)
+		if xri := r.Header.Get("X-Real-Ip"); xri != "" {
+			return strings.TrimSpace(xri)
+		}
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Take the leftmost IP (client IP set by Traefik)
 			if idx := strings.IndexByte(xff, ','); idx > 0 {
 				return strings.TrimSpace(xff[:idx])
 			}

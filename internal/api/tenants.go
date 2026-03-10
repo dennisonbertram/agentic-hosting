@@ -130,22 +130,24 @@ func generateID() (string, error) {
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
-	// Rate limit BEFORE token check to prevent brute-force.
-	// Use trusted real IP (from X-Forwarded-For when behind loopback proxy).
-	ip := trustedRealIP(r)
-	if !regLimiter.allow(ip) {
-		w.Header().Set("Retry-After", "3600")
-		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
-		return
-	}
-
-	// Bootstrap token gate — uses Server field, not env
+	// Bootstrap token gate first — reject unauthenticated requests without
+	// consuming rate limit budget. This prevents unauthenticated DoS on the
+	// global rate limit counter.
 	if s.bootstrapToken != "" {
 		provided := r.Header.Get("X-Bootstrap-Token")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.bootstrapToken)) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
+	}
+
+	// Rate limit after token verification — only valid requests consume budget.
+	// Uses trusted real IP (from X-Forwarded-For when behind loopback proxy).
+	ip := trustedRealIP(r)
+	if !regLimiter.allow(ip) {
+		w.Header().Set("Retry-After", "3600")
+		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
+		return
 	}
 
 	var req RegisterRequest

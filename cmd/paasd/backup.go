@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/paasd/paasd/internal/diskcheck"
 	"time"
@@ -63,7 +64,9 @@ func backupSQLite(srcDB, dstGz string) error {
 	// Use a 5-minute timeout to prevent hanging on busy/locked DB.
 	vacuumCtx, vacuumCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer vacuumCancel()
-	_, err = db.ExecContext(vacuumCtx, fmt.Sprintf("VACUUM INTO '%s'", tmpDB))
+	// Escape single quotes in path to prevent SQL injection
+	escapedPath := strings.ReplaceAll(tmpDB, "'", "''")
+	_, err = db.ExecContext(vacuumCtx, fmt.Sprintf("VACUUM INTO '%s'", escapedPath))
 	if err != nil {
 		return fmt.Errorf("vacuum into: %w", err)
 	}

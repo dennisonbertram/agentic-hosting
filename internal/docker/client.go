@@ -455,6 +455,16 @@ func (c *Client) StopAndRemoveByName(ctx context.Context, name string) error {
 	return c.cli.ContainerRemove(ctx, info.ID, container.RemoveOptions{Force: true})
 }
 
+// PruneDanglingImages removes dangling (untagged, unreferenced) images.
+// Returns the number of images removed.
+func (c *Client) PruneDanglingImages(ctx context.Context) (int, error) {
+	report, err := c.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", "true")))
+	if err != nil {
+		return 0, fmt.Errorf("prune images: %w", err)
+	}
+	return len(report.ImagesDeleted), nil
+}
+
 // ListVolumes returns volume names matching the given prefix.
 func (c *Client) ListVolumes(ctx context.Context, prefix string) ([]string, error) {
 	resp, err := c.cli.VolumeList(ctx, volume.ListOptions{

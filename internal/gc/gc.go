@@ -114,6 +114,15 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	buildDirsCleaned := g.cleanOldBuildDirs("/var/lib/paasd/builds", 1*time.Hour)
 	removed += buildDirsCleaned
 
+	// 4. Dangling images — prune images not referenced by any container
+	pruned, pruneErr := g.docker.PruneDanglingImages(ctx)
+	if pruneErr != nil {
+		log.Printf("gc: image prune failed: %v", pruneErr)
+	} else if pruned > 0 {
+		log.Printf("gc: pruned %d dangling images", pruned)
+		removed += pruned
+	}
+
 	if removed > 0 {
 		log.Printf("gc: removed %d orphaned resources", removed)
 	}
@@ -233,8 +242,24 @@ func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {
 		if err != nil {
 			continue
 		}
+		// Security: skip symlinks to prevent traversal attacks
+		if info.Mode()&os.ModeSymlink != 0 {
+			log.Printf("gc: skipping symlink in build dir: %s", entry.Name())
+			continue
+		}
 		if info.ModTime().Before(cutoff) {
 			path := filepath.Join(basePath, entry.Name())
+			// Verify resolved path is still under basePath
+			resolved, evalErr := filepath.EvalSymlinks(path)
+			if evalErr != nil {
+				log.Printf("gc: cannot resolve path %s, skipping: %v", path, evalErr)
+				continue
+			}
+			absBase, _ := filepath.Abs(basePath)
+			if !strings.HasPrefix(resolved, absBase) {
+				log.Printf("gc: SECURITY: path %s resolves outside base %s, skipping", path, basePath)
+				continue
+			}
 			if err := os.RemoveAll(path); err != nil {
 				log.Printf("gc: failed to remove build dir %s: %v", path, err)
 			} else {

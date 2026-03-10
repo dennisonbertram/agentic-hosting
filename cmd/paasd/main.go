@@ -49,7 +49,7 @@ func main() {
 	defer store.Close()
 
 	// Create server
-	srv := api.NewServer(store, masterKey[:32])
+	srv := api.NewServer(store, masterKey[:32], *devMode)
 
 	httpServer := &http.Server{
 		Addr:              ":" + *port,
@@ -71,6 +71,9 @@ func main() {
 		}
 	}()
 	log.Printf("paasd listening on :%s", *port)
+	if *devMode {
+		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled")
+	}
 	log.Printf("WARNING: server is listening on plain HTTP. Ensure Traefik or another TLS-terminating proxy is in front of this service.")
 
 	<-done

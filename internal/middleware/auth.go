@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"database/sql"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,10 +16,9 @@ type contextKey string
 const TenantIDKey contextKey = "tenant_id"
 
 const (
-	lastUsedInterval  = 5 * time.Minute
-	lastUsedMaxKeys   = 10000
-	authFailMaxPerIP  = 60  // per minute
-	authFailWindowSec = 60
+	lastUsedInterval = 5 * time.Minute
+	lastUsedMaxKeys  = 10000
+	authFailDelay    = 250 * time.Millisecond
 )
 
 // lastUsedTracker samples last_used_at updates with bounded map.
@@ -35,7 +33,6 @@ func newLastUsedTracker(db *sql.DB) *lastUsedTracker {
 		lastSeen: make(map[string]time.Time),
 		db:       db,
 	}
-	// Periodic cleanup of stale entries
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		for range ticker.C {
@@ -60,7 +57,6 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 		t.mu.Unlock()
 		return
 	}
-	// Evict oldest if at capacity
 	if !exists && len(t.lastSeen) >= lastUsedMaxKeys {
 		var oldestKey string
 		var oldestTime time.Time
@@ -80,91 +76,28 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 	t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID)
 }
 
-// authFailLimiter tracks auth failures per IP to prevent brute-force.
-type authFailLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*authFailEntry
-}
-
-type authFailEntry struct {
-	count    int
-	windowAt time.Time
-}
-
-func newAuthFailLimiter() *authFailLimiter {
-	l := &authFailLimiter{entries: make(map[string]*authFailEntry)}
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		for range ticker.C {
-			l.mu.Lock()
-			now := time.Now()
-			for k, v := range l.entries {
-				if now.After(v.windowAt) {
-					delete(l.entries, k)
-				}
-			}
-			l.mu.Unlock()
-		}
-	}()
-	return l
-}
-
-func (l *authFailLimiter) check(ip string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	entry, exists := l.entries[ip]
-	if !exists || now.After(entry.windowAt) {
-		return true // allowed
-	}
-	return entry.count < authFailMaxPerIP
-}
-
-func (l *authFailLimiter) record(ip string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	entry, exists := l.entries[ip]
-	if !exists || now.After(entry.windowAt) {
-		l.entries[ip] = &authFailEntry{count: 1, windowAt: now.Add(time.Duration(authFailWindowSec) * time.Second)}
-		return
-	}
-	entry.count++
-}
-
 func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 	tracker := newLastUsedTracker(db)
-	failLimiter := newAuthFailLimiter()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Pre-auth IP rate limit on failures
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if ip == "" {
-				ip = r.RemoteAddr
-			}
-			if !failLimiter.check(ip) {
-				http.Error(w, `{"error":"too many auth failures"}`, http.StatusTooManyRequests)
-				return
-			}
-
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				failLimiter.record(ip)
+				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 				return
 			}
 
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || parts[0] != "Bearer" {
-				failLimiter.record(ip)
+				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"invalid authorization format"}`, http.StatusUnauthorized)
 				return
 			}
 			token := parts[1]
 
 			if len(token) < 8 || len(token) > 256 {
-				failLimiter.record(ip)
+				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
@@ -206,7 +139,8 @@ func Auth(db *sql.DB, masterKey []byte) func(http.Handler) http.Handler {
 			}
 
 			if !matched {
-				failLimiter.record(ip)
+				// Delay on failure to slow brute-force without IP-based blocking
+				time.Sleep(authFailDelay)
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}

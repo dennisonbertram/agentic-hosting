@@ -2,15 +2,16 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	maxIdempotencyEntries = 10000
+	maxIdempotencyEntries = 5000
 	maxIdempotencyKeyLen  = 128
 	maxIdempotencyBodyLen = 64 * 1024 // 64KB max stored response
-	idempotencyTTL        = 24 * time.Hour
+	idempotencyTTL        = 1 * time.Hour
 )
 
 type idempotencyEntry struct {
@@ -76,6 +77,12 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Never cache auth key creation responses (contain secrets)
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Validate key length
 		if len(key) > maxIdempotencyKeyLen {
 			http.Error(w, `{"error":"idempotency key too long"}`, http.StatusBadRequest)
@@ -103,7 +110,7 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		// Only store if within bounds
 		if len(rec.body) <= maxIdempotencyBodyLen {
 			s.mu.Lock()
-			// Enforce max entries — evict oldest if at capacity
+			// Enforce max entries - evict oldest if at capacity
 			if len(s.entries) >= maxIdempotencyEntries {
 				var oldestKey string
 				var oldestTime time.Time

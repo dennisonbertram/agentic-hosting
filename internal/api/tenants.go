@@ -139,14 +139,7 @@ func generateID() (string, error) {
 }
 
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
-	if bootstrapToken != "" {
-		provided := r.Header.Get("X-Bootstrap-Token")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(bootstrapToken)) != 1 {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-	}
-
+	// Rate limit BEFORE token check to prevent brute-force
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if ip == "" {
 		ip = r.RemoteAddr
@@ -155,6 +148,15 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "3600")
 		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
 		return
+	}
+
+	// Bootstrap token gate
+	if bootstrapToken != "" {
+		provided := r.Header.Get("X-Bootstrap-Token")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(bootstrapToken)) != 1 {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 	}
 
 	var req RegisterRequest
@@ -220,7 +222,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use HMAC-SHA256 instead of bcrypt for API key hashing (fast, constant-time)
 	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
 
 	keyID, err := generateID()

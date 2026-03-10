@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/paasd/paasd/internal/db"
+	"github.com/paasd/paasd/internal/httpx"
 	"github.com/paasd/paasd/internal/middleware"
 )
 
@@ -114,12 +114,10 @@ func jsonContentType(next http.Handler) http.Handler {
 	})
 }
 
-// writeError writes a consistent JSON error response. Always use this instead
-// of http.Error to ensure correct Content-Type and valid JSON formatting.
+// writeError delegates to httpx.WriteError for consistent JSON error responses.
+// All handlers in the api package should use this.
 func writeError(w http.ResponseWriter, code int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	httpx.WriteError(w, code, message)
 }
 
 func maxBodySize(maxBytes int64) func(http.Handler) http.Handler {

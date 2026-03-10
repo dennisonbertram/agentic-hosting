@@ -21,6 +21,7 @@ const (
 
 type idempotencyEntry struct {
 	statusCode  int
+	contentType string // preserved from original response
 	body        []byte
 	bodyHash    string // SHA-256 hex of request body for mismatch detection
 	expiresAt   time.Time
@@ -149,7 +150,10 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 				writeJSONError(w, http.StatusConflict, "idempotency key reused with different request body")
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
+			if entry.contentType != "" {
+				w.Header().Set("Content-Type", entry.contentType)
+			}
+			w.Header().Set("Idempotency-Replayed", "true")
 			w.WriteHeader(entry.statusCode)
 			w.Write(entry.body)
 			return
@@ -186,10 +190,11 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 					}
 				}
 				s.entries[fullKey] = &idempotencyEntry{
-					statusCode: rec.statusCode,
-					body:       rec.body,
-					bodyHash:   reqBodyHash,
-					expiresAt:  time.Now().Add(idempotencyTTL),
+					statusCode:  rec.statusCode,
+					contentType: rec.Header().Get("Content-Type"),
+					body:        rec.body,
+					bodyHash:    reqBodyHash,
+					expiresAt:   time.Now().Add(idempotencyTTL),
 				}
 			}
 			s.mu.Unlock()

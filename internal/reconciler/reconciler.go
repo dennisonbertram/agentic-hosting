@@ -73,6 +73,19 @@ func isNotFoundError(err error) bool {
 		strings.Contains(msg, "404")
 }
 
+// circuitRetryBackoff returns how long to wait before auto-recovering an open circuit,
+// based on how many times it has been opened.
+func circuitRetryBackoff(openCount int) time.Duration {
+	switch {
+	case openCount <= 1:
+		return 30 * time.Minute
+	case openCount == 2:
+		return 1 * time.Hour
+	default:
+		return 4 * time.Hour
+	}
+}
+
 func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	// Get all ah containers from Docker using the tenant label,
 	// which is set on BOTH service and database containers.
@@ -181,9 +194,17 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN 1
 						WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) >= 600 THEN 0
 						ELSE circuit_open
+					END,
+					circuit_retry_at = CASE
+						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN ?
+						ELSE circuit_retry_at
+					END,
+					circuit_open_count = CASE
+						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN circuit_open_count + 1
+						ELSE circuit_open_count
 					END
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, s.id, s.tenantID)
+				now, now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
 			}
@@ -197,6 +218,111 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			}
 			log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
 			fixed++
+		}
+	}
+
+	// 1a. Restart unhealthy containers — Docker health check reports "unhealthy".
+	// Stopping the container allows the RestartPolicy to restart it automatically.
+	for _, s := range runningServices {
+		info, inspectErr := r.docker.InspectContainer(ctx, s.containerID)
+		if inspectErr != nil {
+			continue
+		}
+		if info.HealthStatus != "unhealthy" {
+			continue
+		}
+		log.Printf("reconciler: service %s container %s is unhealthy — stopping to trigger restart", s.id, s.containerID[:12])
+		if stopErr := r.docker.StopContainer(ctx, s.containerID); stopErr != nil {
+			log.Printf("reconciler: failed to stop unhealthy container for service %s: %v", s.id, stopErr)
+			continue
+		}
+		now := time.Now().Unix()
+		_, err := r.db.ExecContext(ctx, `
+			UPDATE services SET
+				status = 'crashed',
+				crash_window_start = CASE
+					WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN ?
+					ELSE crash_window_start
+				END,
+				crash_count = CASE
+					WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 1
+					ELSE crash_count + 1
+				END,
+				last_crashed_at = ?,
+				last_error = 'container unhealthy (health check failed)',
+				updated_at = ?
+			WHERE id = ? AND tenant_id = ?`,
+			now, now, now, now, now, s.id, s.tenantID)
+		if err != nil {
+			log.Printf("reconciler: failed to update crash state for unhealthy service %s: %v", s.id, err)
+			continue
+		}
+		_, err = r.db.ExecContext(ctx, `
+			UPDATE services SET
+				circuit_open = CASE
+					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN 1
+					WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) >= 600 THEN 0
+					ELSE circuit_open
+				END,
+				circuit_retry_at = CASE
+					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN ?
+					ELSE circuit_retry_at
+				END,
+				circuit_open_count = CASE
+					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN circuit_open_count + 1
+					ELSE circuit_open_count
+				END
+			WHERE id = ? AND tenant_id = ?`,
+			now, now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+		if err != nil {
+			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
+		}
+		var circuitOpen int
+		r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+		if circuitOpen == 1 {
+			log.Printf("reconciler: service %s circuit breaker OPEN after unhealthy restarts — removing container", s.id)
+			_ = r.docker.RemoveContainer(ctx, s.containerID)
+		}
+		fixed++
+	}
+
+	// 1b. Auto-recover open circuits whose retry_at has elapsed.
+	nowUnix := time.Now().Unix()
+	recoveryRows, err := r.db.QueryContext(ctx,
+		`SELECT id, tenant_id FROM services WHERE circuit_open = 1 AND circuit_retry_at IS NOT NULL AND circuit_retry_at <= ?`,
+		nowUnix)
+	if err != nil {
+		log.Printf("reconciler: failed to query circuit recovery candidates: %v", err)
+	} else {
+		type recoverRecord struct{ id, tenantID string }
+		var toRecover []recoverRecord
+		for recoveryRows.Next() {
+			var rec recoverRecord
+			if err := recoveryRows.Scan(&rec.id, &rec.tenantID); err != nil {
+				continue
+			}
+			toRecover = append(toRecover, rec)
+		}
+		recoveryRows.Close()
+
+		for _, rec := range toRecover {
+			log.Printf("reconciler: service %s circuit retry_at elapsed — resetting circuit breaker for auto-recovery attempt", rec.id)
+			_, err := r.db.ExecContext(ctx, `
+				UPDATE services SET
+					circuit_open = 0,
+					crash_count = 0,
+					crash_window_start = NULL,
+					circuit_retry_at = NULL,
+					status = 'stopped',
+					updated_at = ?
+				WHERE id = ? AND tenant_id = ?`,
+				time.Now().Unix(), rec.id, rec.tenantID)
+			if err != nil {
+				log.Printf("reconciler: failed to reset circuit for service %s: %v", rec.id, err)
+			} else {
+				log.Printf("reconciler: service %s circuit reset to stopped — next tick will restart if applicable", rec.id)
+				fixed++
+			}
 		}
 	}
 

@@ -175,10 +175,10 @@ func main() {
 		log.Printf("HTTPS enforcement is ON. The server must be behind a TLS-terminating proxy (e.g. Traefik) that connects via loopback (127.0.0.1). X-Forwarded-Proto is only trusted from loopback RemoteAddr.")
 	}
 
-	// Start reconciler (60s interval)
+	// Start reconciler (30s interval)
 	reconcilerCtx, reconcilerCancel := context.WithCancel(context.Background())
 	defer reconcilerCancel()
-	rec := reconciler.New(store.StateDB, dockerClient, 60*time.Second)
+	rec := reconciler.New(store.StateDB, dockerClient, 30*time.Second)
 	go rec.Run(reconcilerCtx)
 
 	// Start garbage collector (5min interval)

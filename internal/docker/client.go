@@ -40,10 +40,11 @@ func (c *Client) Close() error {
 
 // ContainerInfo holds inspected container state.
 type ContainerInfo struct {
-	CreatedAt time.Time
-	Status    string
-	StartedAt string
-	ExitCode  int
+	CreatedAt    time.Time
+	Status       string
+	StartedAt    string
+	ExitCode     int
+	HealthStatus string // "", "starting", "healthy", "unhealthy", "none"
 }
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
@@ -176,6 +177,13 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 			Image:  img,
 			Env:    env,
 			Labels: labels,
+			Healthcheck: &container.HealthConfig{
+				Test:        []string{"CMD-SHELL", fmt.Sprintf("wget -qO- http://localhost:%d/ > /dev/null 2>&1 || exit 1", port)},
+				Interval:    30 * time.Second,
+				Timeout:     5 * time.Second,
+				Retries:     3,
+				StartPeriod: 60 * time.Second,
+			},
 		},
 		hostCfg,
 		&network.NetworkingConfig{},
@@ -271,11 +279,16 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Con
 		return nil, fmt.Errorf("inspect container: %w", err)
 	}
 	created, _ := time.Parse(time.RFC3339Nano, info.Created)
+	healthStatus := ""
+	if info.State.Health != nil {
+		healthStatus = info.State.Health.Status
+	}
 	return &ContainerInfo{
-		CreatedAt: created,
-		Status:    strings.ToLower(info.State.Status),
-		StartedAt: info.State.StartedAt,
-		ExitCode:  info.State.ExitCode,
+		CreatedAt:    created,
+		Status:       strings.ToLower(info.State.Status),
+		StartedAt:    info.State.StartedAt,
+		ExitCode:     info.State.ExitCode,
+		HealthStatus: healthStatus,
 	}, nil
 }
 

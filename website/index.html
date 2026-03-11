@@ -3,14 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>agentic.hosting — The PaaS built for AI agents</title>
+  <title>agentic.hosting — Hosting infrastructure built for AI agents</title>
+  <meta name="description" content="Open-source hosting infrastructure built for AI agents. 100% JSON REST API, gVisor sandboxing, circuit breakers. Runs on your server.">
 
-  <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 
-  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -25,7 +24,6 @@
       },
     }
   </script>
-
   <style>
     body { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .font-instrument-serif { font-family: 'Instrument Serif', 'Instrument Serif Fallback', serif; }
@@ -34,687 +32,343 @@
 </head>
 <body class="bg-stone-50 text-stone-900 antialiased">
 
-  <!-- ============================================================
-       NAVIGATION
-  ============================================================ -->
+  <!-- NAV -->
   <nav class="sticky top-0 z-50 bg-stone-50/95 backdrop-blur flex items-center justify-between px-6 py-4">
-    <!-- Logo -->
     <div class="flex items-center gap-2.5">
       <div class="w-7 h-7 bg-stone-900 rounded flex items-center justify-center flex-shrink-0">
         <span class="text-stone-50 font-bold text-xs font-mono-stack">ah</span>
       </div>
       <div>
         <div class="font-bold text-sm text-stone-900 tracking-wide leading-none">agentic.hosting</div>
-        <div class="text-[10px] text-stone-500 leading-none mt-0.5">agentic-first PaaS</div>
+        <div class="text-[10px] text-stone-500 leading-none mt-0.5">built for agents</div>
       </div>
     </div>
-    <!-- Nav links -->
     <div class="flex items-center gap-5">
       <a href="https://github.com/dennisonbertram/agentic-hosting" class="text-xs text-stone-600 hover:text-stone-900 transition-colors flex items-center gap-1.5">
         <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
         GitHub
       </a>
-      <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="text-xs text-stone-600 hover:text-stone-900 transition-colors">
-        Runbook
-      </a>
-      <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/README.md" class="text-xs text-stone-600 hover:text-stone-900 transition-colors">
-        Docs
-      </a>
-      <a href="https://github.com/dennisonbertram/agentic-hosting" class="text-xs text-stone-50 bg-stone-900 rounded-full px-3 py-1.5 hover:bg-stone-800 transition-colors flex items-center gap-1.5">
-        <svg class="w-3 h-3 fill-stone-400" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
-        Star
-      </a>
+      <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="text-xs text-stone-600 hover:text-stone-900 transition-colors">Runbook</a>
+      <a href="https://github.com/dennisonbertram/agentic-hosting" class="text-xs text-stone-50 bg-stone-900 rounded-full px-3 py-1.5 flex items-center gap-1.5 hover:opacity-90 transition-opacity">★ Star</a>
     </div>
   </nav>
 
-  <!-- ============================================================
-       HERO
-  ============================================================ -->
+  <!-- HERO -->
   <section class="relative pt-28 pb-20 sm:pt-36 sm:pb-28 flex flex-col items-center overflow-hidden bg-stone-50">
-    <div class="max-w-5xl mx-auto px-6 w-full flex flex-col items-center text-center">
+    <div class="max-w-5xl mx-auto px-6 flex flex-col items-center text-center">
 
-      <!-- Eyebrow label -->
-      <p class="text-xs tracking-[0.2em] text-stone-400 uppercase font-mono-stack mb-4">Open Source · MIT License</p>
+      <p class="text-xs tracking-[0.2em] text-stone-400 uppercase font-mono-stack mb-8">Open Source · MIT License</p>
 
-      <!-- Pixel-art wordmark — fading left to right -->
-      <div class="w-full max-w-3xl mb-10">
-        <svg viewBox="0 0 960 130" xmlns="http://www.w3.org/2000/svg" class="w-full h-auto">
-          <!-- Letter A -->
-          <g fill="#292524">
-            <rect x="0" y="20" width="10" height="90"/>
-            <rect x="0" y="20" width="60" height="10"/>
-            <rect x="50" y="20" width="10" height="90"/>
-            <rect x="0" y="60" width="60" height="10"/>
-          </g>
-          <!-- Letter G -->
-          <g fill="#3d3835">
-            <rect x="80" y="20" width="60" height="10"/>
-            <rect x="80" y="20" width="10" height="90"/>
-            <rect x="80" y="100" width="60" height="10"/>
-            <rect x="130" y="60" width="10" height="50"/>
-            <rect x="110" y="60" width="30" height="10"/>
-          </g>
-          <!-- Letter E -->
-          <g fill="#57534e">
-            <rect x="160" y="20" width="10" height="90"/>
-            <rect x="160" y="20" width="55" height="10"/>
-            <rect x="160" y="60" width="45" height="10"/>
-            <rect x="160" y="100" width="55" height="10"/>
-          </g>
-          <!-- Letter N -->
-          <g fill="#6b6460">
-            <rect x="235" y="20" width="10" height="90"/>
-            <rect x="235" y="20" width="10" height="10"/>
-            <rect x="245" y="30" width="10" height="10"/>
-            <rect x="255" y="40" width="10" height="10"/>
-            <rect x="265" y="50" width="10" height="20"/>
-            <rect x="255" y="70" width="10" height="10"/>
-            <rect x="245" y="80" width="10" height="10"/>
-            <rect x="235" y="90" width="10" height="20"/>
-            <rect x="275" y="20" width="10" height="90"/>
-          </g>
-          <!-- Letter T -->
-          <g fill="#78716c">
-            <rect x="310" y="20" width="70" height="10"/>
-            <rect x="340" y="30" width="10" height="80"/>
-          </g>
-          <!-- Letter I -->
-          <g fill="#8c8480">
-            <rect x="400" y="20" width="40" height="10"/>
-            <rect x="415" y="30" width="10" height="70"/>
-            <rect x="400" y="100" width="40" height="10"/>
-          </g>
-          <!-- Letter C -->
-          <g fill="#a09a96">
-            <rect x="460" y="20" width="60" height="10"/>
-            <rect x="460" y="20" width="10" height="90"/>
-            <rect x="460" y="100" width="60" height="10"/>
-          </g>
-          <!-- dot -->
-          <g fill="#b8b0ac">
-            <rect x="540" y="90" width="12" height="12"/>
-          </g>
-          <!-- Letter H -->
-          <g fill="#c4beba">
-            <rect x="570" y="20" width="10" height="90"/>
-            <rect x="570" y="60" width="55" height="10"/>
-            <rect x="615" y="20" width="10" height="90"/>
-          </g>
-          <!-- Letter O -->
-          <g fill="#cec9c6">
-            <rect x="645" y="20" width="60" height="10"/>
-            <rect x="645" y="20" width="10" height="90"/>
-            <rect x="695" y="20" width="10" height="90"/>
-            <rect x="645" y="100" width="60" height="10"/>
-          </g>
-          <!-- Letter S -->
-          <g fill="#d6d3d1">
-            <rect x="725" y="20" width="60" height="10"/>
-            <rect x="725" y="20" width="10" height="40"/>
-            <rect x="725" y="60" width="60" height="10"/>
-            <rect x="775" y="60" width="10" height="50"/>
-            <rect x="725" y="100" width="60" height="10"/>
-          </g>
-          <!-- Letter T -->
-          <g fill="#e2dfdd">
-            <rect x="805" y="20" width="70" height="10"/>
-            <rect x="835" y="30" width="10" height="80"/>
-          </g>
-          <!-- Letter G -->
-          <g fill="#ebe9e8">
-            <rect x="895" y="20" width="60" height="10"/>
-            <rect x="895" y="20" width="10" height="90"/>
-            <rect x="895" y="100" width="60" height="10"/>
-            <rect x="945" y="60" width="10" height="50"/>
-            <rect x="925" y="60" width="30" height="10"/>
-          </g>
+      <!-- Pixel-art wordmark: AGENTIC.HOSTING -->
+      <div class="w-full mb-10 select-none">
+        <svg viewBox="0 0 1150 160" xmlns="http://www.w3.org/2000/svg" class="w-full max-w-4xl mx-auto">
+          <!-- A --><g fill="#292524"><rect x="10" y="40" width="12" height="80"/><rect x="58" y="40" width="12" height="80"/><rect x="10" y="40" width="60" height="12"/><rect x="10" y="80" width="60" height="12"/></g>
+          <!-- G --><g fill="#3d3834"><rect x="88" y="40" width="60" height="12"/><rect x="88" y="108" width="60" height="12"/><rect x="88" y="40" width="12" height="80"/><rect x="136" y="76" width="12" height="44"/><rect x="112" y="76" width="36" height="12"/></g>
+          <!-- E --><g fill="#57534e"><rect x="166" y="40" width="12" height="80"/><rect x="166" y="40" width="60" height="12"/><rect x="166" y="80" width="48" height="12"/><rect x="166" y="108" width="60" height="12"/></g>
+          <!-- N --><g fill="#78716c"><rect x="244" y="40" width="12" height="80"/><rect x="292" y="40" width="12" height="80"/><rect x="244" y="40" width="12" height="12"/><rect x="256" y="52" width="12" height="12"/><rect x="268" y="64" width="12" height="12"/><rect x="280" y="76" width="12" height="12"/><rect x="292" y="88" width="12" height="12"/></g>
+          <!-- T --><g fill="#8f8a87"><rect x="322" y="40" width="60" height="12"/><rect x="346" y="52" width="12" height="68"/></g>
+          <!-- I (narrow) --><g fill="#a8a29e"><rect x="400" y="40" width="40" height="12"/><rect x="400" y="108" width="40" height="12"/><rect x="414" y="40" width="12" height="80"/></g>
+          <!-- C --><g fill="#b5b0ac"><rect x="458" y="40" width="60" height="12"/><rect x="458" y="108" width="60" height="12"/><rect x="458" y="40" width="12" height="80"/></g>
+          <!-- . --><g fill="#c7c3c1"><rect x="534" y="108" width="12" height="12"/></g>
+          <!-- H --><g fill="#c7c3c1"><rect x="558" y="40" width="12" height="80"/><rect x="606" y="40" width="12" height="80"/><rect x="558" y="80" width="60" height="12"/></g>
+          <!-- O --><g fill="#d6d3d1"><rect x="636" y="40" width="60" height="12"/><rect x="636" y="108" width="60" height="12"/><rect x="636" y="40" width="12" height="80"/><rect x="684" y="40" width="12" height="80"/></g>
+          <!-- S --><g fill="#d6d3d1"><rect x="714" y="40" width="60" height="12"/><rect x="714" y="80" width="60" height="12"/><rect x="714" y="108" width="60" height="12"/><rect x="714" y="40" width="12" height="52"/><rect x="762" y="80" width="12" height="40"/></g>
+          <!-- T --><g fill="#e0dedc"><rect x="792" y="40" width="60" height="12"/><rect x="816" y="52" width="12" height="68"/></g>
+          <!-- I (narrow) --><g fill="#e7e5e4"><rect x="870" y="40" width="40" height="12"/><rect x="870" y="108" width="40" height="12"/><rect x="884" y="40" width="12" height="80"/></g>
+          <!-- N --><g fill="#ece9e7"><rect x="928" y="40" width="12" height="80"/><rect x="976" y="40" width="12" height="80"/><rect x="928" y="40" width="12" height="12"/><rect x="940" y="52" width="12" height="12"/><rect x="952" y="64" width="12" height="12"/><rect x="964" y="76" width="12" height="12"/><rect x="976" y="88" width="12" height="12"/></g>
+          <!-- G --><g fill="#f0efee"><rect x="1006" y="40" width="60" height="12"/><rect x="1006" y="108" width="60" height="12"/><rect x="1006" y="40" width="12" height="80"/><rect x="1054" y="76" width="12" height="44"/><rect x="1030" y="76" width="36" height="12"/></g>
         </svg>
       </div>
 
-      <!-- Tagline — Instrument Serif italic -->
-      <p class="font-instrument-serif italic text-3xl sm:text-4xl text-stone-900 mb-2 leading-snug">
-        The PaaS built for AI agents.
-      </p>
-      <p class="font-instrument-serif italic text-2xl sm:text-3xl text-stone-500 mb-8 leading-snug">
-        REST API only. No dashboard required.
+      <h1 class="font-instrument-serif italic text-4xl sm:text-5xl text-stone-900 mb-4 leading-tight max-w-3xl">
+        Dashboards are for humans.<br>Your agent needs an API.
+      </h1>
+      <p class="text-stone-500 text-lg leading-relaxed mb-10 max-w-2xl">
+        agentic.hosting is open-source hosting infrastructure built for AI agents — not humans. Deploy containers, provision databases, and monitor infrastructure through a 100% JSON REST API. No browser. No wizard. No surprises.
       </p>
 
-      <!-- Install / quickstart command -->
-      <div class="flex flex-col sm:flex-row items-center gap-4 mb-6">
+      <div class="flex flex-col items-center gap-3 mb-4">
         <button onclick="navigator.clipboard.writeText('curl -fsSL https://agentic.hosting/install.sh | bash')"
                 class="font-mono-stack text-sm text-stone-50 px-6 py-3 rounded-xl border border-stone-800 flex items-center gap-3 hover:opacity-90 transition-opacity"
                 style="background: rgba(40, 37, 35, 0.9);">
           <span>$ curl -fsSL https://agentic.hosting/install.sh | bash</span>
-          <svg class="w-4 h-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke-width="2"/><path stroke-width="2" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <svg class="w-4 h-4 opacity-50 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke-width="2"/><path stroke-width="2" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         </button>
         <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md"
-           class="text-sm text-stone-600 hover:text-stone-900 transition-colors flex items-center gap-1.5">
+           class="text-sm text-stone-500 hover:text-stone-900 transition-colors flex items-center gap-1.5">
           Read the Agent Runbook
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </a>
       </div>
-      <p class="text-xs text-stone-400 tracking-wide mb-16">
-        Self-host on any Linux box · Docker + gVisor · Single Go binary
-      </p>
+      <p class="text-xs text-stone-400 tracking-wide mb-16">Bring your own Linux server · no vendor lock-in · $0/mo platform fee</p>
 
-      <!-- macOS app window — quickstart terminal preview -->
+      <!-- Terminal -->
       <div class="w-full max-w-3xl mx-auto bg-white rounded-2xl shadow-2xl overflow-hidden border border-stone-200">
-        <!-- Title bar -->
         <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
           <span class="w-3 h-3 rounded-full flex-shrink-0" style="background: rgb(255, 95, 86)"></span>
           <span class="w-3 h-3 rounded-full flex-shrink-0" style="background: rgb(255, 189, 46)"></span>
           <span class="w-3 h-3 rounded-full flex-shrink-0" style="background: rgb(39, 202, 64)"></span>
-          <span class="ml-4 text-xs text-stone-400 font-mono-stack">agentic-hosting — quickstart</span>
-          <span class="ml-auto text-xs text-stone-400 font-mono-stack">agentic.hosting</span>
+          <span class="ml-4 text-xs text-stone-400 font-mono-stack">agent session</span>
         </div>
-        <!-- Terminal body -->
         <div class="bg-stone-900 p-6 text-left">
           <div class="font-mono-stack text-[12px] leading-relaxed space-y-1">
+            <div class="text-stone-500"># 1. Install the skill — teaches Claude the whole API</div>
             <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -fsSL https://agentic.hosting/install.sh | bash</span></div>
-            <div class="text-stone-400 mt-2">Installing agentic-hosting Claude Code skill...</div>
-            <div class="mt-2"><span class="text-green-400">✓</span> <span class="text-stone-300">Skill installed to ~/.claude/skills/agentic-hosting</span></div>
-            <div><span class="text-green-400">✓</span> <span class="text-stone-300">Commands installed: /deploy /status /db /logs</span></div>
-            <div class="mt-3 text-stone-500"># Set your server credentials</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">export AH_URL=<span class="text-blue-400">https://your-server</span></span></div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">export AH_KEY=<span class="text-blue-400">your-keyid.secret</span></span></div>
-            <div class="mt-3 text-stone-500"># Open Claude Code and try</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">/status</span></div>
-            <div class="text-stone-500 mt-1">→ <span class="text-green-400">2 services running</span> · health ok · 0 restarts</div>
+            <div><span class="text-green-400">✓</span> <span class="text-stone-300">/deploy · /status · /db · /logs — ready in Claude Code</span></div>
+            <div class="mt-4 text-stone-500"># 2. Spin up a Linux server — Claude helps you set it up</div>
+            <div class="text-stone-400">Any provider works. Starts at $4/mo on Hetzner.</div>
+            <div class="mt-4 text-stone-500"># 3. Deploy anything, just by asking</div>
+            <div><span class="text-stone-400">you:</span> <span class="text-stone-200">deploy nginx as "web"</span></div>
+            <div class="text-stone-400 pl-5">→ Deploying...</div>
+            <div class="pl-5"><span class="text-green-400">✓</span> <span class="text-stone-300">running · <span class="text-blue-400">https://web.your-server.traefik.me</span></span></div>
           </div>
         </div>
       </div>
+
     </div>
   </section>
 
-  <!-- ============================================================
-       FEATURE BADGES ROW
-  ============================================================ -->
-  <section class="bg-white border-y border-stone-200 py-8">
-    <div class="max-w-5xl mx-auto px-6 flex flex-wrap items-center justify-center gap-3">
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">gVisor Sandboxed</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Build from Git</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Managed Databases</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Self-Healing</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Agentic-First API</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Single Go Binary</span>
-      <span class="px-3 py-1.5 rounded-full border border-stone-300 text-xs text-stone-600 font-mono-stack">Claude Code Slash Commands</span>
-    </div>
-  </section>
-
-  <!-- ============================================================
-       FEATURE 1 — Build from Git (text left, window right)
-  ============================================================ -->
-  <section class="py-20 sm:py-28 bg-stone-50">
-    <div class="max-w-6xl mx-auto px-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
-        <!-- Text -->
-        <div>
-          <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Deploy<span class="px-2 py-0.5 rounded-full text-[10px] font-mono-stack border border-stone-300 text-stone-400 ml-2">Coming soon</span></p>
-          <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-            Deploy from git.<br>Zero config.
-          </h2>
-          <p class="text-stone-600 text-base leading-relaxed mb-6">
-            Push a GitHub URL and get a running container. Nixpacks auto-detects your stack — Node, Python, Go, Ruby, Rust — no Dockerfile needed. Encrypted connection strings returned immediately.
-          </p>
-          <ul class="space-y-3">
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(77, 184, 144, 0.15)">
-                <svg class="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Nixpacks builds — Node, Python, Go, Ruby, Rust
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(77, 184, 144, 0.15)">
-                <svg class="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Or deploy any Docker image directly
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(77, 184, 144, 0.15)">
-                <svg class="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Traefik auto-configures TLS routing
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(77, 184, 144, 0.15)">
-                <svg class="w-3 h-3 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Streamed build logs via HTTP
-            </li>
-          </ul>
-        </div>
-        <!-- macOS Window -->
-        <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-stone-200 opacity-50">
-          <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
-            <span class="ml-3 text-xs text-stone-400 font-mono-stack">POST /v1/builds</span>
-          </div>
-          <div class="bg-stone-900 p-5">
-            <div class="font-mono-stack text-[11px] leading-relaxed space-y-1">
-              <div class="text-stone-500"># Coming soon — /v1/builds endpoint in development</div>
-              <div class="text-stone-600 mt-3">$ curl -X POST $BASE/v1/builds \</div>
-              <div class="text-stone-600 pl-4">-d '{"service_name":"api",</div>
-              <div class="text-stone-600 pl-5">"git_url":"github.com/org/repo",</div>
-              <div class="text-stone-600 pl-5">"branch":"main"}'</div>
-              <div class="mt-3 text-stone-600">{"build_id":"bld_01jn...",</div>
-              <div class="text-stone-600 pl-2">"status":"building",</div>
-              <div class="text-stone-600 pl-2">"logs_url":"/v1/builds/bld_.../logs"}</div>
-              <div class="mt-3 text-stone-600"># Stream logs</div>
-              <div class="text-stone-600">$ curl -N $BASE/v1/builds/bld_.../logs</div>
-              <div class="text-stone-600 mt-1">✓ Detected Node.js 20</div>
-              <div class="text-stone-600">✓ Installing dependencies...</div>
-              <div class="text-stone-600">✓ Build complete → pushing to registry</div>
-              <div class="text-stone-600">✓ running → https://api.yourdomain.com</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================================================
-       FEATURE 2 — gVisor Isolation (window left, text right)
-  ============================================================ -->
+  <!-- SECTION: We fixed what breaks agents -->
   <section class="py-20 sm:py-28 bg-white">
-    <div class="max-w-6xl mx-auto px-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
-        <!-- macOS Window -->
-        <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-stone-200 order-2 md:order-1">
-          <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
-            <span class="ml-3 text-xs text-stone-400 font-mono-stack">gVisor sandbox config</span>
-          </div>
-          <div class="bg-stone-900 p-5">
-            <div class="font-mono-stack text-[11px] leading-relaxed space-y-1">
-              <div class="text-stone-500"># Every container runs in gVisor (runsc)</div>
-              <div class="text-stone-300 mt-2">Runtime: <span class="text-blue-400">runsc</span> (gVisor)</div>
-              <div class="text-stone-300">ReadonlyRootfs: <span class="text-green-400">true</span></div>
-              <div class="text-stone-300">CapDrop: <span class="text-yellow-400">ALL</span></div>
-              <div class="text-stone-300">NetworkMode: <span class="text-blue-400">traefik-public</span></div>
-              <div class="text-stone-500 mt-3"># Tmpfs mounts for writable dirs</div>
-              <div class="text-stone-300">Tmpfs:</div>
-              <div class="text-stone-400 pl-4">- /tmp</div>
-              <div class="text-stone-400 pl-4">- /var/run</div>
-              <div class="text-stone-400 pl-4">- /run</div>
-              <div class="mt-3 text-stone-500"># Syscall interception at kernel level</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> Isolation: kernel sandbox active</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> Host kernel: protected</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> Capabilities: none granted</div>
-            </div>
-          </div>
-        </div>
-        <!-- Text -->
-        <div class="order-1 md:order-2">
-          <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Security</p>
-          <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-            gVisor isolation.<br>Kernel-level sandbox.
-          </h2>
-          <p class="text-stone-600 text-base leading-relaxed mb-6">
-            Every container runs inside a gVisor sandbox. Syscall interception at the kernel level means compromised code can never reach the host. Read-only rootfs with dropped capabilities by default.
-          </p>
-          <ul class="space-y-3">
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(91, 155, 213, 0.15)">
-                <svg class="w-3 h-3 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Syscall interception — host kernel never exposed
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(91, 155, 213, 0.15)">
-                <svg class="w-3 h-3 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Read-only rootfs by default
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(91, 155, 213, 0.15)">
-                <svg class="w-3 h-3 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              All Linux capabilities dropped
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(91, 155, 213, 0.15)">
-                <svg class="w-3 h-3 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Secure for running untrusted AI-generated code
-            </li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================================================
-       FEATURE 3 — Managed Databases (text left, window right)
-  ============================================================ -->
-  <section class="py-20 sm:py-28 bg-stone-50">
-    <div class="max-w-6xl mx-auto px-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
-        <!-- Text -->
-        <div>
-          <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Databases</p>
-          <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-            Managed databases.<br>Provisioned in seconds.
-          </h2>
-          <p class="text-stone-600 text-base leading-relaxed mb-6">
-            Provision Postgres or Redis with a single API call. Encrypted connection strings are returned immediately and automatically injected into your service environment. No connection string wrangling.
-          </p>
-          <ul class="space-y-3">
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(155, 126, 200, 0.15)">
-                <svg class="w-3 h-3 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Postgres and Redis on demand
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(155, 126, 200, 0.15)">
-                <svg class="w-3 h-3 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              AES-256-GCM encrypted connection strings
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(155, 126, 200, 0.15)">
-                <svg class="w-3 h-3 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Auto-injects DATABASE_URL into service env
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(155, 126, 200, 0.15)">
-                <svg class="w-3 h-3 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Service automatically restarted after provision
-            </li>
-          </ul>
-        </div>
-        <!-- macOS Window -->
-        <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-stone-200">
-          <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
-            <span class="ml-3 text-xs text-stone-400 font-mono-stack">POST /v1/databases</span>
-          </div>
-          <div class="bg-stone-900 p-5">
-            <div class="font-mono-stack text-[11px] leading-relaxed space-y-1">
-              <div class="text-stone-500"># Provision a Postgres database</div>
-              <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -X POST $BASE/v1/databases \</span></div>
-              <div class="text-stone-400 pl-4">-H "Authorization: Bearer $KEY" \</div>
-              <div class="text-stone-400 pl-4">-d '{"service":"web","type":"postgres"}'</div>
-              <div class="text-stone-500 mt-3">{</div>
-              <div class="text-stone-500 pl-4">"db_id": "<span class="text-blue-400">db_01jn...</span>",</div>
-              <div class="text-stone-500 pl-4">"type": "<span class="text-purple-400">postgres</span>",</div>
-              <div class="text-stone-500 pl-4">"status": "<span class="text-green-400">running</span>",</div>
-              <div class="text-stone-500 pl-4">"connection_string": "<span class="text-yellow-400">[AES-256-GCM encrypted]</span>"</div>
-              <div class="text-stone-500">}</div>
-              <div class="mt-3 text-stone-500"><span class="text-green-400">✓</span> DATABASE_URL injected into "web"</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> Service "web" restarted</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================================================
-       FEATURE 4 — Self-Healing (window left, text right)
-  ============================================================ -->
-  <section class="py-20 sm:py-28 bg-white">
-    <div class="max-w-6xl mx-auto px-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
-        <!-- macOS Window -->
-        <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-stone-200 order-2 md:order-1">
-          <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
-            <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
-            <span class="ml-3 text-xs text-stone-400 font-mono-stack">GET /v1/system/health</span>
-          </div>
-          <div class="bg-stone-900 p-5">
-            <div class="font-mono-stack text-[11px] leading-relaxed space-y-1">
-              <div class="text-stone-500"># Reconciler syncs every 60s</div>
-              <div class="text-stone-500 mt-2">{</div>
-              <div class="text-stone-500 pl-4">"status": "<span class="text-green-400">ok</span>",</div>
-              <div class="text-stone-500 pl-4">"disk_usage_pct": <span class="text-blue-400">24</span>,</div>
-              <div class="text-stone-500 pl-4">"docker": "<span class="text-green-400">ok</span>",</div>
-              <div class="text-stone-500 pl-4">"gvisor": "<span class="text-green-400">ok</span>",</div>
-              <div class="text-stone-500 pl-4">"services": [</div>
-              <div class="text-stone-500 pl-6">{"name":"web","status":"<span class="text-green-400">running</span>","restarts":0},</div>
-              <div class="text-stone-500 pl-6">{"name":"api","status":"<span class="text-green-400">running</span>","restarts":0}</div>
-              <div class="text-stone-500 pl-4">]</div>
-              <div class="text-stone-500">}</div>
-              <div class="mt-3 text-stone-500"># Circuit breaker — stops crash loops</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> Reconciler: last sync 12s ago</div>
-              <div class="text-stone-500"><span class="text-green-400">✓</span> GC: 3 stale containers removed</div>
-            </div>
-          </div>
-        </div>
-        <!-- Text -->
-        <div class="order-1 md:order-2">
-          <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Reliability</p>
-          <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-            Self-healing.<br>Always in sync.
-          </h2>
-          <p class="text-stone-600 text-base leading-relaxed mb-6">
-            A background reconciler re-syncs every 60 seconds, restarting drifted containers and cleaning up stale state. A circuit breaker stops crash loops automatically before they consume resources.
-          </p>
-          <ul class="space-y-3">
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(212, 165, 74, 0.15)">
-                <svg class="w-3 h-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Reconciler re-syncs every 60 seconds
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(212, 165, 74, 0.15)">
-                <svg class="w-3 h-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Circuit breaker stops crash loops
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(212, 165, 74, 0.15)">
-                <svg class="w-3 h-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              GC removes stale containers and images
-            </li>
-            <li class="flex items-start gap-3 text-sm text-stone-700">
-              <span class="mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center" style="background: rgba(212, 165, 74, 0.15)">
-                <svg class="w-3 h-3 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-              </span>
-              Health endpoint returns full system state
-            </li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================================================
-       SLASH COMMANDS — Claude Code Integration
-  ============================================================ -->
-  <section class="py-20 sm:py-28 bg-stone-50">
-    <div class="max-w-6xl mx-auto px-6">
-      <!-- Section header -->
-      <div class="text-center mb-14">
-        <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Claude Code</p>
-        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-          Slash commands for Claude Code.
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="max-w-2xl mb-14">
+        <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">The problem</p>
+        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
+          Standard cloud hosting breaks AI agents.<br>We fixed it.
         </h2>
-        <p class="text-stone-600 text-base max-w-xl mx-auto leading-relaxed">
-          Install the skill once. Then deploy, provision databases, stream logs, and check system status — all from within Claude Code.
+        <p class="text-stone-500 text-base leading-relaxed">
+          Every existing hosting platform was designed around a human at a keyboard. Agents hit walls that humans never notice — and get stuck there. We rebuilt from scratch for non-human callers.
         </p>
       </div>
 
-      <!-- Full-width macOS window -->
-      <div class="bg-white rounded-2xl shadow-2xl overflow-hidden border border-stone-200 mb-12">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(91,155,213,0.1); color: #3b82f6">JSON-only responses</div>
+          <h3 class="font-medium text-stone-900 mb-2">No more HTML error pages.</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Standard platforms return HTML 500 pages that break LLM parsers. Every response from agentic.hosting — including errors — is strict JSON with a machine-readable <code class="text-xs bg-stone-200 px-1 rounded">code</code> field. Your agent always knows exactly what happened.</p>
+        </div>
+
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(77,184,144,0.1); color: #10b981">Idempotency keys</div>
+          <h3 class="font-medium text-stone-900 mb-2">Retries don't create duplicates.</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Agents hallucinate, timeout, and retry. Every write endpoint accepts an idempotency key — the same request twice produces the same result once. No duplicate deployments from a stuck loop.</p>
+        </div>
+
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(155,126,200,0.1); color: #8b5cf6">Circuit breaker</div>
+          <h3 class="font-medium text-stone-900 mb-2">5 crashes in 10 minutes and the loop stops.</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Autonomous agents can crash-loop a service at machine speed. The built-in circuit breaker detects the pattern and pauses the service automatically — before it burns your server. Auto-recovery after 30m, 1h, 4h.</p>
+        </div>
+
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(212,165,74,0.1); color: #f59e0b">Scoped API keys</div>
+          <h3 class="font-medium text-stone-900 mb-2">Limit what your agent can touch.</h3>
+          <p class="text-sm text-stone-500 leading-relaxed">Give your agent a key scoped to one tenant. If the agent is compromised via prompt injection, it can't reach other tenants, revoke keys, or delete production databases. Blast radius is bounded by design.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION: One API -->
+  <section class="py-20 sm:py-28 bg-stone-50">
+    <div class="max-w-5xl mx-auto px-6 grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
+      <div>
+        <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">The API</p>
+        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
+          One API. Your agent does the rest.
+        </h2>
+        <p class="text-stone-600 text-base leading-relaxed mb-8">
+          Deploy services. Provision databases. Stream logs. Check health. All from a single REST API your agent already knows how to call. A lightweight Go binary orchestrates Docker and Traefik under the hood — nothing exotic, nothing proprietary.
+        </p>
+        <ul class="space-y-3 text-sm text-stone-600">
+          <li class="flex items-start gap-3">
+            <span class="text-green-500 mt-0.5 flex-shrink-0">✓</span>
+            <span>Deploy any Docker image — running in under 30 seconds</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-green-500 mt-0.5 flex-shrink-0">✓</span>
+            <span>Postgres &amp; Redis on demand — connection string auto-injected, agent never sees the password</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-green-500 mt-0.5 flex-shrink-0">✓</span>
+            <span>Reconciler re-syncs every 30s — crashed containers restarted automatically</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-green-500 mt-0.5 flex-shrink-0">✓</span>
+            <span>Per-tenant isolation — each agent gets its own network, rate limit bucket, and key space</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="bg-white rounded-xl overflow-hidden border border-stone-200 shadow-lg">
         <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
           <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
           <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
           <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
-          <span class="ml-4 text-xs text-stone-400 font-mono-stack">Claude Code — slash commands</span>
+          <span class="ml-4 text-xs text-stone-400 font-mono-stack">agent deploying a service</span>
         </div>
-        <div class="bg-stone-900 p-6">
-          <div class="font-mono-stack text-[12px] leading-relaxed space-y-1 max-w-3xl">
-            <div class="text-stone-500"># Install the skill — one command</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -fsSL https://agentic.hosting/install.sh | bash</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> Skill installed to ~/.claude/skills/agentic-hosting</div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> Commands installed: /deploy /status /db /logs</div>
-            <div class="text-stone-500 mt-4"># Deploy from GitHub — Nixpacks auto-detects your stack</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">/deploy https://github.com/org/myapp web 3000</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> Building with Nixpacks... deploying... <span class="text-green-400">running</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> Live at: <span class="text-blue-400">https://web.yourdomain.com</span></div>
-            <div class="text-stone-500 mt-4"># Provision a database — auto-wires DATABASE_URL</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">/db web postgres</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> Postgres provisioned → DATABASE_URL set → service restarted</div>
-            <div class="text-stone-500 mt-4"># Check full system status</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">/status</span></div>
-            <div class="text-stone-500 ml-4">Disk: 24%  Docker: ok  gVisor: ok</div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> web &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="text-green-400">running</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">✓</span> web-postgres &nbsp;&nbsp;&nbsp;<span class="text-green-400">running</span></div>
-            <div class="text-stone-500 mt-4"># Stream logs</div>
-            <div><span class="text-green-400">$</span> <span class="text-stone-200">/logs web</span></div>
-            <div class="text-stone-500 ml-4"><span class="text-green-400">→</span> Streaming build logs for "web"...</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Slash command cards -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="bg-white rounded-2xl border border-stone-200 p-5">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-stack font-medium text-stone-800" style="background: rgba(77, 184, 144, 0.12)">/deploy</span>
-          </div>
-          <h3 class="font-medium text-sm text-stone-900 mb-2">Deploy from Git</h3>
-          <p class="text-xs text-stone-500 leading-relaxed">Deploy from a git URL (Nixpacks build) or Docker image. Streams build logs in real time.</p>
-        </div>
-        <div class="bg-white rounded-2xl border border-stone-200 p-5">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-stack font-medium text-stone-800" style="background: rgba(91, 155, 213, 0.12)">/status</span>
-          </div>
-          <h3 class="font-medium text-sm text-stone-900 mb-2">Full Dashboard</h3>
-          <p class="text-xs text-stone-500 leading-relaxed">Disk usage, all services, databases, and circuit breaker state — at a glance.</p>
-        </div>
-        <div class="bg-white rounded-2xl border border-stone-200 p-5">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-stack font-medium text-stone-800" style="background: rgba(155, 126, 200, 0.12)">/db</span>
-          </div>
-          <h3 class="font-medium text-sm text-stone-900 mb-2">Provision Database</h3>
-          <p class="text-xs text-stone-500 leading-relaxed">Provision Postgres or Redis, fetch the connection string, and wire it to a service automatically.</p>
-        </div>
-        <div class="bg-white rounded-2xl border border-stone-200 p-5">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-stack font-medium text-stone-800" style="background: rgba(212, 165, 74, 0.12)">/logs</span>
-          </div>
-          <h3 class="font-medium text-sm text-stone-900 mb-2">Stream Logs</h3>
-          <p class="text-xs text-stone-500 leading-relaxed">Stream build logs for any service by name. No IDs to look up.</p>
+        <div class="bg-stone-900 p-5 font-mono-stack text-[12px] leading-relaxed space-y-1 text-stone-300">
+          <div class="text-stone-500"># Deploy a Docker image</div>
+          <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -X POST https://agentic.hosting/v1/services \</span></div>
+          <div class="pl-4 text-stone-400">-H "Authorization: Bearer $AH_KEY" \</div>
+          <div class="pl-4 text-stone-400">-d '{"name":"web","image":"nginx:alpine","port":80}'</div>
+          <div class="mt-2 text-stone-500">{"id":"<span class="text-green-400">svc_01jn...</span>","status":"deploying"}</div>
+          <div class="mt-3 text-stone-500"># Provision a database — one call</div>
+          <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -X POST https://agentic.hosting/v1/databases \</span></div>
+          <div class="pl-4 text-stone-400">-H "Authorization: Bearer $AH_KEY" \</div>
+          <div class="pl-4 text-stone-400">-d '{"type":"postgres","name":"mydb"}'</div>
+          <div class="mt-2 text-stone-500">{"status":"<span class="text-green-400">running</span>","connection":"<span class="text-amber-400">[encrypted]</span>"}</div>
+          <div class="mt-2"><span class="text-green-400">✓</span> <span class="text-stone-300">DATABASE_URL injected · service restarted</span></div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ============================================================
-       AGENTIC-FIRST — Design principles
-  ============================================================ -->
+  <!-- SECTION: Safe to automate -->
   <section class="py-20 sm:py-28 bg-white">
-    <div class="max-w-6xl mx-auto px-6">
-      <div class="text-center mb-14">
-        <p class="text-[11px] uppercase tracking-widest text-stone-500 mb-3">Design</p>
-        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-4 leading-snug">
-          Designed for agents,<br>not humans.
+    <div class="max-w-5xl mx-auto px-6 grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
+      <div class="order-2 md:order-1 bg-white rounded-xl overflow-hidden border border-stone-200 shadow-lg">
+        <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
+          <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
+          <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
+          <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
+          <span class="ml-4 text-xs text-stone-400 font-mono-stack">container runtime</span>
+        </div>
+        <div class="bg-stone-900 p-5 font-mono-stack text-[12px] leading-relaxed space-y-1 text-stone-300">
+          <div class="text-stone-500">// every container, every deploy</div>
+          <div><span class="text-blue-400">Runtime</span>: <span class="text-green-400">runsc</span> <span class="text-stone-500">(gVisor — not runc)</span></div>
+          <div><span class="text-blue-400">CapDrop</span>: ALL</div>
+          <div><span class="text-blue-400">ReadonlyRootfs</span>: <span class="text-green-400">true</span></div>
+          <div><span class="text-blue-400">NoNewPrivileges</span>: <span class="text-green-400">true</span></div>
+          <div><span class="text-blue-400">NetworkMode</span>: tenant-isolated</div>
+          <div><span class="text-blue-400">PidsLimit</span>: 100</div>
+          <div class="mt-3 text-stone-500">// circuit breaker</div>
+          <div><span class="text-amber-400">!</span> <span class="text-stone-300">web: 5 crashes in 10m → circuit open</span></div>
+          <div><span class="text-stone-400">→ paused · auto-retry in 30m</span></div>
+        </div>
+      </div>
+      <div class="order-1 md:order-2">
+        <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">Safety</p>
+        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
+          Safe to let an agent deploy — even code you didn't write.
         </h2>
-        <p class="text-stone-600 text-base max-w-xl mx-auto leading-relaxed">
-          Every API decision is optimized for AI consumption. Idempotency everywhere, structured JSON, no ambiguous states.
+        <p class="text-stone-600 text-base leading-relaxed mb-6">
+          The hardest part of autonomous agents isn't making them work. It's trusting them. gVisor runs every container in a user-space kernel — agent-generated code can never reach the host. And if your agent hallucinates a crash loop, the circuit breaker catches it before you get paged at 2am.
         </p>
+        <ul class="space-y-2 text-sm text-stone-600">
+          <li class="flex items-start gap-3"><span class="text-green-500 mt-0.5">✓</span> gVisor kernel — container syscalls never reach the host</li>
+          <li class="flex items-start gap-3"><span class="text-green-500 mt-0.5">✓</span> All Linux capabilities dropped, read-only rootfs</li>
+          <li class="flex items-start gap-3"><span class="text-green-500 mt-0.5">✓</span> Per-tenant networks — containers can't see each other</li>
+          <li class="flex items-start gap-3"><span class="text-green-500 mt-0.5">✓</span> Circuit breaker kills runaway loops automatically</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION: Claude Code -->
+  <section class="py-20 sm:py-28 bg-stone-50">
+    <div class="max-w-5xl mx-auto px-6 grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
+      <div>
+        <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">Claude Code</p>
+        <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
+          Or just say /deploy.
+        </h2>
+        <p class="text-stone-600 text-base leading-relaxed mb-6">
+          Install the skill once. Your agent gets four slash commands that know exactly how to use the API — no curl to construct, no JSON to format. Point it at your server and it takes over.
+        </p>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="bg-white rounded-lg p-4 border border-stone-200">
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/deploy</div>
+            <p class="text-xs text-stone-500">Docker image or git repo. Streams progress.</p>
+          </div>
+          <div class="bg-white rounded-lg p-4 border border-stone-200">
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/status</div>
+            <p class="text-xs text-stone-500">Full health dashboard — disk, services, circuits.</p>
+          </div>
+          <div class="bg-white rounded-lg p-4 border border-stone-200">
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/db</div>
+            <p class="text-xs text-stone-500">Provision Postgres or Redis, auto-wire to service.</p>
+          </div>
+          <div class="bg-white rounded-lg p-4 border border-stone-200">
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/logs</div>
+            <p class="text-xs text-stone-500">Stream build logs for any service by name.</p>
+          </div>
+        </div>
       </div>
 
-      <!-- 3-column feature grid -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(77, 184, 144, 0.12)">
-            <svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Idempotency Keys</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">Every write operation accepts an idempotency key. Safe to retry — no duplicate deployments.</p>
+      <div class="bg-white rounded-xl overflow-hidden border border-stone-200 shadow-lg">
+        <div class="bg-stone-100 px-4 py-3 flex items-center gap-2 border-b border-stone-200">
+          <span class="w-3 h-3 rounded-full" style="background: rgb(255, 95, 86)"></span>
+          <span class="w-3 h-3 rounded-full" style="background: rgb(255, 189, 46)"></span>
+          <span class="w-3 h-3 rounded-full" style="background: rgb(39, 202, 64)"></span>
+          <span class="ml-4 text-xs text-stone-400 font-mono-stack">Claude Code</span>
         </div>
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(91, 155, 213, 0.12)">
-            <svg class="w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Per-Tenant Rate Limits</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">Separate rate limit buckets per tenant. One runaway agent can't starve others.</p>
-        </div>
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(155, 126, 200, 0.12)">
-            <svg class="w-4 h-4 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Structured JSON Everywhere</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">No HTML, no wizard UIs, no ambiguous states. Every response is machine-readable JSON.</p>
-        </div>
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(212, 165, 74, 0.12)">
-            <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Single Go Binary</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">One binary, SQLite for state. No Kubernetes, no etcd, no operator. Runs on any Linux box.</p>
-        </div>
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(77, 184, 168, 0.12)">
-            <svg class="w-4 h-4 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Agent Runbook</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">A dedicated runbook written for AI agents — not humans. Paste into system prompt and go.</p>
-        </div>
-        <div class="bg-stone-50 rounded-2xl border border-stone-200 p-6">
-          <div class="w-8 h-8 rounded-xl mb-4 flex items-center justify-center" style="background: rgba(212, 122, 149, 0.12)">
-            <svg class="w-4 h-4 text-pink-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
-          </div>
-          <h3 class="font-medium text-base text-stone-900 mb-2">Open Source · MIT</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">Self-host on your own bare metal. Full source on GitHub. No vendor lock-in, no monthly fee.</p>
+        <div class="bg-stone-900 p-5 font-mono-stack text-[12px] leading-relaxed space-y-1 text-stone-300">
+          <div><span class="text-stone-500">you  </span><span class="text-stone-200">/deploy nginx:alpine web 80</span></div>
+          <div class="text-stone-400 pl-5">→ Deploying nginx:alpine as "web"...</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> running · <span class="text-blue-400">https://web.65.21.x.x.traefik.me</span></div>
+          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/db web postgres</span></div>
+          <div class="text-stone-400 pl-5">→ Provisioning Postgres...</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> DATABASE_URL set · service restarted</div>
+          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/status</span></div>
+          <div class="text-stone-400 pl-5">Disk: 24% · Docker: ok · gVisor: ok</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> web — running · 0 crashes</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> web-postgres — running</div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ============================================================
-       STACK
-  ============================================================ -->
-  <section class="py-14 bg-stone-50 border-t border-stone-200">
+  <!-- SECTION: Economics -->
+  <section class="py-20 sm:py-28 bg-white">
     <div class="max-w-5xl mx-auto px-6 text-center">
-      <p class="text-[11px] uppercase tracking-widest text-stone-400 mb-6">Built with</p>
-      <div class="flex flex-wrap justify-center gap-2.5">
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">Go</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">Docker</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">gVisor</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">Traefik</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">Nixpacks</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">SQLite</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">chi</span>
-        <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-mono-stack text-stone-600 bg-white border border-stone-200">AES-256-GCM</span>
+      <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">Pricing</p>
+      <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5">
+        Your server. $0/mo platform fee. No surprises.
+      </h2>
+      <p class="text-stone-500 text-base leading-relaxed max-w-2xl mx-auto mb-12">
+        agentic.hosting is a single Go binary you run on your own hardware. A $54/mo Hetzner AX52 runs 50+ services — no per-deploy fee, no per-seat pricing, no vendor with a bill that grows every time your agent gets ambitious. You own the server. You own the data.
+      </p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-3xl mx-auto">
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="text-2xl font-bold text-stone-900 mb-1">$20<span class="text-sm font-normal text-stone-400">/mo + usage</span></div>
+          <div class="text-sm text-stone-400 font-mono-stack">Vercel Pro</div>
+          <div class="text-xs text-stone-400 mt-3 leading-relaxed">Per-deploy charges. Bandwidth fees. Scales up when your agent loops.</div>
+        </div>
+        <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
+          <div class="text-2xl font-bold text-stone-900 mb-1">$20<span class="text-sm font-normal text-stone-400">/mo + usage</span></div>
+          <div class="text-sm text-stone-400 font-mono-stack">Railway</div>
+          <div class="text-xs text-stone-400 mt-3 leading-relaxed">Per-minute container pricing. Dashboard required for setup.</div>
+        </div>
+        <div class="bg-stone-900 rounded-xl p-6 border border-stone-800 relative">
+          <div class="absolute -top-3 left-1/2 -translate-x-1/2">
+            <span class="bg-green-500 text-white text-[10px] font-mono-stack px-2 py-0.5 rounded-full">your server</span>
+          </div>
+          <div class="text-2xl font-bold text-stone-50 mb-1">$54<span class="text-sm font-normal text-stone-400">/mo flat</span></div>
+          <div class="text-sm text-stone-400 font-mono-stack">Hetzner AX52</div>
+          <div class="text-xs text-stone-400 mt-3 leading-relaxed">12 cores, 64GB RAM. 50+ services. Agent runs as many deploys as it wants.</div>
+        </div>
       </div>
     </div>
   </section>
 
-  <!-- ============================================================
-       DARK CTA
-  ============================================================ -->
-  <section class="bg-stone-900 py-24">
-    <div class="max-w-4xl mx-auto px-6 text-center">
-      <h2 class="font-instrument-serif italic text-4xl sm:text-5xl text-stone-50 mb-4 leading-snug">
-        Your AI agents deserve<br>a real PaaS.
+  <!-- CTA -->
+  <section class="bg-stone-900 py-28">
+    <div class="max-w-3xl mx-auto px-6 text-center">
+      <p class="text-[11px] uppercase tracking-widest text-stone-500 font-mono-stack mb-6">Open Source · MIT License</p>
+      <h2 class="font-instrument-serif italic text-4xl sm:text-5xl text-stone-50 mb-5 leading-tight">
+        Your agents are ready.<br>Is your infrastructure?
       </h2>
-      <p class="text-stone-400 text-base mb-10 max-w-lg mx-auto leading-relaxed">
-        Self-host on any Linux box. Open source, MIT license. No monthly fee, no vendor lock-in.
-      </p>
+      <p class="text-stone-400 text-base mb-10 max-w-xl mx-auto">Stop babysitting your agent's deployments. Give it real infrastructure and get out of the way.</p>
       <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
-        <a href="https://github.com/dennisonbertram/agentic-hosting"
-           class="bg-stone-50 text-stone-900 rounded-full px-8 py-3 font-medium text-sm hover:bg-white transition-colors flex items-center gap-2">
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-          View on GitHub
-        </a>
+        <button onclick="navigator.clipboard.writeText('curl -fsSL https://agentic.hosting/install.sh | bash')"
+                class="font-mono-stack text-sm text-stone-50 px-6 py-3 rounded-xl border border-stone-700 flex items-center gap-3 hover:opacity-90 transition-opacity"
+                style="background: rgba(255,255,255,0.07);">
+          <span>$ curl -fsSL https://agentic.hosting/install.sh | bash</span>
+          <svg class="w-4 h-4 opacity-40 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke-width="2"/><path stroke-width="2" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        </button>
         <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md"
-           class="text-stone-300 hover:text-stone-50 transition-colors text-sm flex items-center gap-1.5">
+           class="text-sm text-stone-400 hover:text-stone-200 transition-colors flex items-center gap-1.5">
           Read the Agent Runbook
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </a>
@@ -722,18 +376,16 @@
     </div>
   </section>
 
-  <!-- ============================================================
-       FOOTER
-  ============================================================ -->
+  <!-- FOOTER -->
   <footer class="border-t border-stone-200 bg-stone-50">
-    <div class="max-w-6xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-      <div class="flex items-center gap-6 text-xs text-stone-500">
+    <div class="max-w-5xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-5 text-xs text-stone-500">
         <span>Open Source · MIT License</span>
         <a href="https://github.com/dennisonbertram/agentic-hosting" class="hover:text-stone-900 transition-colors">GitHub</a>
         <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="hover:text-stone-900 transition-colors">Runbook</a>
-        <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/README.md" class="hover:text-stone-900 transition-colors">Docs</a>
+        <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/docs/implementation/build-log.md" class="hover:text-stone-900 transition-colors">Docs</a>
       </div>
-      <span class="text-xs text-stone-400">agentic.hosting · The PaaS built for AI agents</span>
+      <span class="text-xs text-stone-400">agentic.hosting · Hosting infrastructure built for AI agents</span>
     </div>
   </footer>
 

@@ -118,9 +118,9 @@
             <div class="mt-4 text-stone-500"># 2. Spin up a Linux server — Claude helps you set it up</div>
             <div class="text-stone-400">Any provider works. Starts at $4/mo on Hetzner.</div>
             <div class="mt-4 text-stone-500"># 3. Deploy anything, just by asking</div>
-            <div><span class="text-stone-400">you:</span> <span class="text-stone-200">deploy nginx as "web"</span></div>
-            <div class="text-stone-400 pl-5">→ Deploying...</div>
-            <div class="pl-5"><span class="text-green-400">✓</span> <span class="text-stone-300">running · <span class="text-blue-400">https://web.your-server.traefik.me</span></span></div>
+            <div><span class="text-stone-400">you:</span> <span class="text-stone-200">deploy my portfolio site</span></div>
+            <div class="text-stone-400 pl-5">→ Building from git...</div>
+            <div class="pl-5"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://site.your-server.traefik.me</span></span></div>
           </div>
         </div>
       </div>
@@ -304,16 +304,16 @@
           <span class="ml-4 text-xs text-stone-400 font-mono-stack">Claude Code</span>
         </div>
         <div class="bg-stone-900 p-5 font-mono-stack text-[12px] leading-relaxed space-y-1 text-stone-300">
-          <div><span class="text-stone-500">you  </span><span class="text-stone-200">/deploy nginx:alpine web 80</span></div>
-          <div class="text-stone-400 pl-5">→ Deploying nginx:alpine as "web"...</div>
-          <div class="pl-5"><span class="text-green-400">✓</span> running · <span class="text-blue-400">https://web.65.21.x.x.traefik.me</span></div>
-          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/db web postgres</span></div>
-          <div class="text-stone-400 pl-5">→ Provisioning Postgres...</div>
-          <div class="pl-5"><span class="text-green-400">✓</span> DATABASE_URL set · service restarted</div>
+          <div><span class="text-stone-500">you  </span><span class="text-stone-200">/deploy github.com/me/my-blog blog</span></div>
+          <div class="text-stone-400 pl-5">→ Cloning · Building · Starting...</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> live at <span class="text-blue-400">https://blog.65.21.x.x.traefik.me</span></div>
+          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/db blog postgres</span></div>
+          <div class="text-stone-400 pl-5">→ Creating database...</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> database wired up · blog restarted</div>
           <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/status</span></div>
-          <div class="text-stone-400 pl-5">Disk: 24% · Docker: ok · gVisor: ok</div>
-          <div class="pl-5"><span class="text-green-400">✓</span> web — running · 0 crashes</div>
-          <div class="pl-5"><span class="text-green-400">✓</span> web-postgres — running</div>
+          <div class="text-stone-400 pl-5">Disk: 24% · all systems ok</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> blog — running · 0 crashes</div>
+          <div class="pl-5"><span class="text-green-400">✓</span> blog-db — running</div>
         </div>
       </div>
     </div>

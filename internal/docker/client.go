@@ -19,22 +19,50 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
-// Client wraps the Docker Engine API client with ah-specific defaults.
-type Client struct {
+// Client is the interface that callers outside this package use to interact
+// with Docker. DockerClient is the production implementation.
+type Client interface {
+	EnsureNetwork(ctx context.Context, name string) (string, error)
+	ConnectNetwork(ctx context.Context, networkID, containerID string) error
+	RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error)
+	StopContainer(ctx context.Context, containerID string) error
+	StartContainer(ctx context.Context, containerID string) error
+	RemoveContainer(ctx context.Context, containerID string) error
+	LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
+	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
+	PullImage(ctx context.Context, img string) error
+	ListContainersByLabel(ctx context.Context, label, value string) ([]string, error)
+	GetContainerLabels(ctx context.Context, containerID string) map[string]string
+	GetContainerName(ctx context.Context, containerID string) string
+	VerifyGVisorRuntime(ctx context.Context) error
+	CreateVolume(ctx context.Context, name string) error
+	RemoveVolume(ctx context.Context, name string) error
+	RemoveVolumeSafe(ctx context.Context, name string) error
+	RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error)
+	StopAndRemoveByName(ctx context.Context, name string) error
+	PruneDanglingImages(ctx context.Context) (int, error)
+	ListVolumes(ctx context.Context, prefix string) ([]string, error)
+}
+
+// Compile-time check: DockerClient must satisfy Client.
+var _ Client = (*DockerClient)(nil)
+
+// DockerClient wraps the Docker Engine API client with ah-specific defaults.
+type DockerClient struct {
 	cli *client.Client
 }
 
 // NewClient creates a Docker API client using the default socket.
-func NewClient() (*Client, error) {
+func NewClient() (*DockerClient, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &Client{cli: cli}, nil
+	return &DockerClient{cli: cli}, nil
 }
 
 // Close releases the Docker client resources.
-func (c *Client) Close() error {
+func (c *DockerClient) Close() error {
 	return c.cli.Close()
 }
 
@@ -48,7 +76,7 @@ type ContainerInfo struct {
 }
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
-func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error) {
+func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, error) {
 	networks, err := c.cli.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list networks: %w", err)
@@ -88,7 +116,7 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) (string, error)
 }
 
 // ConnectNetwork connects a container to an additional network.
-func (c *Client) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
+func (c *DockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
 	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
 }
 
@@ -113,7 +141,7 @@ type ResourceLimits struct {
 //   - Cross-tenant isolation: each tenant has a separate bridge network.
 //   - Defense-in-depth: gVisor (runsc) runtime, CapDrop ALL, no-new-privileges,
 //     ReadonlyRootfs, PidsLimit, MemorySwap=Memory (no swap).
-func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
+func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
 	name := containerName(tenantID, serviceID)
 
 	env := make([]string, 0, len(envVars))
@@ -223,7 +251,7 @@ func (c *Client) RunContainer(ctx context.Context, tenantID, serviceID, img stri
 func int64Ptr(v int64) *int64 { return &v }
 
 // findTraefikContainer finds the Traefik container by image or name.
-func (c *Client) findTraefikContainer(ctx context.Context) (string, error) {
+func (c *DockerClient) findTraefikContainer(ctx context.Context) (string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
 	if err != nil {
 		return "", err
@@ -242,23 +270,23 @@ func (c *Client) findTraefikContainer(ctx context.Context) (string, error) {
 }
 
 // StopContainer stops a running container with a 10s timeout.
-func (c *Client) StopContainer(ctx context.Context, containerID string) error {
+func (c *DockerClient) StopContainer(ctx context.Context, containerID string) error {
 	timeout := 10
 	return c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
 }
 
 // StartContainer starts a stopped container.
-func (c *Client) StartContainer(ctx context.Context, containerID string) error {
+func (c *DockerClient) StartContainer(ctx context.Context, containerID string) error {
 	return c.cli.ContainerStart(ctx, containerID, container.StartOptions{})
 }
 
 // RemoveContainer force-removes a container.
-func (c *Client) RemoveContainer(ctx context.Context, containerID string) error {
+func (c *DockerClient) RemoveContainer(ctx context.Context, containerID string) error {
 	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 }
 
 // LogsContainer returns a reader for container logs.
-func (c *Client) LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
+func (c *DockerClient) LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
 	tailStr := "all"
 	if tail > 0 {
 		tailStr = fmt.Sprintf("%d", tail)
@@ -273,7 +301,7 @@ func (c *Client) LogsContainer(ctx context.Context, containerID string, follow b
 }
 
 // InspectContainer returns the container's current state.
-func (c *Client) InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error) {
+func (c *DockerClient) InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error) {
 	info, err := c.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect container: %w", err)
@@ -293,7 +321,7 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Con
 }
 
 // PullImage pulls an image with a 5-minute timeout.
-func (c *Client) PullImage(ctx context.Context, img string) error {
+func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -307,7 +335,7 @@ func (c *Client) PullImage(ctx context.Context, img string) error {
 }
 
 // ListContainersByLabel lists containers matching a label filter.
-func (c *Client) ListContainersByLabel(ctx context.Context, label, value string) ([]string, error) {
+func (c *DockerClient) ListContainersByLabel(ctx context.Context, label, value string) ([]string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{
 		All: true,
 	})
@@ -326,7 +354,7 @@ func (c *Client) ListContainersByLabel(ctx context.Context, label, value string)
 }
 
 // GetContainerLabels returns the labels for a container, or nil on error.
-func (c *Client) GetContainerLabels(ctx context.Context, containerID string) map[string]string {
+func (c *DockerClient) GetContainerLabels(ctx context.Context, containerID string) map[string]string {
 	info, err := c.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return nil
@@ -335,7 +363,7 @@ func (c *Client) GetContainerLabels(ctx context.Context, containerID string) map
 }
 
 // GetContainerName returns the name of a container, or empty string on error.
-func (c *Client) GetContainerName(ctx context.Context, containerID string) string {
+func (c *DockerClient) GetContainerName(ctx context.Context, containerID string) string {
 	info, err := c.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return ""
@@ -349,7 +377,7 @@ func containerName(tenantID, serviceID string) string {
 }
 
 // VerifyGVisorRuntime checks that the Docker daemon has the gVisor (runsc) runtime available.
-func (c *Client) VerifyGVisorRuntime(ctx context.Context) error {
+func (c *DockerClient) VerifyGVisorRuntime(ctx context.Context) error {
 	info, err := c.cli.Info(ctx)
 	if err != nil {
 		return fmt.Errorf("docker info: %w", err)
@@ -375,7 +403,7 @@ type RunDatabaseConfig struct {
 }
 
 // CreateVolume creates a named Docker volume.
-func (c *Client) CreateVolume(ctx context.Context, name string) error {
+func (c *DockerClient) CreateVolume(ctx context.Context, name string) error {
 	_, err := c.cli.VolumeCreate(ctx, volume.CreateOptions{
 		Name: name,
 	})
@@ -386,7 +414,7 @@ func (c *Client) CreateVolume(ctx context.Context, name string) error {
 }
 
 // RemoveVolume removes a named Docker volume (force).
-func (c *Client) RemoveVolume(ctx context.Context, name string) error {
+func (c *DockerClient) RemoveVolume(ctx context.Context, name string) error {
 	return c.cli.VolumeRemove(ctx, name, true)
 }
 
@@ -394,14 +422,14 @@ func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 // This will fail if the volume is still in use by a container, which is the
 // desired behavior for GC — we never want to force-remove a volume that might
 // be attached to a running container.
-func (c *Client) RemoveVolumeSafe(ctx context.Context, name string) error {
+func (c *DockerClient) RemoveVolumeSafe(ctx context.Context, name string) error {
 	return c.cli.VolumeRemove(ctx, name, false)
 }
 
 // RunDatabase creates and starts a database container with host port mapping
 // and persistent volume. Database containers do NOT use gVisor (they need direct
 // filesystem access for data storage), but are bound to 127.0.0.1 only.
-func (c *Client) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
+func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
 	env := make([]string, 0, len(cfg.Env))
 	for k, v := range cfg.Env {
 		env = append(env, k+"="+v)
@@ -457,7 +485,7 @@ func (c *Client) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string
 
 // StopAndRemoveByName stops and removes a container by its name.
 // Returns nil if the container doesn't exist.
-func (c *Client) StopAndRemoveByName(ctx context.Context, name string) error {
+func (c *DockerClient) StopAndRemoveByName(ctx context.Context, name string) error {
 	// Try to inspect by name
 	info, err := c.cli.ContainerInspect(ctx, name)
 	if err != nil {
@@ -470,7 +498,7 @@ func (c *Client) StopAndRemoveByName(ctx context.Context, name string) error {
 
 // PruneDanglingImages removes dangling (untagged, unreferenced) images.
 // Returns the number of images removed.
-func (c *Client) PruneDanglingImages(ctx context.Context) (int, error) {
+func (c *DockerClient) PruneDanglingImages(ctx context.Context) (int, error) {
 	report, err := c.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", "true")))
 	if err != nil {
 		return 0, fmt.Errorf("prune images: %w", err)
@@ -479,7 +507,7 @@ func (c *Client) PruneDanglingImages(ctx context.Context) (int, error) {
 }
 
 // ListVolumes returns volume names matching the given prefix.
-func (c *Client) ListVolumes(ctx context.Context, prefix string) ([]string, error) {
+func (c *DockerClient) ListVolumes(ctx context.Context, prefix string) ([]string, error) {
 	resp, err := c.cli.VolumeList(ctx, volume.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", prefix)),
 	})

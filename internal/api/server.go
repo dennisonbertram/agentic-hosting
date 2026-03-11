@@ -24,7 +24,7 @@ type ServerConfig struct {
 	DevMode          bool
 	BootstrapToken   string
 	OpenRegistration bool
-	Docker           *docker.Client
+	Docker           docker.Client
 	BuildManager     *builds.Manager
 	DatabaseManager  *databases.Manager
 }

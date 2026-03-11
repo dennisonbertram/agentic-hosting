@@ -16,12 +16,12 @@ import (
 // Reconciler periodically checks DB state against Docker state.
 type Reconciler struct {
 	db       *sql.DB
-	docker   *docker.Client
+	docker   docker.Client
 	interval time.Duration
 }
 
 // New creates a reconciler with the given interval.
-func New(db *sql.DB, dockerClient *docker.Client, interval time.Duration) *Reconciler {
+func New(db *sql.DB, dockerClient docker.Client, interval time.Duration) *Reconciler {
 	return &Reconciler{
 		db:       db,
 		docker:   dockerClient,

@@ -82,14 +82,14 @@ func isNotFoundError(err error) bool {
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
 	db          *sql.DB
-	docker      *docker.Client
+	docker      docker.Client
 	masterKey   []byte
 	deploySem   chan struct{} // bounded deploy concurrency
 	deployQueue chan struct{} // bounded queue for waiting deploys
 }
 
 // NewManager creates a service manager.
-func NewManager(db *sql.DB, docker *docker.Client, masterKey []byte) *Manager {
+func NewManager(db *sql.DB, docker docker.Client, masterKey []byte) *Manager {
 	if docker == nil {
 		panic("ah: NewManager requires a non-nil Docker client")
 	}

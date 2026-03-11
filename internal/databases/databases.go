@@ -45,13 +45,13 @@ type CreateRequest struct {
 // Manager manages database lifecycle.
 type Manager struct {
 	db        *sql.DB
-	docker    *docker.Client
+	docker    docker.Client
 	masterKey []byte
 	mu        sync.Mutex // protects port allocation
 }
 
 // NewManager creates a database manager.
-func NewManager(db *sql.DB, dockerClient *docker.Client, masterKey []byte) *Manager {
+func NewManager(db *sql.DB, dockerClient docker.Client, masterKey []byte) *Manager {
 	if dockerClient == nil {
 		panic("databases: NewManager requires non-nil docker client")
 	}

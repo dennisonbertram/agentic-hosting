@@ -17,7 +17,7 @@ import (
 // GC cleans up orphaned containers, volumes, images, and build dirs.
 type GC struct {
 	db       *sql.DB
-	docker   *docker.Client
+	docker   docker.Client
 	interval time.Duration
 }
 
@@ -26,7 +26,7 @@ type GC struct {
 const minResourceAge = 10 * time.Minute
 
 // New creates a garbage collector with the given interval.
-func New(db *sql.DB, dockerClient *docker.Client, interval time.Duration) *GC {
+func New(db *sql.DB, dockerClient docker.Client, interval time.Duration) *GC {
 	return &GC{
 		db:       db,
 		docker:   dockerClient,

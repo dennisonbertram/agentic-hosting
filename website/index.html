@@ -81,10 +81,10 @@
       </div>
 
       <h1 class="font-instrument-serif italic text-4xl sm:text-5xl text-stone-900 mb-4 leading-tight max-w-3xl">
-        Dashboards are for humans.<br>Your agent needs an API.
+        Your agent can run<br>its own hosting platform.
       </h1>
       <p class="text-stone-500 text-lg leading-relaxed mb-10 max-w-2xl">
-        agentic.hosting is open-source hosting infrastructure built for AI agents — not humans. Deploy containers, provision databases, and monitor infrastructure through a 100% JSON REST API. No browser. No wizard. No surprises.
+        Install agentic.hosting once on any server. It becomes your platform — a place where every agent you build can deploy and operate its own projects. Blogs, APIs, web apps, databases. One agent keeps it running. The rest just ship.
       </p>
 
       <div class="flex flex-col items-center gap-3 mb-4">
@@ -112,15 +112,14 @@
         </div>
         <div class="bg-stone-900 p-6 text-left">
           <div class="font-mono-stack text-[12px] leading-relaxed space-y-1">
-            <div class="text-stone-500"># 1. Install the skill — teaches Claude the whole API</div>
+            <div class="text-stone-500"># Step 1 — your webmaster agent sets up the platform (once)</div>
             <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -fsSL https://agentic.hosting/install.sh | bash</span></div>
-            <div><span class="text-green-400">✓</span> <span class="text-stone-300">/deploy · /status · /db · /logs — ready in Claude Code</span></div>
-            <div class="mt-4 text-stone-500"># 2. Spin up a Linux server — Claude helps you set it up</div>
-            <div class="text-stone-400">Any provider works. Starts at $4/mo on Hetzner.</div>
-            <div class="mt-4 text-stone-500"># 3. Deploy anything, just by asking</div>
-            <div><span class="text-stone-400">you:</span> <span class="text-stone-200">deploy my portfolio site</span></div>
-            <div class="text-stone-400 pl-5">→ Building from git...</div>
-            <div class="pl-5"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://site.your-server.traefik.me</span></span></div>
+            <div><span class="text-green-400">✓</span> <span class="text-stone-300">Your platform is live. Starts at $4/mo on Hetzner.</span></div>
+            <div class="mt-4 text-stone-500"># Step 2 — now ANY of your agents can deploy projects to it</div>
+            <div><span class="text-stone-500">blog-agent: </span><span class="text-stone-200">/deploy github.com/me/my-blog blog</span></div>
+            <div class="pl-12"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://blog.your-server.traefik.me</span></span></div>
+            <div class="mt-1"><span class="text-stone-500">api-agent: &nbsp;</span><span class="text-stone-200">/deploy github.com/me/my-api backend</span></div>
+            <div class="pl-12"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://backend.your-server.traefik.me</span></span></div>
           </div>
         </div>
       </div>
@@ -134,10 +133,10 @@
       <div class="max-w-2xl mb-14">
         <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">The problem</p>
         <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
-          Standard cloud hosting breaks AI agents.<br>We fixed it.
+          Standard cloud hosting wasn't built for agents.<br>We started over.
         </h2>
         <p class="text-stone-500 text-base leading-relaxed">
-          Every existing hosting platform was designed around a human at a keyboard. Agents hit walls that humans never notice — and get stuck there. We rebuilt from scratch for non-human callers.
+          Every existing hosting platform was designed around a human at a keyboard — dashboards, wizards, OAuth flows. Agents hit walls humans never notice. We rebuilt from scratch so agents can operate the whole platform themselves, without a human in the loop.
         </p>
       </div>
 

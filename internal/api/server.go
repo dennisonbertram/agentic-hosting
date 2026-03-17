@@ -1,21 +1,22 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/dennisonbertram/agentic-hosting/internal/builds"
+	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
-	"github.com/dennisonbertram/agentic-hosting/internal/builds"
-	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
 type ServerConfig struct {
@@ -26,21 +27,32 @@ type ServerConfig struct {
 	OpenRegistration bool
 	Docker           docker.Client
 	BuildManager     *builds.Manager
-	DatabaseManager  *databases.Manager
+	DatabaseManager  databaseManager
+}
+
+type databaseManager interface {
+	Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
+	List(ctx context.Context, tenantID string) ([]*databases.Database, error)
+	Get(ctx context.Context, tenantID, dbID string) (*databases.Database, error)
+	GetConnectionString(ctx context.Context, tenantID, dbID string) (string, error)
+	Delete(ctx context.Context, tenantID, dbID string) error
 }
 
 type Server struct {
-	store            *db.Store
-	masterKey        []byte
-	devMode          bool
-	bootstrapToken   string
-	openRegistration bool
-	router           chi.Router
-	authMW           func(http.Handler) http.Handler
-	authInvalidator  *middleware.AuthCacheInvalidator
-	svcManager       *services.Manager
-	buildManager     *builds.Manager
-	dbManager        *databases.Manager
+	store             *db.Store
+	masterKey         []byte
+	devMode           bool
+	bootstrapToken    string
+	openRegistration  bool
+	router            chi.Router
+	authMW            func(http.Handler) http.Handler
+	authInvalidator   *middleware.AuthCacheInvalidator
+	svcManager        *services.Manager
+	buildManager      *builds.Manager
+	dbManager         databaseManager
+	authRateLimiter   *middleware.RateLimiter
+	globalRateLimiter *middleware.GlobalRateLimiter
+	idempotencyStore  *middleware.IdempotencyStore
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -50,6 +62,9 @@ func NewServer(cfg ServerConfig) *Server {
 	// Initialize auth middleware and cache invalidator early so they are
 	// guaranteed non-nil before any request can arrive.
 	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, cfg.MasterKey)
+	rl := middleware.NewRateLimiter(100, 200)
+	globalRL := middleware.NewGlobalRateLimiter(500, 1000)
+	idem := middleware.NewIdempotencyStore()
 
 	var svcMgr *services.Manager
 	if cfg.Docker != nil {
@@ -57,16 +72,19 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	s := &Server{
-		store:            cfg.Store,
-		masterKey:        cfg.MasterKey,
-		devMode:          cfg.DevMode,
-		bootstrapToken:   cfg.BootstrapToken,
-		openRegistration: cfg.OpenRegistration,
-		authInvalidator:  authInvalidator,
-		authMW:           authMW,
-		svcManager:       svcMgr,
-		buildManager:     cfg.BuildManager,
-		dbManager:        cfg.DatabaseManager,
+		store:             cfg.Store,
+		masterKey:         cfg.MasterKey,
+		devMode:           cfg.DevMode,
+		bootstrapToken:    cfg.BootstrapToken,
+		openRegistration:  cfg.OpenRegistration,
+		authInvalidator:   authInvalidator,
+		authMW:            authMW,
+		svcManager:        svcMgr,
+		buildManager:      cfg.BuildManager,
+		dbManager:         cfg.DatabaseManager,
+		authRateLimiter:   rl,
+		globalRateLimiter: globalRL,
+		idempotencyStore:  idem,
 	}
 	s.setupRoutes()
 	return s
@@ -103,14 +121,9 @@ func (s *Server) setupRoutes() {
 	// Authenticated routes
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMW)
-		// Per-tenant rate limiter
-		rl := middleware.NewRateLimiter(100, 200)
-		r.Use(rl.Middleware)
-		// Global aggregate rate limiter across all tenants (prevents multi-tenant abuse)
-		globalRL := middleware.NewGlobalRateLimiter(500, 1000)
-		r.Use(globalRL.Middleware)
-		idem := middleware.NewIdempotencyStore()
-		r.Use(idem.Middleware)
+		r.Use(s.authRateLimiter.Middleware)
+		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.idempotencyStore.Middleware)
 
 		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
 
@@ -152,6 +165,9 @@ func (s *Server) setupRoutes() {
 	// Long-running endpoints — auth required but no 30s timeout
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMW)
+		r.Use(s.authRateLimiter.Middleware)
+		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.idempotencyStore.Middleware)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
 	})
@@ -162,7 +178,6 @@ func (s *Server) setupRoutes() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
-
 
 // writeError delegates to httpx.WriteError for consistent JSON error responses.
 // All handlers in the api package should use this.
@@ -239,8 +254,6 @@ func requireHTTPS(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
-
 
 // normalizeIP extracts a validated IP string from a value that may be
 // "ip", "ip:port", or "[ip]:port". Returns "" if no valid IP is found.

@@ -141,28 +141,13 @@ type ResourceLimits struct {
 //   - Cross-tenant isolation: each tenant has a separate bridge network.
 //   - Defense-in-depth: gVisor (runsc) runtime, CapDrop ALL, no-new-privileges,
 //     ReadonlyRootfs, PidsLimit, MemorySwap=Memory (no swap).
+//   - Health checks are left to the image author; ah does not inject a shell
+//     probe because many minimal images do not ship curl/wget.
 func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
 	name := containerName(tenantID, serviceID)
 
-	env := make([]string, 0, len(envVars))
-	for k, v := range envVars {
-		env = append(env, k+"="+v)
-	}
-
 	if port <= 0 {
 		port = 8000
-	}
-
-	labels := map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                     fmt.Sprintf("Host(`%s.localhost`)", serviceID),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):              "web",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
-		"ah.tenant":  tenantID,
-		"ah.service": serviceID,
-	}
-	for k, v := range extraLabels {
-		labels[k] = v
 	}
 
 	tenantNet := TenantNetworkName(tenantID)
@@ -201,18 +186,7 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	resp, err := c.cli.ContainerCreate(ctx,
-		&container.Config{
-			Image:  img,
-			Env:    env,
-			Labels: labels,
-			Healthcheck: &container.HealthConfig{
-				Test:        []string{"CMD-SHELL", fmt.Sprintf("wget -qO- http://localhost:%d/ > /dev/null 2>&1 || exit 1", port)},
-				Interval:    30 * time.Second,
-				Timeout:     5 * time.Second,
-				Retries:     3,
-				StartPeriod: 60 * time.Second,
-			},
-		},
+		buildServiceContainerConfig(tenantID, serviceID, img, port, envVars, extraLabels),
 		hostCfg,
 		&network.NetworkingConfig{},
 		nil,
@@ -249,6 +223,31 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string) *container.Config {
+	env := make([]string, 0, len(envVars))
+	for k, v := range envVars {
+		env = append(env, k+"="+v)
+	}
+
+	labels := map[string]string{
+		"traefik.enable": "true",
+		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                      fmt.Sprintf("Host(`%s.localhost`)", serviceID),
+		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):               "web",
+		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
+		"ah.tenant":  tenantID,
+		"ah.service": serviceID,
+	}
+	for k, v := range extraLabels {
+		labels[k] = v
+	}
+
+	return &container.Config{
+		Image:  img,
+		Env:    env,
+		Labels: labels,
+	}
+}
 
 // findTraefikContainer finds the Traefik container by image or name.
 func (c *DockerClient) findTraefikContainer(ctx context.Context) (string, error) {

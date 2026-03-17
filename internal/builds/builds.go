@@ -48,19 +48,24 @@ type StartBuildRequest struct {
 // DeployFunc is called when a build succeeds to deploy the resulting image.
 type DeployFunc func(ctx context.Context, tenantID, serviceID, imageTag string) error
 
+type buildExecutor interface {
+	Build(ctx context.Context, req builder.BuildRequest, logCb func(string)) error
+	CancelBuild(buildID string) error
+}
+
 // Manager coordinates build lifecycle.
 type Manager struct {
-	db       *sql.DB
-	builder  *builder.Builder
-	deployFn DeployFunc
-	logMu    sync.Mutex
+	db         *sql.DB
+	builder    buildExecutor
+	deployFn   DeployFunc
+	logMu      sync.Mutex
 	buildQueue chan struct{}            // bounded queue for build goroutines
 	logSubs    map[string][]chan string // buildID -> subscribers
-	logSizes   map[string]int          // buildID -> current log size in bytes
+	logSizes   map[string]int           // buildID -> current log size in bytes
 }
 
 // NewManager creates a build manager.
-func NewManager(db *sql.DB, b *builder.Builder, deployFn DeployFunc) *Manager {
+func NewManager(db *sql.DB, b buildExecutor, deployFn DeployFunc) *Manager {
 	m := &Manager{
 		db:         db,
 		builder:    b,
@@ -259,24 +264,33 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		return
 	}
 
+	// Deploy the built image
+	logCb("[ah] Build complete")
+	if m.deployFn != nil {
+		logCb("[ah] Deploying built image...")
+		deployCtx, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag); deployErr != nil {
+			log.Printf("build %s deploy failed: %v", buildID, deployErr)
+			logCb("[ah] Deploy failed: " + deployErr.Error())
+			if _, dbErr := m.db.ExecContext(finalCtx,
+				`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'`,
+				finishedAt, buildID,
+			); dbErr != nil {
+				log.Printf("builds: failed to mark build %s as failed after deploy error: %v", buildID, dbErr)
+			}
+			deployCancel()
+			m.closeLogSubs(buildID)
+			return
+		} else {
+			logCb("[ah] Deploy succeeded")
+		}
+		deployCancel()
+	}
 	if _, dbErr := m.db.ExecContext(finalCtx,
 		`UPDATE builds SET status = 'succeeded', finished_at = ? WHERE id = ? AND status = 'running'`,
 		finishedAt, buildID,
 	); dbErr != nil {
 		log.Printf("builds: failed to mark build %s as succeeded: %v", buildID, dbErr)
-	}
-
-	// Deploy the built image
-	logCb("[ah] Deploying built image...")
-	if m.deployFn != nil {
-		deployCtx, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag); deployErr != nil {
-			log.Printf("build %s succeeded but deploy failed: %v", buildID, deployErr)
-			logCb("[ah] Deploy failed: " + deployErr.Error())
-		} else {
-			logCb("[ah] Deploy succeeded")
-		}
-		deployCancel()
 	}
 	m.closeLogSubs(buildID)
 }

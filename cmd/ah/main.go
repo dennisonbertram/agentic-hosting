@@ -76,18 +76,24 @@ func main() {
 		log.Printf("WARNING: dev mode with non-loopback listen address (%s) disables HTTPS enforcement.", *listenAddr)
 	}
 
-	// Read master key
+	// Read master key.
+	// Expected format: exactly 64 lowercase hex characters (encoding 32 raw bytes),
+	// optionally followed by a single newline. Generate with:
+	//   head -c 32 /dev/urandom | xxd -p -c 64 > /var/lib/ah/master.key
+	const keyErrMsg = "master key must be 64 hex characters (32 bytes). Generate with: head -c 32 /dev/urandom | xxd -p -c 64 > /var/lib/ah/master.key"
 	masterKeyData, err := os.ReadFile(*masterKeyPath)
 	if err != nil {
-		log.Fatalf("failed to read master key from %s: %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
+		log.Fatalf("failed to read master key from %s: %v\n%s", *masterKeyPath, err, keyErrMsg)
 	}
-	masterKeyHex := strings.TrimSpace(string(masterKeyData))
+	// Trim only a trailing newline so that any other unexpected whitespace or
+	// extra characters are caught by the length and hex validation below.
+	masterKeyHex := strings.TrimRight(string(masterKeyData), "\n")
+	if len(masterKeyHex) != 64 {
+		log.Fatalf("master key file %s contains %d characters (expected 64).\n%s", *masterKeyPath, len(masterKeyHex), keyErrMsg)
+	}
 	masterKey, err := hex.DecodeString(masterKeyHex)
 	if err != nil {
-		log.Fatalf("master key in %s must be hex-encoded (got invalid hex): %v\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, err, *masterKeyPath)
-	}
-	if len(masterKey) < 32 {
-		log.Fatalf("master key in %s must be at least 32 bytes after hex decoding (got %d bytes from %d hex chars).\nGenerate one with: head -c 32 /dev/urandom | xxd -p -c 64 > %s", *masterKeyPath, len(masterKey), len(masterKeyHex), *masterKeyPath)
+		log.Fatalf("master key file %s contains invalid hex characters: %v\n%s", *masterKeyPath, err, keyErrMsg)
 	}
 
 	// Open databases

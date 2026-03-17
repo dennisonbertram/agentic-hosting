@@ -144,6 +144,72 @@ func (s *Store) runMigrations() error {
 	return nil
 }
 
+// ApplyStateMigrations applies all state_*.sql migrations from the embedded FS
+// to the given database. It is exported so that testutil and other packages can
+// bring up an in-memory SQLite database with the real schema.
+func ApplyStateMigrations(stateDB *sql.DB) error {
+	if _, err := stateDB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		name TEXT PRIMARY KEY,
+		applied_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations table: %w", err)
+	}
+
+	entries, err := fs.ReadDir(MigrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") || !strings.HasPrefix(name, "state_") {
+			continue
+		}
+
+		var count int
+		if err := stateDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", name, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		data, err := fs.ReadFile(MigrationsFS, "migrations/"+name)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+
+		tx, err := stateDB.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", name, err)
+		}
+
+		if _, err := tx.Exec(string(data)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("exec migration %s: %w", name, err)
+		}
+
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			name, time.Now().Unix()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", name, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
 func (s *Store) Close() error {
 	var errs []error
 	if s.StateDB != nil {

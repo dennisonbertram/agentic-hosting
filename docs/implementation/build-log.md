@@ -220,7 +220,7 @@ Reconciler loop, circuit breaker (crash_count, crash_window, circuit_open), GC d
 
 ## Operational Notes
 
-- **Binary**: `/usr/local/bin/ah` on server (older server path: `/agentic-paasd/bin/ah`)
+- **Binary**: `/usr/local/bin/ah` on server (older server path: `/agentic-hosting/bin/ah`)
 - **Service**: `ah.service` (systemd)
 - **Data**: `/var/lib/ah/` (state DB, metering DB, master key)
 - **Master key**: hex-encoded, 32+ bytes, at `/var/lib/ah/master.key`

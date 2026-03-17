@@ -4,13 +4,13 @@ description: Operate an agentic-hosting self-hosted PaaS server via REST API. Us
 ---
 
 ## Quick Start
+export AH_URL="https://<your-server>"
+export AH_KEY="<keyid.secret>"
 
-```bash
-export AH_URL="https://<your-server>"   # or http://IP:8080
-export AH_KEY="<keyid.secret>"          # from tenant registration
-```
-
-Then in Claude Code: `/status` · `/deploy <git-url> <name>` · `/db <name> postgres` · `/logs <name>`
+/status    → see what's running
+/deploy    → deploy a service
+/logs      → stream build logs
+/db        → provision postgres or redis
 
 ---
 
@@ -224,6 +224,9 @@ curl -s -X POST $AH_URL/v1/services \
 ```
 
 ### Poll until running (max 10 minutes)
+
+Large images can take up to 10 minutes to pull and start. Always use a 10-minute timeout (120 × 5s). The service response includes `created_at` (Unix timestamp) you can use to track how long a deploy has been running.
+
 ```bash
 SERVICE_ID="<id-from-above>"
 for i in $(seq 1 120); do
@@ -335,7 +338,7 @@ curl -s -X DELETE $AH_URL/v1/auth/keys/$KEY_ID -H "Authorization: Bearer $AH_KEY
 | `422 Unprocessable Entity` | Validation failed or duplicate | Check body; name/email may already exist |
 | `429 Too Many Requests` | Rate limited | Back off: per-tenant 100/s, global 500/s |
 | `503 Service Unavailable` | Disk >90% or Docker down | Check `GET /v1/system/health/detailed` |
-| Service stuck in `deploying` | Deploy timeout or Docker issue | Check detailed health; delete and retry |
+| Service stuck in `deploying` | Large images can take up to 10 min; after 10 min the server marks it `failed` | Wait the full 10 min; if `failed`, check detailed health and retry |
 | `circuit_open: true` | 5 crashes in 10 minutes | Fix the app, then `POST .../reset` |
 | Build `failed` | Nixpacks error | Check build logs with `?follow=true` |
 

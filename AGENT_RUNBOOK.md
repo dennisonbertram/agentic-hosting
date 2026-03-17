@@ -202,13 +202,17 @@ The response will include a `url` field — that is the public URL for your serv
 
 ### Step 2 — Poll Until Running
 
-The service starts deploying asynchronously. Poll its status until it reaches `running`:
+The service starts deploying asynchronously. Poll its status until it reaches `running`.
+
+**Deployments can take up to 10 minutes** — large images require pulling gigabytes from a registry before the container can start. Use a timeout of at least 10 minutes (120 iterations × 5s). The service response includes `created_at` (Unix timestamp) which you can use to track deployment age.
 
 ```bash
-while true; do
-  STATUS=$(curl -s -H "Authorization: Bearer $API_KEY" \
-    "$BASE_URL/v1/services/$SERVICE_ID" | jq -r '.status')
-  echo "Status: $STATUS"
+# Poll for up to 10 minutes (120 × 5s)
+for i in $(seq 1 120); do
+  RESPONSE=$(curl -s -H "Authorization: Bearer $API_KEY" \
+    "$BASE_URL/v1/services/$SERVICE_ID")
+  STATUS=$(echo "$RESPONSE" | jq -r '.status')
+  echo "[$i/120] Status: $STATUS"
   case "$STATUS" in
     running)
       echo "Service is up."
@@ -226,6 +230,10 @@ while true; do
       sleep 5
       ;;
   esac
+  if [ "$i" -eq 120 ]; then
+    echo "Timed out after 10 minutes. Service is still in status: $STATUS"
+    echo "Check detailed health: GET /v1/system/health/detailed"
+  fi
 done
 ```
 
@@ -529,7 +537,9 @@ You have hit a rate limit. The response body will indicate whether it is tenant 
 
 ### Service Stuck in `deploying`
 
-If a service stays in `deploying` for more than 3 minutes:
+Deployments normally complete within 1–2 minutes for small images, but can take up to 10 minutes for large images being pulled for the first time. The server enforces a hard 10-minute deploy timeout — if the deploy has not completed by then, the service transitions to `failed`.
+
+If a service stays in `deploying` for more than 10 minutes, or transitions to `failed`:
 
 1. Check detailed health to confirm Docker and gVisor are operational:
    ```bash

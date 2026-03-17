@@ -221,6 +221,7 @@ POST /v1/services
 
 GET    /v1/services                              # List services
 GET    /v1/services/{serviceID}                  # Get service (includes status, URL)
+GET    /v1/services/{serviceID}/logs?follow=true # Stream runtime logs
 DELETE /v1/services/{serviceID}                  # Delete service and container
 
 POST   /v1/services/{serviceID}/start            # Start

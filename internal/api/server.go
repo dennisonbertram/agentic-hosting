@@ -98,7 +98,6 @@ func (s *Server) setupRoutes() {
 	// Authorization and bootstrap tokens are never logged.
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
 	r.Use(maxBodySize(1 << 20))
 	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
 	r.Use(chimw.Throttle(200))
@@ -114,16 +113,20 @@ func (s *Server) setupRoutes() {
 		r.Use(requireHTTPS)
 	}
 
-	// Public routes
-	r.Get("/v1/system/health", s.handleHealth)
-	r.Post("/v1/tenants/register", s.handleTenantRegister)
+	// Public routes keep the standard request timeout.
+	r.Group(func(r chi.Router) {
+		r.Use(chimw.Timeout(30 * time.Second))
+		r.Get("/v1/system/health", s.handleHealth)
+		r.Post("/v1/tenants/register", s.handleTenantRegister)
+	})
 
-	// Authenticated routes
+	// Authenticated short-lived routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
 		r.Use(s.idempotencyStore.Middleware)
+		r.Use(chimw.Timeout(30 * time.Second))
 
 		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
 
@@ -162,12 +165,14 @@ func (s *Server) setupRoutes() {
 		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
 	})
 
-	// Long-running endpoints — auth required but no 30s timeout
+	// Long-running endpoints share auth/rate-limit middleware but intentionally
+	// skip the standard timeout so streaming and provisioning can complete.
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
 		r.Use(s.idempotencyStore.Middleware)
+		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
 	})

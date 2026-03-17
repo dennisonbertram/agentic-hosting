@@ -19,20 +19,20 @@ import (
 
 // Service represents a deployed service.
 type Service struct {
-	ID          string `json:"id"`
-	TenantID    string `json:"tenant_id"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Image       string `json:"image"`
-	ContainerID string `json:"container_id,omitempty"`
-	Port        int    `json:"port"`
-	URL         string `json:"url,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
-	CrashCount   int    `json:"crash_count"`
-	CircuitOpen  bool   `json:"circuit_open"`
-	LastCrashedAt int64 `json:"last_crashed_at,omitempty"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
+	ID            string `json:"id"`
+	TenantID      string `json:"tenant_id"`
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	Image         string `json:"image"`
+	ContainerID   string `json:"container_id,omitempty"`
+	Port          int    `json:"port"`
+	URL           string `json:"url,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+	CrashCount    int    `json:"crash_count"`
+	CircuitOpen   bool   `json:"circuit_open"`
+	LastCrashedAt int64  `json:"last_crashed_at,omitempty"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
 }
 
 // CreateRequest holds parameters for creating a new service.
@@ -50,9 +50,12 @@ const maxConcurrentDeploys = 5
 // If the queue is full, new deploy requests are rejected with backpressure.
 const maxQueuedDeploys = 20
 
-// imageAllowPattern restricts images to Docker Hub library (official) and
-// standard namespace/repo:tag format. Blocks registry prefixes (e.g., evil.com/img).
-var imageAllowPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)?(?::[a-zA-Z0-9._-]+)?$`)
+// dockerHubImagePattern accepts Docker Hub image references without a registry prefix.
+var dockerHubImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)?(?::[a-zA-Z0-9._-]+)?$`)
+
+// localRegistryImagePattern accepts the platform-managed loopback registry and
+// requires at least two path segments after the registry prefix.
+var localRegistryImagePattern = regexp.MustCompile(`^(?:127\.0\.0\.1|localhost):5000/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+(?::[a-zA-Z0-9._-]+)?$`)
 
 // envKeyPattern validates environment variable key names.
 var envKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,127}$`)
@@ -62,9 +65,9 @@ const maxEnvValueLen = 32768 // 32KB
 
 // deniedEnvKeys are environment variable names that cannot be set by tenants.
 var deniedEnvKeys = map[string]bool{
-	"LD_PRELOAD":     true,
+	"LD_PRELOAD":      true,
 	"LD_LIBRARY_PATH": true,
-	"PATH":           true,
+	"PATH":            true,
 }
 
 // isNotFoundError returns true if the error indicates a container definitively
@@ -126,13 +129,18 @@ func ValidateImage(img string) error {
 	if len(img) > 256 {
 		return fmt.Errorf("image reference too long")
 	}
+
+	if localRegistryImagePattern.MatchString(img) {
+		return nil
+	}
+
 	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
 		prefix := img[:slashIdx]
 		if strings.ContainsAny(prefix, ".:") {
-			return fmt.Errorf("custom registries not allowed; use Docker Hub images only")
+			return fmt.Errorf("custom registries not allowed; only Docker Hub or the local loopback registry are allowed")
 		}
 	}
-	if !imageAllowPattern.MatchString(img) {
+	if !dockerHubImagePattern.MatchString(img) {
 		return fmt.Errorf("invalid image format")
 	}
 	return nil

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
@@ -18,10 +20,14 @@ import (
 
 type fakeDatabaseManager struct {
 	createCalls int
+	createFn    func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
 }
 
 func (f *fakeDatabaseManager) Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
 	f.createCalls++
+	if f.createFn != nil {
+		return f.createFn(ctx, tenantID, req)
+	}
 	return &databases.Database{
 		ID:       "db-1",
 		TenantID: tenantID,
@@ -80,6 +86,80 @@ func TestDatabaseCreate_UsesIdempotencyMiddleware(t *testing.T) {
 	assert.Equal(t, 1, dbMgr.createCalls, "database creation should be replayed, not executed twice")
 	assert.Equal(t, "true", second.Header().Get("Idempotency-Replayed"))
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
+}
+
+func TestDatabaseCreate_LongRunningRouteHasNoTimeoutDeadline(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	sawDeadline := false
+	dbMgr := &fakeDatabaseManager{
+		createFn: func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
+			_, sawDeadline = ctx.Deadline()
+			return &databases.Database{
+				ID:       "db-1",
+				TenantID: tenantID,
+				Name:     req.Name,
+				Type:     req.Type,
+				Status:   "ready",
+			}, nil
+		},
+	}
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		DatabaseManager: dbMgr,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/databases", bytes.NewBufferString(`{"name":"main-db","type":"postgres"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code)
+	assert.False(t, sawDeadline, "long-running database create route should not inherit the short request timeout")
+}
+
+func TestServiceLogsRoute_IsRegisteredAndHasNoTimeoutDeadline(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-1", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-1", 1, 1,
+	)
+	require.NoError(t, err)
+
+	sawDeadline := false
+	dockerClient := &testutil.MockDockerClient{
+		LogsContainerFn: func(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
+			_, sawDeadline = ctx.Deadline()
+			return io.NopCloser(strings.NewReader("hello from logs\n")), nil
+		},
+	}
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    dockerClient,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-1/logs?follow=true&tail=50", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.False(t, sawDeadline, "streaming service logs should not inherit the short request timeout")
+	assert.Equal(t, "hello from logs\n", rr.Body.String())
+	assert.Equal(t, []string{"ctr-1"}, dockerClient.LogsContainerCalls)
 }
 
 func TestIsUserError_AcceptsDynamicDatabaseQuotaMessages(t *testing.T) {

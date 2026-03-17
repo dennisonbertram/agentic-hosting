@@ -146,8 +146,8 @@ systemctl daemon-reload
 systemctl enable ah
 systemctl start ah
 
-# Verify
-curl http://localhost:8080/v1/system/health
+# Verify from the host (the API only trusts forwarded HTTPS headers from loopback)
+curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 # → {"status":"ok"}
 ```
 
@@ -205,6 +205,7 @@ DELETE /v1/auth/keys/{keyID}     # Revoke key
 ### Services
 
 Services are Docker containers run with gVisor isolation.
+Images may come from Docker Hub or the local loopback registry on `127.0.0.1:5000` / `localhost:5000`.
 
 ```bash
 # Create and deploy a service
@@ -213,15 +214,13 @@ POST /v1/services
   "name": "my-app",
   "image": "127.0.0.1:5000/tenant/my-app:latest",
   "port": 3000,
-  "env": {"NODE_ENV": "production"},
-  "memory_mb": 512,
-  "cpu_count": 1
+  "env": {"NODE_ENV": "production"}
 }
 # Returns immediately with status "deploying"
 
 GET    /v1/services                              # List services
 GET    /v1/services/{serviceID}                  # Get service (includes status, URL)
-GET    /v1/services/{serviceID}/logs?follow=true # Stream runtime logs
+GET    /v1/services/{serviceID}/logs?follow=true&tail=100 # Stream runtime logs
 DELETE /v1/services/{serviceID}                  # Delete service and container
 
 POST   /v1/services/{serviceID}/start            # Start
@@ -243,10 +242,12 @@ Build from a git repository. Supports GitHub, GitLab, Bitbucket, sr.ht, Codeberg
 # Start a build
 POST /v1/services/{serviceID}/builds
 {
-  "git_url": "https://github.com/org/repo",
-  "branch": "main"
+  "source_type": "git",
+  "source_url": "https://github.com/org/repo",
+  "source_ref": "main"
 }
-# Returns: {"build_id": "...", "status": "building", "image": "127.0.0.1:5000/..."}
+# source_ref defaults to "main" if omitted
+# Returns: {"build_id": "...", "status": "pending", "image": "127.0.0.1:5000/..."}
 
 GET    /v1/services/{serviceID}/builds                          # List builds
 GET    /v1/services/{serviceID}/builds/{buildID}                # Get build status

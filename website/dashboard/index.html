@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>agentic.hosting dashboard</title>
+  <meta name="description" content="Supervisory dashboard for agentic.hosting tenants.">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-frame">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">ah</div>
+        <div>
+          <div class="brand-name">agentic.hosting</div>
+          <div class="brand-subtitle">tenant dashboard</div>
+        </div>
+      </div>
+
+      <form id="connection-form" class="setup-card">
+        <div class="setup-title">Connect</div>
+        <label class="field">
+          <span>API base URL</span>
+          <input id="api-base" name="apiBase" type="url" placeholder="https://your-host.example.com" autocomplete="url">
+        </label>
+        <label class="field">
+          <span>API key</span>
+          <input id="api-key" name="apiKey" type="password" placeholder="keyid.secret" autocomplete="current-password">
+        </label>
+        <div class="setup-actions">
+          <button class="primary-button" type="submit">Connect</button>
+          <button class="ghost-button" id="disconnect-button" type="button">Clear</button>
+        </div>
+        <p class="field-hint">Use the same origin when possible. If the API is elsewhere, the browser still needs CORS access.</p>
+      </form>
+
+      <nav class="nav-list" id="nav-list">
+        <button class="nav-item active" data-view="overview" type="button">Overview</button>
+        <button class="nav-item" data-view="services" type="button">Services</button>
+        <button class="nav-item" data-view="builds" type="button">Builds</button>
+        <button class="nav-item" data-view="databases" type="button">Databases</button>
+        <button class="nav-item" data-view="tenant" type="button">Tenant</button>
+        <button class="nav-item" data-view="activity" type="button">Activity</button>
+      </nav>
+
+      <section class="sidebar-section">
+        <div class="section-label">Quick state</div>
+        <div id="sidebar-health" class="status-stack"></div>
+      </section>
+
+      <section class="sidebar-section">
+        <div class="section-label">Usage</div>
+        <div id="sidebar-usage" class="usage-stack"></div>
+      </section>
+    </aside>
+
+    <main class="main-shell">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Supervisory control plane</div>
+          <h1 id="page-title">Overview</h1>
+        </div>
+        <div class="topbar-actions">
+          <div id="connection-pill" class="connection-pill disconnected">Disconnected</div>
+          <button id="refresh-button" class="primary-button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" hidden></div>
+
+      <section id="view-overview" class="view active">
+        <div id="overview-kpis" class="kpi-grid"></div>
+        <div class="two-column-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Platform health</div>
+                <div class="panel-subtitle">Host state as seen by the authenticated tenant.</div>
+              </div>
+            </div>
+            <div id="overview-health" class="health-grid"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Active incidents</div>
+                <div class="panel-subtitle">Failures, open circuits, and provisioning issues.</div>
+              </div>
+            </div>
+            <div id="overview-incidents" class="list-block"></div>
+          </div>
+        </div>
+        <div class="two-column-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Recent builds</div>
+                <div class="panel-subtitle">Latest asynchronous work across the tenant.</div>
+              </div>
+            </div>
+            <div id="overview-builds" class="list-block"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Recent activity</div>
+                <div class="panel-subtitle">Synthetic event feed from current platform records.</div>
+              </div>
+            </div>
+            <div id="overview-activity" class="list-block"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-services" class="view">
+        <div class="section-layout">
+          <div class="section-main">
+            <div class="panel form-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Create service</div>
+                  <div class="panel-subtitle">Deploy an image and let the control plane take it from there.</div>
+                </div>
+              </div>
+              <form id="service-create-form" class="form-grid">
+                <label class="field">
+                  <span>Name</span>
+                  <input name="name" required placeholder="web">
+                </label>
+                <label class="field">
+                  <span>Image</span>
+                  <input name="image" required placeholder="nginx:alpine">
+                </label>
+                <label class="field">
+                  <span>Port</span>
+                  <input name="port" type="number" min="1" max="65535" value="80">
+                </label>
+                <label class="field field-wide">
+                  <span>Env JSON</span>
+                  <textarea name="env" rows="4" placeholder='{"NODE_ENV":"production"}'></textarea>
+                </label>
+                <div class="form-actions field-wide">
+                  <button class="primary-button" type="submit">Create service</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Services</div>
+                  <div class="panel-subtitle">Select a row to inspect logs, env, and recovery controls.</div>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Status</th>
+                      <th>URL</th>
+                      <th>Image</th>
+                      <th>Crashes</th>
+                      <th>Last change</th>
+                    </tr>
+                  </thead>
+                  <tbody id="services-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <aside class="detail-column">
+            <div class="panel sticky-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Service detail</div>
+                  <div class="panel-subtitle">Logs, env, and intervention live here.</div>
+                </div>
+              </div>
+              <div id="service-detail" class="detail-content empty-state">Select a service.</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-builds" class="view">
+        <div class="section-layout">
+          <div class="section-main">
+            <div class="panel form-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Start build</div>
+                  <div class="panel-subtitle">Nixpacks build from a supported HTTPS git host.</div>
+                </div>
+              </div>
+              <form id="build-create-form" class="form-grid">
+                <label class="field">
+                  <span>Service</span>
+                  <select name="serviceId" id="build-service-select"></select>
+                </label>
+                <label class="field field-wide">
+                  <span>Repository URL</span>
+                  <input name="sourceUrl" type="url" required placeholder="https://github.com/org/repo">
+                </label>
+                <label class="field">
+                  <span>Branch / ref</span>
+                  <input name="sourceRef" placeholder="main" value="main">
+                </label>
+                <div class="form-actions field-wide">
+                  <button class="primary-button" type="submit">Start build</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Builds</div>
+                  <div class="panel-subtitle">All tenant builds, newest first.</div>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Service</th>
+                      <th>Status</th>
+                      <th>Ref</th>
+                      <th>Image</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody id="builds-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <aside class="detail-column">
+            <div class="panel sticky-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Build detail</div>
+                  <div class="panel-subtitle">Logs and cancellation for in-flight work.</div>
+                </div>
+              </div>
+              <div id="build-detail" class="detail-content empty-state">Select a build.</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-databases" class="view">
+        <div class="section-layout">
+          <div class="section-main">
+            <div class="panel form-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Provision database</div>
+                  <div class="panel-subtitle">Managed Postgres and Redis for the current tenant.</div>
+                </div>
+              </div>
+              <form id="database-create-form" class="form-grid">
+                <label class="field">
+                  <span>Name</span>
+                  <input name="name" required placeholder="primary-db">
+                </label>
+                <label class="field">
+                  <span>Type</span>
+                  <select name="type">
+                    <option value="postgres">postgres</option>
+                    <option value="redis">redis</option>
+                  </select>
+                </label>
+                <div class="form-actions field-wide">
+                  <button class="primary-button" type="submit">Create database</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Databases</div>
+                  <div class="panel-subtitle">Select one to reveal connection details or delete it.</div>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>Host</th>
+                      <th>Port</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody id="databases-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <aside class="detail-column">
+            <div class="panel sticky-panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title">Database detail</div>
+                  <div class="panel-subtitle">Sensitive values stay hidden until you ask.</div>
+                </div>
+              </div>
+              <div id="database-detail" class="detail-content empty-state">Select a database.</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-tenant" class="view">
+        <div class="two-column-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Tenant</div>
+                <div class="panel-subtitle">Identity, quotas, and lifecycle controls.</div>
+              </div>
+            </div>
+            <div id="tenant-summary" class="detail-content"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Rename tenant</div>
+                <div class="panel-subtitle">Update the current tenant display name.</div>
+              </div>
+            </div>
+            <form id="tenant-update-form" class="form-grid">
+              <label class="field field-wide">
+                <span>Name</span>
+                <input name="name" required placeholder="My tenant">
+              </label>
+              <div class="form-actions field-wide">
+                <button class="primary-button" type="submit">Save name</button>
+                <button id="tenant-suspend-button" class="danger-button" type="button">Suspend tenant</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class="two-column-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Create API key</div>
+                <div class="panel-subtitle">New keys are only shown once.</div>
+              </div>
+            </div>
+            <form id="key-create-form" class="form-grid">
+              <label class="field">
+                <span>Name</span>
+                <input name="name" required placeholder="dashboard">
+              </label>
+              <label class="field">
+                <span>Expires in seconds</span>
+                <input name="expiresIn" type="number" min="1" placeholder="Optional">
+              </label>
+              <div class="form-actions field-wide">
+                <button class="primary-button" type="submit">Create key</button>
+              </div>
+            </form>
+            <div id="key-create-result" class="code-block" hidden></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">API keys</div>
+                <div class="panel-subtitle">Revoke unused credentials quickly.</div>
+              </div>
+            </div>
+            <div id="keys-list" class="list-block"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-activity" class="view">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Activity feed</div>
+              <div class="panel-subtitle">Recent tenant events synthesized from platform state.</div>
+            </div>
+          </div>
+          <div id="activity-list" class="activity-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 
 agentic-hosting (`ah`) is a self-hosted Platform-as-a-Service running on a single Linux server. It builds and runs containerized applications using Nixpacks (from Git sources) or pre-built Docker images. It also provisions PostgreSQL databases and manages environment variables per service.
 
-You are an AI agent operating ah via its REST API. There is no dashboard — you work entirely through HTTP calls. Every action you take is a curl command or equivalent HTTP request. This runbook tells you exactly what to call, what to expect back, and what to do when things go wrong.
+You are an AI agent operating ah via its REST API. There is an optional human-facing dashboard, but you should work entirely through HTTP calls. Every action you take is a curl command or equivalent HTTP request. This runbook tells you exactly what to call, what to expect back, and what to do when things go wrong.
 
 ---
 

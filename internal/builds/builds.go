@@ -25,6 +25,7 @@ const maxLogSize = 5 * 1024 * 1024 // 5MB max log per build
 type Build struct {
 	ID           string `json:"id"`
 	ServiceID    string `json:"service_id"`
+	ServiceName  string `json:"service_name,omitempty"`
 	TenantID     string `json:"tenant_id"`
 	Status       string `json:"status"`
 	SourceType   string `json:"source_type"`
@@ -366,8 +367,13 @@ func (m *Manager) GetBuild(ctx context.Context, tenantID, buildID string) (*Buil
 // ListBuilds returns builds for a service, scoped to tenant.
 func (m *Manager) ListBuilds(ctx context.Context, tenantID, serviceID string) ([]*Build, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, service_id, tenant_id, status, source_type, source_url, source_ref, image, started_at, finished_at, created_at
-		 FROM builds WHERE tenant_id = ? AND service_id = ? ORDER BY created_at DESC LIMIT 50`,
+		`SELECT b.id, b.service_id, COALESCE(s.name, ''), b.tenant_id, b.status, b.source_type, b.source_url, b.source_ref,
+		        b.image, b.started_at, b.finished_at, b.created_at
+		 FROM builds b
+		 LEFT JOIN services s ON s.id = b.service_id
+		 WHERE b.tenant_id = ? AND b.service_id = ?
+		 ORDER BY b.created_at DESC
+		 LIMIT 50`,
 		tenantID, serviceID,
 	)
 	if err != nil {
@@ -378,8 +384,40 @@ func (m *Manager) ListBuilds(ctx context.Context, tenantID, serviceID string) ([
 	var result []*Build
 	for rows.Next() {
 		b := &Build{}
-		if err := rows.Scan(&b.ID, &b.ServiceID, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
+		if err := rows.Scan(&b.ID, &b.ServiceID, &b.ServiceName, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan build: %w", err)
+		}
+		result = append(result, b)
+	}
+	return result, rows.Err()
+}
+
+// ListTenantBuilds returns recent builds across all services for a tenant.
+func (m *Manager) ListTenantBuilds(ctx context.Context, tenantID string, limit int) ([]*Build, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT b.id, b.service_id, COALESCE(s.name, ''), b.tenant_id, b.status, b.source_type, b.source_url, b.source_ref,
+		        b.image, b.started_at, b.finished_at, b.created_at
+		 FROM builds b
+		 LEFT JOIN services s ON s.id = b.service_id
+		 WHERE b.tenant_id = ?
+		 ORDER BY b.created_at DESC
+		 LIMIT ?`,
+		tenantID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant builds: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*Build
+	for rows.Next() {
+		b := &Build{}
+		if err := rows.Scan(&b.ID, &b.ServiceID, &b.ServiceName, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan tenant build: %w", err)
 		}
 		result = append(result, b)
 	}

@@ -1,6 +1,6 @@
 # agentic-hosting
 
-A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. No web dashboard. Agents are the operators.
+A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. Includes an optional supervisory dashboard for humans.
 
 - **Repo**: github.com/dennisonbertram/agentic-hosting
 - **Stack**: Go binary + Docker + gVisor + Traefik + Nixpacks + SQLite
@@ -10,7 +10,7 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 
 ## Design Principles
 
-1. **Agentic-first** — No web dashboard. AI agents use the REST API directly.
+1. **Agentic-first** — AI agents use the REST API directly. The dashboard is optional and supervisory, not the primary operating surface.
 2. **One happy path per primitive** — One database engine per type (Postgres, Redis), one build system (Nixpacks), one router (Traefik).
 3. **Multi-tenant** — Full tenant isolation via API keys, namespaced resources, per-tenant rate limits.
 4. **Secure by default** — gVisor syscall interception, ReadonlyRootfs, dropped capabilities, AES-256-GCM encrypted secrets.

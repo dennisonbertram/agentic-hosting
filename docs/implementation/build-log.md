@@ -15,7 +15,7 @@ A production-grade, multi-tenant PaaS designed specifically for AI agent workloa
 - Managed Postgres and Redis databases
 - Per-tenant network isolation (no container-to-container communication)
 - Automatic crash recovery with circuit breaking
-- REST API — no dashboard, intentionally agent-friendly
+- REST API first, with an optional supervisory dashboard for humans
 
 Single Go binary (`ah`) with zero runtime dependencies beyond Docker.
 
@@ -247,7 +247,7 @@ journalctl -u ah.service -f
 - **Zero test coverage** — no `*_test.go` files exist anywhere; no CI. Highest priority: reconciler unit tests with mock Docker client.
 - **No metrics export** — metering tables exist but no Prometheus/Grafana integration
 - **No billing** — metering data is collected but not acted on
-- **No admin dashboard** — all operations via REST API
+- **No admin-first workflow** — operations remain available via REST API, with an optional supervisory dashboard
 - **GitHub Issues #1–#10** — deferred work tracked on the repo
 
 ---

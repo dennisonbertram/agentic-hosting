@@ -1,7 +1,10 @@
-# Copy to /etc/traefik/dynamic/ah-site.yml and replace DOMAIN and CONTAINER_IP
-# Get CONTAINER_IP with:
-#   CONTAINER=$(docker ps --filter "ancestor=127.0.0.1:5000/ah-website/site:latest" --format "{{.Names}}" | head -1)
-#   docker inspect $CONTAINER --format "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}" | awk "{print \$1}"
+# Copy to /etc/traefik/dynamic/ah-site.yml and replace DOMAIN and CONTAINER_NAME.
+# Get CONTAINER_NAME with:
+#   docker ps --filter "ancestor=127.0.0.1:5000/ah-website/site:latest" --format "{{.Names}}" | head -1
+#
+# Use the container name (not IP) so routing survives container restarts.
+# Docker DNS resolves container names on the same network, so Traefik can reach
+# the container by name regardless of what IP Docker assigns after a restart.
 
 http:
   routers:
@@ -17,4 +20,4 @@ http:
     ah-site-svc:
       loadBalancer:
         servers:
-          - url: "http://CONTAINER_IP:80"
+          - url: "http://CONTAINER_NAME:80"

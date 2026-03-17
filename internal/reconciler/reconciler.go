@@ -47,6 +47,12 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
+// ReconcileOnce runs a single reconciliation pass and returns any error.
+// It is exported primarily for use in tests; production code uses Run.
+func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
+	return r.reconcileOnce(ctx)
+}
+
 func (r *Reconciler) safeReconcile(ctx context.Context) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -204,7 +210,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						ELSE circuit_open_count
 					END
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+				now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
 			}
@@ -273,7 +279,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 					ELSE circuit_open_count
 				END
 			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+			now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
 		if err != nil {
 			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
 		}

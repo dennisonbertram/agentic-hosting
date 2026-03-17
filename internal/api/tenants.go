@@ -39,6 +39,21 @@ type TenantResponse struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+type TenantUsageBucket struct {
+	Used int `json:"used"`
+	Max  int `json:"max"`
+}
+
+type TenantUsageResponse struct {
+	Services  TenantUsageBucket `json:"services"`
+	Databases TenantUsageBucket `json:"databases"`
+	APIKeys   TenantUsageBucket `json:"api_keys"`
+	MemoryMB  int               `json:"memory_mb"`
+	CPUCores  float64           `json:"cpu_cores"`
+	DiskGB    int               `json:"disk_gb"`
+	RateLimit int               `json:"rate_limit"`
+}
+
 type UpdateTenantRequest struct {
 	Name *string `json:"name,omitempty"`
 }
@@ -297,6 +312,51 @@ func (s *Server) handleTenantGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
+	tenantID := middleware.GetTenantID(r.Context())
+
+	var resp TenantUsageResponse
+	var err error
+	if err = s.store.StateDB.QueryRow(
+		`SELECT max_services, max_databases, max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
+		 FROM tenant_quotas
+		 WHERE tenant_id = ?`,
+		tenantID,
+	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "tenant quota not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if err = s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`,
+		tenantID,
+	).Scan(&resp.Services.Used); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err = s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`,
+		tenantID,
+	).Scan(&resp.Databases.Used); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err = s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
+		tenantID,
+	).Scan(&resp.APIKeys.Used); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	resp.APIKeys.Max = maxKeysPerTenant
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleTenantUpdate(w http.ResponseWriter, r *http.Request) {

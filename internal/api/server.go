@@ -131,12 +131,15 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
 
 		r.Get("/v1/tenant", s.handleTenantGet)
+		r.Get("/v1/tenant/usage", s.handleTenantUsage)
 		r.Patch("/v1/tenant", s.handleTenantUpdate)
 		r.Delete("/v1/tenant", s.handleTenantDelete)
 
 		r.Post("/v1/auth/keys", s.handleKeyCreate)
 		r.Get("/v1/auth/keys", s.handleKeyList)
 		r.Delete("/v1/auth/keys/{keyID}", s.handleKeyRevoke)
+
+		r.Get("/v1/activity", s.handleActivityList)
 
 		// Service routes
 		r.Post("/v1/services", s.handleServiceCreate)
@@ -152,6 +155,7 @@ func (s *Server) setupRoutes() {
 		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)
 
 		// Build routes
+		r.Get("/v1/builds", s.handleBuildListAll)
 		r.Post("/v1/services/{serviceID}/builds", s.handleBuildCreate)
 		r.Get("/v1/services/{serviceID}/builds", s.handleBuildList)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}", s.handleBuildGet)

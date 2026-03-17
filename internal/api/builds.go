@@ -2,13 +2,14 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"log"
+	"net/http"
+	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/go-chi/chi/v5"
 )
 
 func (s *Server) requireBuildManager(w http.ResponseWriter) bool {
@@ -59,6 +60,33 @@ func (s *Server) handleBuildCreate(w http.ResponseWriter, r *http.Request) {
 		"status":   build.Status,
 		"image":    build.Image,
 	})
+}
+
+func (s *Server) handleBuildListAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireBuildManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 200 {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
+		}
+		limit = value
+	}
+
+	result, err := s.buildManager.ListTenantBuilds(r.Context(), tenantID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list builds")
+		return
+	}
+	if result == nil {
+		result = []*builds.Build{}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleBuildList(w http.ResponseWriter, r *http.Request) {

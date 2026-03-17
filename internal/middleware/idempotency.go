@@ -58,10 +58,10 @@ func (s *IdempotencyStore) cleanup() {
 
 type responseRecorder struct {
 	http.ResponseWriter
-	statusCode    int
-	wroteHeader   bool
-	body          []byte
-	overflow      bool // true if body exceeded maxIdempotencyBodyLen
+	statusCode  int
+	wroteHeader bool
+	body        []byte
+	overflow    bool // true if body exceeded maxIdempotencyBodyLen
 }
 
 func (rr *responseRecorder) WriteHeader(code int) {
@@ -147,8 +147,9 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Never cache auth key creation responses (contain secrets)
-		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") || strings.HasPrefix(r.URL.Path, "/v1/databases") {
+		// Never cache auth key creation responses because they return a secret
+		// that should only be shown on the original creation response.
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/keys") {
 			next.ServeHTTP(w, r)
 			return
 		}

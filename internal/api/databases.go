@@ -5,9 +5,9 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/go-chi/chi/v5"
 )
 
 // requireDBManager is a guard that returns 503 if dbManager is nil.
@@ -127,7 +127,7 @@ func isUserError(err error) bool {
 		return true
 	case msg == "name is required (max 128 chars)":
 		return true
-	case msg == "database quota exceeded (max 3)":
+	case len(msg) >= 23 && msg[:23] == "database quota exceeded":
 		return true
 	}
 	return false

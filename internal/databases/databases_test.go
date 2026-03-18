@@ -42,7 +42,7 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	second, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "db-2", Type: "postgres"})
 	require.Error(t, err)
 	assert.Nil(t, second)
-	assert.EqualError(t, err, "database quota exceeded (max 1)")
+	assert.ErrorContains(t, err, "database quota exceeded (max 1)")
 }
 
 func seedDatabaseTestData(t *testing.T, stateDB *sql.DB, maxDatabases int) {

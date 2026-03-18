@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
@@ -107,10 +108,10 @@ func (m *Manager) ReconcileStale() {
 // Create provisions a new database.
 func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest) (*Database, error) {
 	if req.Type != "postgres" && req.Type != "redis" {
-		return nil, fmt.Errorf("invalid database type %q; must be \"postgres\" or \"redis\"", req.Type)
+		return nil, apierr.Validation(fmt.Sprintf("invalid database type %q; must be \"postgres\" or \"redis\"", req.Type))
 	}
 	if req.Name == "" || len(req.Name) > 128 {
-		return nil, fmt.Errorf("name is required (max 128 chars)")
+		return nil, apierr.Validation("name is required (max 128 chars)")
 	}
 
 	// Check disk space before provisioning
@@ -147,7 +148,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 	if count >= maxDatabases {
 		tx.Rollback()
-		return nil, fmt.Errorf("database quota exceeded (max %d)", maxDatabases)
+		return nil, apierr.QuotaExceeded(fmt.Sprintf("database quota exceeded (max %d)", maxDatabases))
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit quota check: %w", err)
@@ -313,7 +314,7 @@ func (m *Manager) Get(ctx context.Context, tenantID, dbID string) (*Database, er
 		&d.Host, &d.Port, &d.DBName, &d.Username,
 		&d.VolumeName, &d.CreatedAt, &d.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("database not found")
+		return nil, apierr.NotFound("database not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get database: %w", err)
@@ -353,7 +354,7 @@ func (m *Manager) GetConnectionString(ctx context.Context, tenantID, dbID string
 		dbID, tenantID,
 	).Scan(&connStrEnc)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("database not found")
+		return "", apierr.NotFound("database not found")
 	}
 	if err != nil {
 		return "", fmt.Errorf("get connection string: %w", err)

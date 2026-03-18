@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
@@ -113,10 +114,10 @@ func (m *Manager) checkTenantActive(ctx context.Context, tenantID string) error 
 		`SELECT status FROM tenants WHERE id = ?`, tenantID,
 	).Scan(&status)
 	if err != nil {
-		return fmt.Errorf("tenant not found")
+		return apierr.Forbidden("tenant not found")
 	}
 	if status != "active" {
-		return fmt.Errorf("tenant is %s", status)
+		return apierr.Forbidden(fmt.Sprintf("tenant is %s", status))
 	}
 	return nil
 }
@@ -124,10 +125,10 @@ func (m *Manager) checkTenantActive(ctx context.Context, tenantID string) error 
 // ValidateImage checks that an image reference is allowed.
 func ValidateImage(img string) error {
 	if img == "" {
-		return fmt.Errorf("image is required")
+		return apierr.Validation("image is required")
 	}
 	if len(img) > 256 {
-		return fmt.Errorf("image reference too long")
+		return apierr.Validation("image reference too long")
 	}
 
 	if localRegistryImagePattern.MatchString(img) {
@@ -137,11 +138,11 @@ func ValidateImage(img string) error {
 	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
 		prefix := img[:slashIdx]
 		if strings.ContainsAny(prefix, ".:") {
-			return fmt.Errorf("custom registries not allowed; only Docker Hub or the local loopback registry are allowed")
+			return apierr.Validation("custom registries not allowed; only Docker Hub or the local loopback registry are allowed")
 		}
 	}
 	if !dockerHubImagePattern.MatchString(img) {
-		return fmt.Errorf("invalid image format")
+		return apierr.Validation("invalid image format")
 	}
 	return nil
 }
@@ -150,16 +151,16 @@ func ValidateImage(img string) error {
 func ValidateEnvVars(vars map[string]string) error {
 	for k, v := range vars {
 		if !envKeyPattern.MatchString(k) {
-			return fmt.Errorf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]{0,127}", k)
+			return apierr.Validation(fmt.Sprintf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]{0,127}", k))
 		}
 		if deniedEnvKeys[strings.ToUpper(k)] {
-			return fmt.Errorf("env var %q is not allowed", k)
+			return apierr.Validation(fmt.Sprintf("env var %q is not allowed", k))
 		}
 		if len(v) > maxEnvValueLen {
-			return fmt.Errorf("env var %q value too long (max %d bytes)", k, maxEnvValueLen)
+			return apierr.Validation(fmt.Sprintf("env var %q value too long (max %d bytes)", k, maxEnvValueLen))
 		}
 		if strings.ContainsAny(v, "\x00") {
-			return fmt.Errorf("env var %q value contains null bytes", k)
+			return apierr.Validation(fmt.Sprintf("env var %q value contains null bytes", k))
 		}
 	}
 	return nil
@@ -199,7 +200,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("count services: %w", err)
 	}
 	if currentCount >= maxServices {
-		return nil, fmt.Errorf("service limit reached (max %d)", maxServices)
+		return nil, apierr.QuotaExceeded(fmt.Sprintf("service limit reached (max %d)", maxServices))
 	}
 
 	id, err := generateID()
@@ -212,7 +213,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		port = 8000
 	}
 	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("port must be between 1 and 65535")
+		return nil, apierr.Validation("port must be between 1 and 65535")
 	}
 
 	// Use a transaction so service insert + env vars are atomic.
@@ -414,7 +415,7 @@ func (m *Manager) Stop(ctx context.Context, tenantID, serviceID string) error {
 		return err
 	}
 	if svc.ContainerID == "" {
-		return fmt.Errorf("service has no container")
+		return apierr.Conflict("service has no container")
 	}
 
 	if err := m.docker.StopContainer(ctx, svc.ContainerID); err != nil {
@@ -434,10 +435,10 @@ func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
 		return err
 	}
 	if svc.CircuitOpen {
-		return fmt.Errorf("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
+		return apierr.Conflict("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
 	}
 	if svc.ContainerID == "" {
-		return fmt.Errorf("service has no container")
+		return apierr.Conflict("service has no container")
 	}
 
 	if err := m.docker.StartContainer(ctx, svc.ContainerID); err != nil {
@@ -454,10 +455,10 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 		return err
 	}
 	if svc.CircuitOpen {
-		return fmt.Errorf("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
+		return apierr.Conflict("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
 	}
 	if svc.ContainerID == "" {
-		return fmt.Errorf("service has no container")
+		return apierr.Conflict("service has no container")
 	}
 
 	if err := m.docker.StopContainer(ctx, svc.ContainerID); err != nil {
@@ -554,7 +555,7 @@ func (m *Manager) Logs(ctx context.Context, tenantID, serviceID string, follow b
 		return nil, err
 	}
 	if svc.ContainerID == "" {
-		return nil, fmt.Errorf("service has no container")
+		return nil, apierr.Conflict("service has no container")
 	}
 	return m.docker.LogsContainer(ctx, svc.ContainerID, follow, tail)
 }
@@ -664,7 +665,7 @@ func (m *Manager) DeleteEnv(ctx context.Context, tenantID, serviceID, key string
 		return fmt.Errorf("delete env var: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("env var not found")
+		return apierr.NotFound("env var not found")
 	}
 	log.Printf("AUDIT: tenant=%s deleted env var %q for service=%s", tenantID, key, serviceID)
 	return nil
@@ -682,7 +683,7 @@ func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Se
 		serviceID, tenantID,
 	).Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpenInt, &lastCrashedAtNull, &s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("service not found")
+		return nil, apierr.NotFound("service not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get service: %w", err)

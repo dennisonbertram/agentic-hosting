@@ -6,9 +6,9 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/cache"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 )
 
@@ -34,64 +34,39 @@ type authCacheEntry struct {
 }
 
 type authCache struct {
-	mu      sync.RWMutex
-	entries map[string]*authCacheEntry
+	lru *cache.LRU[string, *authCacheEntry]
 }
 
 func newAuthCache() *authCache {
 	c := &authCache{
-		entries: make(map[string]*authCacheEntry),
+		lru: cache.New[string, *authCacheEntry](authCacheMaxKeys),
 	}
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		for range ticker.C {
-			c.mu.Lock()
 			now := time.Now()
-			for k, v := range c.entries {
-				if now.Sub(v.cachedAt) > authCacheTTL {
-					delete(c.entries, k)
-				}
-			}
-			c.mu.Unlock()
+			c.lru.DeleteFunc(func(_ string, v *authCacheEntry) bool {
+				return now.Sub(v.cachedAt) > authCacheTTL
+			})
 		}
 	}()
 	return c
 }
 
 func (c *authCache) get(keyID string) (*authCacheEntry, bool) {
-	c.mu.RLock()
-	entry, exists := c.entries[keyID]
-	c.mu.RUnlock()
-	if !exists || time.Since(entry.cachedAt) > authCacheTTL {
+	entry, ok := c.lru.Get(keyID)
+	if !ok || time.Since(entry.cachedAt) > authCacheTTL {
 		return nil, false
 	}
 	return entry, true
 }
 
 func (c *authCache) set(keyID string, entry *authCacheEntry) {
-	c.mu.Lock()
-	// Evict oldest if at capacity
-	if len(c.entries) >= authCacheMaxKeys {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range c.entries {
-			if oldestKey == "" || v.cachedAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.cachedAt
-			}
-		}
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
-		}
-	}
-	c.entries[keyID] = entry
-	c.mu.Unlock()
+	c.lru.Set(keyID, entry)
 }
 
 func (c *authCache) invalidate(keyID string) {
-	c.mu.Lock()
-	delete(c.entries, keyID)
-	c.mu.Unlock()
+	c.lru.Delete(keyID)
 }
 
 // AuthCacheInvalidator allows callers to evict entries from the auth cache
@@ -107,66 +82,40 @@ func (a *AuthCacheInvalidator) InvalidateKey(keyID string) {
 
 // InvalidateTenant removes all cached keys belonging to the given tenant.
 func (a *AuthCacheInvalidator) InvalidateTenant(tenantID string) {
-	a.cache.mu.Lock()
-	for k, v := range a.cache.entries {
-		if v.tenantID == tenantID {
-			delete(a.cache.entries, k)
-		}
-	}
-	a.cache.mu.Unlock()
+	a.cache.lru.DeleteFunc(func(_ string, v *authCacheEntry) bool {
+		return v.tenantID == tenantID
+	})
 }
 
-// lastUsedTracker samples last_used_at updates with bounded map.
+// lastUsedTracker samples last_used_at updates with bounded LRU cache.
 type lastUsedTracker struct {
-	mu       sync.Mutex
-	lastSeen map[string]time.Time
-	db       *sql.DB
+	lru *cache.LRU[string, time.Time]
+	db  *sql.DB
 }
 
 func newLastUsedTracker(db *sql.DB) *lastUsedTracker {
 	t := &lastUsedTracker{
-		lastSeen: make(map[string]time.Time),
-		db:       db,
+		lru: cache.New[string, time.Time](lastUsedMaxKeys),
+		db:  db,
 	}
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		for range ticker.C {
-			t.mu.Lock()
 			cutoff := time.Now().Add(-24 * time.Hour)
-			for k, v := range t.lastSeen {
-				if v.Before(cutoff) {
-					delete(t.lastSeen, k)
-				}
-			}
-			t.mu.Unlock()
+			t.lru.DeleteFunc(func(_ string, v time.Time) bool {
+				return v.Before(cutoff)
+			})
 		}
 	}()
 	return t
 }
 
 func (t *lastUsedTracker) maybeUpdate(keyID string) {
-	t.mu.Lock()
-	last, exists := t.lastSeen[keyID]
 	now := time.Now()
-	if exists && now.Sub(last) < lastUsedInterval {
-		t.mu.Unlock()
+	if last, ok := t.lru.Get(keyID); ok && now.Sub(last) < lastUsedInterval {
 		return
 	}
-	if !exists && len(t.lastSeen) >= lastUsedMaxKeys {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range t.lastSeen {
-			if oldestKey == "" || v.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v
-			}
-		}
-		if oldestKey != "" {
-			delete(t.lastSeen, oldestKey)
-		}
-	}
-	t.lastSeen[keyID] = now
-	t.mu.Unlock()
+	t.lru.Set(keyID, now)
 
 	if _, err := t.db.Exec("UPDATE api_keys SET last_used_at = ? WHERE id = ?", now.Unix(), keyID); err != nil {
 		log.Printf("auth: failed to update last_used_at for key %s: %v", keyID, err)

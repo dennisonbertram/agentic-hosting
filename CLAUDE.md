@@ -61,3 +61,12 @@ Use the Ralph Loop (iterative AI review) for:
 | `internal/docker/client.go` | Docker Engine API wrapper |
 | `internal/db/migrations/` | DB migration files |
 | `internal/testutil/` | Shared mocks and test helpers |
+
+## API Versioning
+
+- All endpoints are prefixed with `/v1/`
+- **Breaking changes** require a version bump (e.g. `/v1/` → `/v2/`). Breaking changes include: removing fields from responses, changing field types, renaming fields, removing endpoints, changing required parameters
+- **Additive changes** are NOT breaking and do not require a version bump. Additive changes include: new fields in responses, new endpoints, new optional query/body parameters
+- Deprecated endpoints must include a `Deprecation: true` response header
+- Minimum deprecation period: **90 days** before removal
+- When bumping versions, the previous version must continue to be served for the 90-day deprecation window

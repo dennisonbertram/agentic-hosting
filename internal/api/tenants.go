@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/cache"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
@@ -62,7 +63,7 @@ var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-
 
 type registrationLimiter struct {
 	mu             sync.Mutex
-	entries        map[string]*regEntry
+	entries        *cache.LRU[string, *regEntry]
 	globalCount    int
 	globalWindowAt time.Time
 }
@@ -81,7 +82,7 @@ const (
 )
 
 var regLimiter = &registrationLimiter{
-	entries: make(map[string]*regEntry),
+	entries: cache.New[string, *regEntry](regMaxEntries),
 	// globalWindowAt zero-value: first request starts the window
 }
 
@@ -89,14 +90,10 @@ func init() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
-			regLimiter.mu.Lock()
 			now := time.Now()
-			for k, v := range regLimiter.entries {
-				if now.After(v.windowAt) {
-					delete(regLimiter.entries, k)
-				}
-			}
-			regLimiter.mu.Unlock()
+			regLimiter.entries.DeleteFunc(func(_ string, v *regEntry) bool {
+				return now.After(v.windowAt)
+			})
 		}
 	}()
 }
@@ -117,23 +114,9 @@ func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 		return false, time.Until(rl.globalWindowAt)
 	}
 
-	if len(rl.entries) >= regMaxEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rl.entries {
-			if oldestKey == "" || v.windowAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.windowAt
-			}
-		}
-		if oldestKey != "" {
-			delete(rl.entries, oldestKey)
-		}
-	}
-
-	entry, exists := rl.entries[ip]
+	entry, exists := rl.entries.Get(ip)
 	if !exists || now.After(entry.windowAt) {
-		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
+		rl.entries.Set(ip, &regEntry{count: 1, windowAt: now.Add(regWindow)})
 		rl.globalCount++
 		return true, 0
 	}

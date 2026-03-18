@@ -19,6 +19,7 @@ type GC struct {
 	db       *sql.DB
 	docker   docker.Client
 	interval time.Duration
+	buildDir string
 }
 
 // minResourceAge is the minimum time a resource must exist before GC considers
@@ -26,11 +27,12 @@ type GC struct {
 const minResourceAge = 10 * time.Minute
 
 // New creates a garbage collector with the given interval.
-func New(db *sql.DB, dockerClient docker.Client, interval time.Duration) *GC {
+func New(db *sql.DB, dockerClient docker.Client, interval time.Duration, buildDir string) *GC {
 	return &GC{
 		db:       db,
 		docker:   dockerClient,
 		interval: interval,
+		buildDir: buildDir,
 	}
 }
 
@@ -111,7 +113,7 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	}
 
 	// 3. Old build work dirs (older than 1 hour)
-	buildDirsCleaned := g.cleanOldBuildDirs("/var/lib/ah/builds", 1*time.Hour)
+	buildDirsCleaned := g.cleanOldBuildDirs(g.buildDir, 1*time.Hour)
 	removed += buildDirsCleaned
 
 	// 4. Dangling images — prune images not referenced by any container

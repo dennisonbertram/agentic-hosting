@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/cache"
 	"golang.org/x/time/rate"
 )
 
@@ -18,17 +18,16 @@ type rateLimitEntry struct {
 }
 
 type RateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rateLimitEntry
-	rate    rate.Limit
-	burst   int
+	lru   *cache.LRU[string, *rateLimitEntry]
+	rate  rate.Limit
+	burst int
 }
 
 func NewRateLimiter(rps float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
-		entries: make(map[string]*rateLimitEntry),
-		rate:    rate.Limit(rps),
-		burst:   burst,
+		lru:   cache.New[string, *rateLimitEntry](maxRateLimitEntries),
+		rate:  rate.Limit(rps),
+		burst: burst,
 	}
 	go rl.cleanup()
 	return rl
@@ -37,47 +36,24 @@ func NewRateLimiter(rps float64, burst int) *RateLimiter {
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	for range ticker.C {
-		rl.mu.Lock()
 		cutoff := time.Now().Add(-1 * time.Hour)
-		for k, v := range rl.entries {
-			if v.lastSeen.Before(cutoff) {
-				delete(rl.entries, k)
-			}
-		}
-		rl.mu.Unlock()
+		rl.lru.DeleteFunc(func(_ string, v *rateLimitEntry) bool {
+			return v.lastSeen.Before(cutoff)
+		})
 	}
 }
 
 func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	entry, exists := rl.entries[key]
-	if exists {
+	if entry, ok := rl.lru.Get(key); ok {
 		entry.lastSeen = time.Now()
 		return entry.limiter
 	}
 
-	// Evict oldest if at capacity
-	if len(rl.entries) >= maxRateLimitEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rl.entries {
-			if oldestKey == "" || v.lastSeen.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.lastSeen
-			}
-		}
-		if oldestKey != "" {
-			delete(rl.entries, oldestKey)
-		}
-	}
-
 	limiter := rate.NewLimiter(rl.rate, rl.burst)
-	rl.entries[key] = &rateLimitEntry{
+	rl.lru.Set(key, &rateLimitEntry{
 		limiter:  limiter,
 		lastSeen: time.Now(),
-	}
+	})
 	return limiter
 }
 

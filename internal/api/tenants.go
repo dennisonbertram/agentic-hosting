@@ -301,39 +301,21 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 
 	var resp TenantUsageResponse
-	var err error
-	if err = s.store.StateDB.QueryRow(
-		`SELECT max_services, max_databases, max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
-		 FROM tenant_quotas
-		 WHERE tenant_id = ?`,
-		tenantID,
-	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit); err != nil {
-		if err == sql.ErrNoRows {
-			writeError(w, http.StatusNotFound, "tenant quota not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+	err := s.store.StateDB.QueryRow(
+		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit,
+		    (SELECT COUNT(*) FROM services WHERE tenant_id = ?),
+		    (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'),
+		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL)
+		 FROM tenant_quotas q
+		 WHERE q.tenant_id = ?`,
+		tenantID, tenantID, tenantID, tenantID,
+	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit,
+		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "tenant quota not found")
 		return
 	}
-
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`,
-		tenantID,
-	).Scan(&resp.Services.Used); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`,
-		tenantID,
-	).Scan(&resp.Databases.Used); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
-		tenantID,
-	).Scan(&resp.APIKeys.Used); err != nil {
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

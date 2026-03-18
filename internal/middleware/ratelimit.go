@@ -68,8 +68,14 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 
 		limiter := rl.getLimiter(tenantID)
+
+		// Set rate limit headers on all responses
+		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%.0f", float64(rl.rate)))
+		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%.0f", math.Max(0, float64(limiter.Tokens()))))
+
 		if !limiter.Allow() {
-			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter))
+			retryAfter := retryAfterFromLimiter(limiter)
+			w.Header().Set("Retry-After", retryAfter)
 			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}

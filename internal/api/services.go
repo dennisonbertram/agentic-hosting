@@ -87,7 +87,13 @@ func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID := middleware.GetTenantID(r.Context())
 
-	svcs, err := s.svcManager.List(r.Context(), tenantID)
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	svcs, err := s.svcManager.ListPaginated(r.Context(), tenantID, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list services")
 		return

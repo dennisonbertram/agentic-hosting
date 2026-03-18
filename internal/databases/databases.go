@@ -324,10 +324,21 @@ func (m *Manager) Get(ctx context.Context, tenantID, dbID string) (*Database, er
 
 // List returns all databases for a tenant. Connection strings NOT included.
 func (m *Manager) List(ctx context.Context, tenantID string) ([]*Database, error) {
+	return m.ListPaginated(ctx, tenantID, 100, 0)
+}
+
+// ListPaginated returns databases for a tenant with limit and offset.
+func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*Database, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, tenant_id, name, type, status, host, port, db_name, username, created_at, updated_at
-		 FROM databases WHERE tenant_id = ? ORDER BY created_at DESC`,
-		tenantID,
+		 FROM databases WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		tenantID, limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list databases: %w", err)

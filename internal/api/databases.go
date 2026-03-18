@@ -46,12 +46,20 @@ func (s *Server) handleDatabaseList(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID := middleware.GetTenantID(r.Context())
 
-	dbs, err := s.dbManager.List(r.Context(), tenantID)
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	dbs, err := s.dbManager.ListPaginated(r.Context(), tenantID, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list databases")
 		return
 	}
-
+	if dbs == nil {
+		dbs = []*databases.Database{}
+	}
 	writeJSON(w, http.StatusOK, dbs)
 }
 

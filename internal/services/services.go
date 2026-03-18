@@ -562,10 +562,21 @@ func (m *Manager) Logs(ctx context.Context, tenantID, serviceID string, follow b
 
 // List returns all services for a tenant.
 func (m *Manager) List(ctx context.Context, tenantID string) ([]*Service, error) {
+	return m.ListPaginated(ctx, tenantID, 100, 0)
+}
+
+// ListPaginated returns services for a tenant with limit and offset.
+func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*Service, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
-		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100`,
-		tenantID,
+		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		tenantID, limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list services: %w", err)

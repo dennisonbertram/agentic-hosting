@@ -41,6 +41,10 @@ func (f *fakeDatabaseManager) List(ctx context.Context, tenantID string) ([]*dat
 	return nil, nil
 }
 
+func (f *fakeDatabaseManager) ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*databases.Database, error) {
+	return nil, nil
+}
+
 func (f *fakeDatabaseManager) Get(ctx context.Context, tenantID, dbID string) (*databases.Database, error) {
 	return nil, nil
 }

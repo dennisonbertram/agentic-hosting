@@ -210,13 +210,16 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						ELSE circuit_open_count
 					END
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+				now, now, now, now, now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
 			}
-			var circuitOpen int
-			r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+			var circuitOpen, openCount int
+			r.db.QueryRowContext(ctx, `SELECT circuit_open, circuit_open_count FROM services WHERE id = ?`, s.id).Scan(&circuitOpen, &openCount)
 			if circuitOpen == 1 {
+				// Set retry_at using actual open count for exponential backoff
+				retryAt := time.Now().Add(circuitRetryBackoff(openCount)).Unix()
+				r.db.ExecContext(ctx, `UPDATE services SET circuit_retry_at = ? WHERE id = ?`, retryAt, s.id)
 				log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
 				// Stop the container when circuit opens to defeat Docker restart policy.
 				_ = r.docker.StopContainer(ctx, s.containerID)
@@ -279,13 +282,15 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 					ELSE circuit_open_count
 				END
 			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+			now, now, now, now, now, s.id, s.tenantID)
 		if err != nil {
 			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
 		}
-		var circuitOpen int
-		r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+		var circuitOpen, openCount int
+		r.db.QueryRowContext(ctx, `SELECT circuit_open, circuit_open_count FROM services WHERE id = ?`, s.id).Scan(&circuitOpen, &openCount)
 		if circuitOpen == 1 {
+			retryAt := time.Now().Add(circuitRetryBackoff(openCount)).Unix()
+			r.db.ExecContext(ctx, `UPDATE services SET circuit_retry_at = ? WHERE id = ?`, retryAt, s.id)
 			log.Printf("reconciler: service %s circuit breaker OPEN after unhealthy restarts — removing container", s.id)
 			_ = r.docker.RemoveContainer(ctx, s.containerID)
 		}

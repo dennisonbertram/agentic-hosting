@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
@@ -136,7 +137,11 @@ func (s *Server) handleEnvironmentStop(w http.ResponseWriter, r *http.Request) {
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow non-browser clients (no Origin header).
+		// Reject browser-based requests to prevent cross-site WS hijacking.
+		return r.Header.Get("Origin") == ""
+	},
 }
 
 // execStartMessage is the first message sent by the client to start a command.
@@ -172,6 +177,14 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Set DoS protections
+	conn.SetReadLimit(1 << 20) // 1MB max message size
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
 	// Read first message to get command
 	var startMsg execStartMessage
 	if err := conn.ReadJSON(&startMsg); err != nil {
@@ -184,7 +197,7 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Touch activity
-	s.envManager.TouchActivity(r.Context(), envID)
+	s.envManager.TouchActivity(r.Context(), tenantID, envID)
 
 	// Create exec
 	if s.docker == nil {
@@ -198,12 +211,12 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reader, writer, err := s.docker.ExecAttach(r.Context(), execID)
+	reader, writer, closeFn, err := s.docker.ExecAttach(r.Context(), execID)
 	if err != nil {
 		conn.WriteJSON(execMessage{Type: "error", Data: fmt.Sprintf("exec attach failed: %v", err)})
 		return
 	}
-	defer reader.Close()
+	defer closeFn()
 
 	// Copy Docker stdout -> WebSocket
 	done := make(chan struct{})
@@ -213,13 +226,31 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
-				s.envManager.TouchActivity(r.Context(), envID)
+				s.envManager.TouchActivity(r.Context(), tenantID, envID)
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if writeErr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
 					return
 				}
 			}
 			if err != nil {
 				return
+			}
+		}
+	}()
+
+	// Ping to keep connection alive and detect dead peers
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-pingTicker.C:
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -231,6 +262,7 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
+			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			if _, err := writer.Write(msg); err != nil {
 				return
 			}
@@ -280,7 +312,7 @@ func (s *Server) handleEnvironmentFileUpload(w http.ResponseWriter, r *http.Requ
 
 	// Validate path is under /workspace
 	clean := filepath.Clean(dstPath)
-	if !strings.HasPrefix(clean, "/workspace") {
+	if clean != "/workspace" && !strings.HasPrefix(clean, "/workspace/") {
 		writeError(w, http.StatusBadRequest, "path must be under /workspace")
 		return
 	}
@@ -293,8 +325,13 @@ func (s *Server) handleEnvironmentFileUpload(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to read file")
 		return
 	}
+	safeName := filepath.Base(header.Filename)
+	if safeName == "." || safeName == ".." || strings.ContainsAny(safeName, "/\\") {
+		writeError(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
 	if err := tw.WriteHeader(&tar.Header{
-		Name: header.Filename,
+		Name: safeName,
 		Size: int64(len(data)),
 		Mode: 0644,
 	}); err != nil {
@@ -312,8 +349,8 @@ func (s *Server) handleEnvironmentFileUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.envManager.TouchActivity(r.Context(), envID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "path": clean + "/" + header.Filename})
+	s.envManager.TouchActivity(r.Context(), tenantID, envID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "path": clean + "/" + safeName})
 }
 
 func (s *Server) handleEnvironmentFileDownload(w http.ResponseWriter, r *http.Request) {
@@ -338,7 +375,7 @@ func (s *Server) handleEnvironmentFileDownload(w http.ResponseWriter, r *http.Re
 
 	// Validate path
 	clean := filepath.Clean("/workspace/" + filePath)
-	if !strings.HasPrefix(clean, "/workspace") {
+	if clean != "/workspace" && !strings.HasPrefix(clean, "/workspace/") {
 		writeError(w, http.StatusBadRequest, "path must be under /workspace")
 		return
 	}
@@ -350,19 +387,20 @@ func (s *Server) handleEnvironmentFileDownload(w http.ResponseWriter, r *http.Re
 	}
 	defer rc.Close()
 
-	// Extract file from tar archive
+	// Extract file from tar archive — only return exact file match, not directories
 	tr := tar.NewReader(rc)
+	expectedName := filepath.Base(clean)
 	for {
 		hdr, err := tr.Next()
 		if err != nil {
 			writeError(w, http.StatusNotFound, "file not found in archive")
 			return
 		}
-		if hdr.Typeflag == tar.TypeReg {
-			w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(hdr.Name)))
+		if hdr.Typeflag == tar.TypeReg && filepath.Base(hdr.Name) == expectedName {
+			w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filepath.Base(hdr.Name)))
 			w.Header().Set("Content-Type", "application/octet-stream")
 			io.Copy(w, tr)
-			s.envManager.TouchActivity(r.Context(), envID)
+			s.envManager.TouchActivity(r.Context(), tenantID, envID)
 			return
 		}
 	}

@@ -265,7 +265,7 @@ func TestTouchActivity(t *testing.T) {
 
 	// Touch activity (timestamps have second granularity so the value
 	// will be >= the original).
-	mgr.TouchActivity(context.Background(), created.ID)
+	mgr.TouchActivity(context.Background(), testTenantID, created.ID)
 
 	after, err := mgr.Get(context.Background(), testTenantID, created.ID)
 	require.NoError(t, err)

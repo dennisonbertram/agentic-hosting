@@ -100,7 +100,7 @@ type MockDockerClient struct {
 	ExecCreateCalls int
 
 	// ExecAttach
-	ExecAttachFn    func(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error)
+	ExecAttachFn    func(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error)
 	ExecAttachCalls int
 
 	// ExecInspect
@@ -295,13 +295,13 @@ func (m *MockDockerClient) ExecCreate(ctx context.Context, containerID string, c
 	return "mock-exec-id", nil
 }
 
-func (m *MockDockerClient) ExecAttach(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error) {
+func (m *MockDockerClient) ExecAttach(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error) {
 	m.ExecAttachCalls++
 	if m.ExecAttachFn != nil {
 		return m.ExecAttachFn(ctx, execID)
 	}
 	r, w := io.Pipe()
-	return r, w, nil
+	return r, w, func() error { return nil }, nil
 }
 
 func (m *MockDockerClient) ExecInspect(ctx context.Context, execID string) (int, bool, error) {

@@ -44,7 +44,7 @@ type Client interface {
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
 	RunDevEnvironment(ctx context.Context, cfg RunDevEnvConfig) (string, error)
 	ExecCreate(ctx context.Context, containerID string, cmd []string, tty bool) (string, error)
-	ExecAttach(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error)
+	ExecAttach(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error)
 	ExecInspect(ctx context.Context, execID string) (int, bool, error)
 	CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader) error
 	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error)
@@ -229,6 +229,13 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+func truncStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
 
 func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string) *container.Config {
 	env := make([]string, 0, len(envVars))
@@ -432,8 +439,8 @@ func (c *DockerClient) RemoveVolumeSafe(ctx context.Context, name string) error 
 }
 
 // RunDatabase creates and starts a database container with host port mapping
-// and persistent volume. Database containers do NOT use gVisor (they need direct
-// filesystem access for data storage), but are bound to 127.0.0.1 only.
+// and persistent volume. Database containers use gVisor (runsc) runtime for
+// isolation and are bound to 127.0.0.1 only.
 func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
 	env := make([]string, 0, len(cfg.Env))
 	for k, v := range cfg.Env {
@@ -524,7 +531,7 @@ type RunDevEnvConfig struct {
 // Unlike services: writable filesystem, no Traefik routing, sleep infinity entrypoint,
 // /workspace volume mount, higher PidsLimit (512), larger tmpfs.
 func (c *DockerClient) RunDevEnvironment(ctx context.Context, cfg RunDevEnvConfig) (string, error) {
-	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID[:8], cfg.EnvID[:16])
+	name := fmt.Sprintf("ah-env-%s-%s", truncStr(cfg.TenantID, 8), truncStr(cfg.EnvID, 16))
 	tenantNet := TenantNetworkName(cfg.TenantID)
 
 	memoryBytes := int64(512 * 1024 * 1024)
@@ -603,16 +610,18 @@ func (c *DockerClient) ExecCreate(ctx context.Context, containerID string, cmd [
 }
 
 // ExecAttach attaches to an exec instance and returns the I/O streams.
-// The returned ReadCloser provides stdout/stderr; the Writer accepts stdin.
-// Caller must close the ReadCloser when done.
-func (c *DockerClient) ExecAttach(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error) {
+// The returned Reader provides stdout/stderr; the Writer accepts stdin.
+// Caller must call the returned close function when done to release the
+// underlying hijacked connection.
+func (c *DockerClient) ExecAttach(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error) {
 	resp, err := c.cli.ContainerExecAttach(ctx, execID, container.ExecAttachOptions{
 		Tty: true,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("exec attach: %w", err)
+		return nil, nil, nil, fmt.Errorf("exec attach: %w", err)
 	}
-	return io.NopCloser(resp.Reader), resp.Conn, nil
+	closeFn := func() error { resp.Close(); return nil }
+	return resp.Reader, resp.Conn, closeFn, nil
 }
 
 // ExecInspect returns the exit code and running state of an exec instance.

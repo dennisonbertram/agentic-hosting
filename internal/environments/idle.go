@@ -3,6 +3,7 @@ package environments
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"runtime/debug"
 	"time"
@@ -81,7 +82,9 @@ func (d *IdleDetector) checkOnce(ctx context.Context) error {
 		}
 		idle = append(idle, e)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate idle environments: %w", err)
+	}
 
 	for _, e := range idle {
 		log.Printf("idle-detector: stopping idle environment %s", e.id)

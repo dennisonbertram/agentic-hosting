@@ -137,38 +137,34 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Quota check with IMMEDIATE transaction
+	// Atomic quota check + insert in a single transaction.
+	// The INSERT acquires SQLite's write lock, serializing concurrent creates.
 	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	_, _ = tx.ExecContext(ctx, `UPDATE environments SET updated_at = updated_at WHERE id = 'lock'`)
+	defer tx.Rollback() // no-op after commit
+
 	var maxEnvironments int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxEnvironments); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
 	}
 	var count int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed', 'deleting')`, tenantID,
 	).Scan(&count); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
 	}
 	if count >= maxEnvironments {
-		tx.Rollback()
 		return nil, apierr.QuotaExceeded(fmt.Sprintf("environment quota exceeded (max %d)", maxEnvironments))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	volumeName := fmt.Sprintf("ah-env-%s", id)
 	now := time.Now().Unix()
 
-	_, err = m.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, status, base_image, container_id, volume_name,
 		 idle_timeout_sec, last_activity_at, created_at, updated_at)
 		 VALUES (?, ?, ?, 'creating', ?, '', ?, ?, ?, ?, ?)`,
@@ -176,6 +172,10 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert environment: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 
 	// Create volume
@@ -355,9 +355,12 @@ func (m *Manager) Stop(ctx context.Context, tenantID, envID string) error {
 		}
 	}
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ?`,
-		time.Now().Unix(), envID)
-	return err
+		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		time.Now().Unix(), envID, tenantID)
+	if err != nil {
+		return fmt.Errorf("update stopped: %w", err)
+	}
+	return nil
 }
 
 // Start starts a stopped environment.
@@ -376,17 +379,20 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	}
 	now := time.Now().Unix()
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'running', last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		now, now, envID)
-	return err
+		`UPDATE environments SET status = 'running', last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, now, envID, tenantID)
+	if err != nil {
+		return fmt.Errorf("update running: %w", err)
+	}
+	return nil
 }
 
 // TouchActivity updates the last_activity_at timestamp.
-func (m *Manager) TouchActivity(ctx context.Context, envID string) {
+func (m *Manager) TouchActivity(ctx context.Context, tenantID, envID string) {
 	now := time.Now().Unix()
 	_, err := m.db.ExecContext(ctx,
-		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		now, now, envID)
+		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, now, envID, tenantID)
 	if err != nil {
 		log.Printf("environments: touch activity for %s: %v", envID, err)
 	}

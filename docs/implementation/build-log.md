@@ -313,3 +313,85 @@ docs/
     build-log.md              — this file
     self-healer-2026-03-10.md — self-healer session notes
 ```
+
+---
+
+## Deploy Notes (2026-03-19)
+
+Key operational learnings from the 2026-03-19 production deployment (10 commits: snapshots, kanbans, supervisory dashboard, typed errors, LRU cache, pagination, full test coverage).
+
+### CGO is Mandatory — No Cross-Compilation Without a C Toolchain
+
+`go-sqlite3` wraps the C SQLite library. `CGO_ENABLED=0` will produce a binary that crashes at runtime on Linux. **Do not attempt a macOS cross-compile for this project** without a proper cross-toolchain (e.g. `musl-cross`).
+
+**Correct build workflow:**
+```bash
+# 1. rsync source to server (or git pull on server)
+rsync -avz --exclude='.git' --exclude='bin/' . root@65.21.67.254:/root/agentic-hosting/
+
+# 2. Build on the server with CGO enabled
+ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254
+cd /root/agentic-hosting
+CGO_ENABLED=1 GOOS=linux go build -o bin/ah ./cmd/ah
+cp bin/ah /usr/local/bin/ah
+systemctl restart paasd.service
+journalctl -u paasd.service -f
+```
+
+Go 1.25 is installed at `/usr/local/go` on the server. If `go` is not in PATH, use `/usr/local/go/bin/go`.
+
+### Environment File is Required
+
+The systemd unit reads `EnvironmentFile=/etc/default/paasd`. If that file is absent, `AH_BOOTSTRAP_TOKEN` is unset and the binary refuses to start (or starts in a degraded mode depending on flags).
+
+Minimum `/etc/default/paasd` content:
+```
+AH_BOOTSTRAP_TOKEN=<64-char hex token>
+```
+
+Generate a token: `openssl rand -hex 32`
+
+This file must be provisioned during initial server setup. It is not created automatically.
+
+### Kill Orphan Processes Before Restarting the Service
+
+A prior manual `./ah` invocation can hold the API port (default 9090 or 8080 depending on config). The new service start will fail silently with "address already in use".
+
+Pre-deploy check:
+```bash
+ss -tlnp | grep 9090
+# or
+lsof -i :9090
+# Kill any orphan ah process:
+pkill -f '/usr/local/bin/ah' || true
+```
+
+### Enable the Service, Not Just Start It
+
+`systemctl start` runs the service now; `systemctl enable` makes it survive reboots. Both are required.
+
+```bash
+systemctl enable paasd.service
+systemctl start paasd.service
+```
+
+### Website Container Must Be Explicitly Rebuilt
+
+Changes to `website/` (including `website/dashboard/`) are not picked up until the container is rebuilt and restarted. The container does not watch for file changes.
+
+```bash
+# On server: rebuild and restart website container
+docker stop website && docker rm website
+docker build -t website ./website
+docker run -d --name website \
+  --network traefik-public \
+  -l "traefik.enable=true" \
+  ... <same Traefik labels as before> \
+  website
+```
+
+### Migrations That Ran This Session
+
+- `state_009_circuit_recovery` — circuit breaker recovery state
+- `state_010_kanbans` — kanban board tables
+- `state_010_snapshots` — snapshot/restore tables

@@ -360,7 +360,7 @@ func (s *Server) handleServiceEnvSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("AUDIT: tenant=%s set env vars for service=%s keys=%v", tenantID, serviceID, envKeys(vars))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "note": "restart service for changes to take effect"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "note": "restart will recreate the container with the new env vars"})
 }
 
 func (s *Server) handleServiceEnvDelete(w http.ResponseWriter, r *http.Request) {

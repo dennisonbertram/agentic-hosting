@@ -89,14 +89,14 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	limits := m.getResourceLimits(ctx, tenantID)
 
-	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, traefikLabels(serviceID, svc.DNSLabel, tenantID, m.baseDomain, port), limits)
+	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, traefikLabels(serviceID, svc.DNSLabel, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		return fmt.Errorf("run container: %w", err)
 	}
 
 	now := time.Now().Unix()
-	url := publicURL(serviceID, svc.DNSLabel, tenantID, m.baseDomain)
+	url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
 	res, err := m.db.ExecContext(ctx,
 		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
 		containerID, url, now, serviceID, tenantID,

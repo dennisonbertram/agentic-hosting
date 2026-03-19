@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds all configurable paths and addresses for the ah server.
@@ -47,7 +48,7 @@ func FromEnv() Config {
 		BuildDir:      envOr("AH_BUILD_DIR", filepath.Join(dataDir, "builds")),
 		NixpacksPath:  envOr("AH_NIXPACKS_PATH", "/usr/local/bin/nixpacks"),
 		DockerDataDir: envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
-		BaseDomain:    os.Getenv("AH_BASE_DOMAIN"),
+		BaseDomain:    strings.TrimSpace(os.Getenv("AH_BASE_DOMAIN")),
 	}
 }
 

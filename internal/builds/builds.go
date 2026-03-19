@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/builder"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 )
@@ -134,10 +135,10 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 	}
 
 	if req.SourceType != "git" {
-		return nil, fmt.Errorf("unsupported source_type: %s (only 'git' is supported)", req.SourceType)
+		return nil, apierr.Validation(fmt.Sprintf("unsupported source_type: %s (only 'git' is supported)", req.SourceType))
 	}
 	if req.SourceURL == "" {
-		return nil, fmt.Errorf("source_url is required for git builds")
+		return nil, apierr.Validation("source_url is required for git builds")
 	}
 	if err := validateGitURL(req.SourceURL); err != nil {
 		return nil, err
@@ -158,7 +159,7 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 		serviceID, tenantID,
 	).Scan(&svcExists)
 	if err != nil || svcExists == 0 {
-		return nil, fmt.Errorf("service not found")
+		return nil, apierr.NotFound("service not found")
 	}
 
 	buildID, err := generateID()
@@ -199,7 +200,7 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 			`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ?`,
 			now, buildID,
 		)
-		return nil, fmt.Errorf("build queue full; try again later")
+		return nil, apierr.Conflict("build queue full; try again later")
 	}
 
 	go m.runBuild(buildID, tenantID, serviceID, builder.BuildRequest{
@@ -356,7 +357,7 @@ func (m *Manager) GetBuild(ctx context.Context, tenantID, buildID string) (*Buil
 		buildID, tenantID,
 	).Scan(&b.ID, &b.ServiceID, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.Log, &b.StartedAt, &b.FinishedAt, &b.CreatedAt)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("build not found")
+		return nil, apierr.NotFound("build not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get build: %w", err)
@@ -432,7 +433,7 @@ func (m *Manager) GetBuildLogs(ctx context.Context, tenantID, buildID string) (s
 		buildID, tenantID,
 	).Scan(&logText)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("build not found")
+		return "", apierr.NotFound("build not found")
 	}
 	if err != nil {
 		return "", fmt.Errorf("get build logs: %w", err)
@@ -483,7 +484,7 @@ func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) err
 		return err
 	}
 	if build.Status != "pending" && build.Status != "running" {
-		return fmt.Errorf("build is not in progress (status: %s)", build.Status)
+		return apierr.Conflict(fmt.Sprintf("build is not in progress (status: %s)", build.Status))
 	}
 
 	if err := m.builder.CancelBuild(buildID); err != nil {
@@ -515,29 +516,29 @@ var validRefPattern = regexp.MustCompile(`^[A-Za-z0-9._/\-]+$`)
 
 func validateGitURL(rawURL string) error {
 	if len(rawURL) > 2048 {
-		return fmt.Errorf("source_url too long (max 2048)")
+		return apierr.Validation("source_url too long (max 2048)")
 	}
 	if !strings.HasPrefix(rawURL, "https://") {
-		return fmt.Errorf("only HTTPS git URLs are allowed")
+		return apierr.Validation("only HTTPS git URLs are allowed")
 	}
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid git URL: %w", err)
+		return apierr.Validation(fmt.Sprintf("invalid git URL: %v", err))
 	}
 
 	if u.User != nil {
-		return fmt.Errorf("credentials in URL are not allowed")
+		return apierr.Validation("credentials in URL are not allowed")
 	}
 
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("empty hostname in URL")
+		return apierr.Validation("empty hostname in URL")
 	}
 
 	// Only allow known trusted git hosting providers (prevents DNS rebinding)
 	if !allowedGitHosts[strings.ToLower(host)] {
-		return fmt.Errorf("git host %q is not in the allowed list; supported: github.com, gitlab.com, bitbucket.org, sr.ht, codeberg.org", host)
+		return apierr.Validation(fmt.Sprintf("git host %q is not in the allowed list; supported: github.com, gitlab.com, bitbucket.org, sr.ht, codeberg.org", host))
 	}
 
 	return nil
@@ -545,10 +546,10 @@ func validateGitURL(rawURL string) error {
 
 func validateSourceRef(ref string) error {
 	if len(ref) > 256 {
-		return fmt.Errorf("source_ref too long (max 256)")
+		return apierr.Validation("source_ref too long (max 256)")
 	}
 	if !validRefPattern.MatchString(ref) {
-		return fmt.Errorf("source_ref contains invalid characters")
+		return apierr.Validation("source_ref contains invalid characters")
 	}
 	return nil
 }

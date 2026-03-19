@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/cache"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
@@ -62,7 +63,7 @@ var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-
 
 type registrationLimiter struct {
 	mu             sync.Mutex
-	entries        map[string]*regEntry
+	entries        *cache.LRU[string, *regEntry]
 	globalCount    int
 	globalWindowAt time.Time
 }
@@ -81,7 +82,7 @@ const (
 )
 
 var regLimiter = &registrationLimiter{
-	entries: make(map[string]*regEntry),
+	entries: cache.New[string, *regEntry](regMaxEntries),
 	// globalWindowAt zero-value: first request starts the window
 }
 
@@ -89,14 +90,10 @@ func init() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
-			regLimiter.mu.Lock()
 			now := time.Now()
-			for k, v := range regLimiter.entries {
-				if now.After(v.windowAt) {
-					delete(regLimiter.entries, k)
-				}
-			}
-			regLimiter.mu.Unlock()
+			regLimiter.entries.DeleteFunc(func(_ string, v *regEntry) bool {
+				return now.After(v.windowAt)
+			})
 		}
 	}()
 }
@@ -117,23 +114,9 @@ func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 		return false, time.Until(rl.globalWindowAt)
 	}
 
-	if len(rl.entries) >= regMaxEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rl.entries {
-			if oldestKey == "" || v.windowAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.windowAt
-			}
-		}
-		if oldestKey != "" {
-			delete(rl.entries, oldestKey)
-		}
-	}
-
-	entry, exists := rl.entries[ip]
+	entry, exists := rl.entries.Get(ip)
 	if !exists || now.After(entry.windowAt) {
-		rl.entries[ip] = &regEntry{count: 1, windowAt: now.Add(regWindow)}
+		rl.entries.Set(ip, &regEntry{count: 1, windowAt: now.Add(regWindow)})
 		rl.globalCount++
 		return true, 0
 	}
@@ -318,39 +301,21 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 
 	var resp TenantUsageResponse
-	var err error
-	if err = s.store.StateDB.QueryRow(
-		`SELECT max_services, max_databases, max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
-		 FROM tenant_quotas
-		 WHERE tenant_id = ?`,
-		tenantID,
-	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit); err != nil {
-		if err == sql.ErrNoRows {
-			writeError(w, http.StatusNotFound, "tenant quota not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+	err := s.store.StateDB.QueryRow(
+		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit,
+		    (SELECT COUNT(*) FROM services WHERE tenant_id = ?),
+		    (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'),
+		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL)
+		 FROM tenant_quotas q
+		 WHERE q.tenant_id = ?`,
+		tenantID, tenantID, tenantID, tenantID,
+	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit,
+		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "tenant quota not found")
 		return
 	}
-
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`,
-		tenantID,
-	).Scan(&resp.Services.Used); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`,
-		tenantID,
-	).Scan(&resp.Databases.Used); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if err = s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
-		tenantID,
-	).Scan(&resp.APIKeys.Used); err != nil {
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

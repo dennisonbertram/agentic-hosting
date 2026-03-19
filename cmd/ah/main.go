@@ -14,21 +14,24 @@ import (
 
 	"github.com/dennisonbertram/agentic-hosting/internal/api"
 	"github.com/dennisonbertram/agentic-hosting/internal/builder"
-	"github.com/dennisonbertram/agentic-hosting/internal/gc"
-	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
+	"github.com/dennisonbertram/agentic-hosting/internal/config"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/gc"
+	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
 
 func main() {
+	cfg := config.FromEnv()
+
 	// Check for subcommands before flag.Parse
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "backup":
-			dbPath := "/var/lib/ah/ah.db"
+			dbPath := cfg.DBPath
 			if len(os.Args) > 2 {
 				dbPath = os.Args[2]
 			}
@@ -42,8 +45,8 @@ func main() {
 
 	port := flag.String("port", "8080", "HTTP port")
 	listenAddr := flag.String("listen-addr", "", "Listen address (default: 127.0.0.1; use 0.0.0.0 to bind all interfaces)")
-	dbPath := flag.String("db-path", "/var/lib/ah/ah.db", "Path to state SQLite database")
-	masterKeyPath := flag.String("master-key-path", "/var/lib/ah/master.key", "Path to master encryption key")
+	dbPath := flag.String("db-path", cfg.DBPath, "Path to state SQLite database")
+	masterKeyPath := flag.String("master-key-path", cfg.MasterKeyPath, "Path to master encryption key")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
@@ -121,7 +124,7 @@ func main() {
 	}
 
 	// Create Nixpacks builder and build manager
-	nixBuilder, err := builder.NewBuilder("/var/lib/ah/builds", "/usr/local/bin/nixpacks")
+	nixBuilder, err := builder.NewBuilder(cfg.BuildDir, cfg.NixpacksPath)
 	if err != nil {
 		log.Printf("WARNING: Nixpacks builder not available: %v", err)
 	}
@@ -190,7 +193,7 @@ func main() {
 	// Start garbage collector (5min interval)
 	gcCtx, gcCancel := context.WithCancel(context.Background())
 	defer gcCancel()
-	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute)
+	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute, cfg.BuildDir)
 	go garbageCollector.Run(gcCtx)
 
 	<-done

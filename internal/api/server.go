@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,7 @@ type ServerConfig struct {
 type databaseManager interface {
 	Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
 	List(ctx context.Context, tenantID string) ([]*databases.Database, error)
+	ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*databases.Database, error)
 	Get(ctx context.Context, tenantID, dbID string) (*databases.Database, error)
 	GetConnectionString(ctx context.Context, tenantID, dbID string) (string, error)
 	Delete(ctx context.Context, tenantID, dbID string) error
@@ -279,6 +282,24 @@ func normalizeIP(s string) string {
 		return ip.String()
 	}
 	return ""
+}
+
+// parsePagination extracts limit and offset query parameters with defaults.
+func parsePagination(r *http.Request) (limit, offset int, err error) {
+	limit = 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 200 {
+			return 0, 0, fmt.Errorf("limit must be between 1 and 200")
+		}
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			return 0, 0, fmt.Errorf("offset must be a non-negative integer")
+		}
+	}
+	return limit, offset, nil
 }
 
 // trustedRealIP extracts client IP from X-Real-Ip ONLY when the request comes

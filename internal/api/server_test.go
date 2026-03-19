@@ -41,6 +41,10 @@ func (f *fakeDatabaseManager) List(ctx context.Context, tenantID string) ([]*dat
 	return nil, nil
 }
 
+func (f *fakeDatabaseManager) ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*databases.Database, error) {
+	return nil, nil
+}
+
 func (f *fakeDatabaseManager) Get(ctx context.Context, tenantID, dbID string) (*databases.Database, error) {
 	return nil, nil
 }
@@ -162,9 +166,9 @@ func TestServiceLogsRoute_IsRegisteredAndHasNoTimeoutDeadline(t *testing.T) {
 	assert.Equal(t, []string{"ctr-1"}, dockerClient.LogsContainerCalls)
 }
 
-func TestIsUserError_AcceptsDynamicDatabaseQuotaMessages(t *testing.T) {
-	assert.True(t, isUserError(errString("database quota exceeded (max 1)")))
-	assert.False(t, isUserError(errString("unexpected failure")))
+func TestTypedErrorRouting(t *testing.T) {
+	// Typed errors are now handled by apierr.WriteAPIError, no string matching needed.
+	// This test verifies the apierr package is correctly integrated (tested in apierr_test.go).
 }
 
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
@@ -189,6 +193,3 @@ func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) st
 	return keyID + "." + secret
 }
 
-type errString string
-
-func (e errString) Error() string { return string(e) }

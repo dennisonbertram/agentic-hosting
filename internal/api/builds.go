@@ -2,11 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/go-chi/chi/v5"
@@ -35,23 +34,7 @@ func (s *Server) handleBuildCreate(w http.ResponseWriter, r *http.Request) {
 
 	build, err := s.buildManager.StartBuild(r.Context(), tenantID, serviceID, req)
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "not found") {
-			writeError(w, http.StatusNotFound, msg)
-			return
-		}
-		if strings.Contains(msg, "not allowed") || strings.Contains(msg, "unsupported") ||
-			strings.Contains(msg, "required") || strings.Contains(msg, "too long") ||
-			strings.Contains(msg, "invalid") || strings.Contains(msg, "credentials") {
-			writeError(w, http.StatusBadRequest, msg)
-			return
-		}
-		if strings.Contains(msg, "already running") {
-			writeError(w, http.StatusConflict, msg)
-			return
-		}
-		log.Printf("build create error: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to start build")
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
@@ -116,11 +99,7 @@ func (s *Server) handleBuildGet(w http.ResponseWriter, r *http.Request) {
 
 	build, err := s.buildManager.GetBuild(r.Context(), tenantID, buildID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "build not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to get build")
-		}
+		apierr.WriteAPIError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, build)
@@ -154,11 +133,7 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.buildManager.GetBuildLogs(r.Context(), tenantID, buildID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "build not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to get build logs")
-		}
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
@@ -176,14 +151,7 @@ func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 	buildID := chi.URLParam(r, "buildID")
 
 	if err := s.buildManager.CancelBuild(r.Context(), tenantID, buildID); err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "not found") {
-			writeError(w, http.StatusNotFound, "build not found")
-		} else if strings.Contains(msg, "not in progress") {
-			writeError(w, http.StatusConflict, msg)
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to cancel build")
-		}
+		apierr.WriteAPIError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})

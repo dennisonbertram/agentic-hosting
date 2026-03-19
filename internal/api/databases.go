@@ -2,9 +2,9 @@ package api
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/go-chi/chi/v5"
@@ -33,12 +33,7 @@ func (s *Server) handleDatabaseCreate(w http.ResponseWriter, r *http.Request) {
 
 	db, err := s.dbManager.Create(r.Context(), tenantID, req)
 	if err != nil {
-		log.Printf("database create error: %v", err)
-		if isUserError(err) {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to create database")
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
@@ -51,12 +46,20 @@ func (s *Server) handleDatabaseList(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID := middleware.GetTenantID(r.Context())
 
-	dbs, err := s.dbManager.List(r.Context(), tenantID)
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	dbs, err := s.dbManager.ListPaginated(r.Context(), tenantID, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list databases")
 		return
 	}
-
+	if dbs == nil {
+		dbs = []*databases.Database{}
+	}
 	writeJSON(w, http.StatusOK, dbs)
 }
 
@@ -69,11 +72,7 @@ func (s *Server) handleDatabaseGet(w http.ResponseWriter, r *http.Request) {
 
 	db, err := s.dbManager.Get(r.Context(), tenantID, dbID)
 	if err != nil {
-		if err.Error() == "database not found" {
-			writeError(w, http.StatusNotFound, "database not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to get database")
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
@@ -89,11 +88,7 @@ func (s *Server) handleDatabaseConnectionString(w http.ResponseWriter, r *http.R
 
 	connStr, err := s.dbManager.GetConnectionString(r.Context(), tenantID, dbID)
 	if err != nil {
-		if err.Error() == "database not found" {
-			writeError(w, http.StatusNotFound, "database not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to get connection string")
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
@@ -108,27 +103,9 @@ func (s *Server) handleDatabaseDelete(w http.ResponseWriter, r *http.Request) {
 	dbID := chi.URLParam(r, "dbID")
 
 	if err := s.dbManager.Delete(r.Context(), tenantID, dbID); err != nil {
-		if err.Error() == "database not found" {
-			writeError(w, http.StatusNotFound, "database not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to delete database")
+		apierr.WriteAPIError(w, err)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// isUserError checks if an error is a user-facing validation error.
-func isUserError(err error) bool {
-	msg := err.Error()
-	switch {
-	case len(msg) > 7 && msg[:7] == "invalid":
-		return true
-	case msg == "name is required (max 128 chars)":
-		return true
-	case len(msg) >= 23 && msg[:23] == "database quota exceeded":
-		return true
-	}
-	return false
 }

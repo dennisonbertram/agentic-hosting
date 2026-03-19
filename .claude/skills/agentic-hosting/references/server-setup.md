@@ -95,6 +95,9 @@ ExecStart=/usr/local/bin/paasd serve \
   --db-path /var/lib/paasd/paasd.db \
   --master-key-path /var/lib/paasd/master.key \
   --dev
+  # Optional: enable automatic subdomain routing for all services
+  # Requires wildcard DNS record *.apps.example.com → this server's IP
+  # --base-domain apps.example.com
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -245,6 +248,7 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed | p
 - [ ] Bootstrap token saved securely (from `/etc/default/paasd`)
 - [ ] Traefik is routing your domain to port 8080
 - [ ] First tenant registered with working API key
+- [ ] (Optional) If using `--base-domain`: wildcard DNS record `*.apps.example.com A <server-ip>` is live and resolving
 
 ---
 
@@ -260,6 +264,35 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed | p
 | `/etc/traefik/` | Traefik config and TLS certs |
 | `/etc/traefik/dynamic/` | Hot-reload routing rules |
 | `/var/lib/paasd/backups/` | Auto-backup destination |
+
+---
+
+## Security: Isolating Tenant Containers from Traefik (Production Multi-Tenant)
+
+By default, Docker containers in the same network can reach each other freely. In a multi-tenant deployment, a tenant container should not be able to connect directly to Traefik's port 80/443 — this could allow tenants to bypass access controls or perform SSRF against the proxy.
+
+Add `DOCKER-USER` iptables rules to block tenant-to-Traefik traffic. The `DOCKER-USER` chain is evaluated before Docker's own rules and survives container restarts:
+
+```bash
+# Block tenant containers from connecting to Traefik on port 80
+iptables -I DOCKER-USER -m conntrack --ctstate NEW -p tcp --dport 80 -j DROP
+
+# Block tenant containers from connecting to Traefik on port 443
+iptables -I DOCKER-USER -m conntrack --ctstate NEW -p tcp --dport 443 -j DROP
+```
+
+**Explanation:**
+- `DOCKER-USER` is a chain Docker creates specifically for operator-managed rules — rules here are not overwritten when Docker restarts.
+- `-m conntrack --ctstate NEW` matches only new connection attempts (not established/related traffic), which keeps existing connections intact.
+- `-j DROP` silently drops the packet rather than sending RST (use `-j REJECT` if you prefer immediate error feedback to tenants).
+
+**Make persistent** (rules are lost on reboot without this):
+```bash
+apt-get install -y iptables-persistent
+netfilter-persistent save
+```
+
+These rules apply to production multi-tenant deployments. In single-tenant or dev environments, this is not required.
 
 ---
 

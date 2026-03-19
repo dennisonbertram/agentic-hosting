@@ -198,7 +198,20 @@ SERVICE_ID=$(curl -s -X POST "$BASE_URL/v1/services" \
 echo "Service ID: $SERVICE_ID"
 ```
 
-The response will include a `url` field — that is the public URL for your service.
+The response will include a `url` field — that is the URL for your service.
+
+**URL modes:** The URL format depends on how the server was configured:
+- **Subdomain mode** (`--base-domain` set): `https://{dns-label}.apps.example.com` — publicly routable, TLS provided automatically by Traefik. The `dns_label` is derived from your service name (lowercased, non-alphanumeric characters replaced with hyphens).
+- **Localhost mode** (default, no `--base-domain`): `http://{service-id}.localhost` — not publicly routable, only accessible inside the server's Docker network. Manual Traefik config is needed to expose externally.
+
+To check which mode is active before creating a service:
+```bash
+curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/system/health/detailed" | jq '.baseDomain'
+# Empty string or null → localhost mode
+# "apps.example.com" → subdomain mode, services get https://{label}.apps.example.com
+```
+
+Reserved subdomains (`api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry`) are blocked and return `422`. DNS labels are globally unique — if the label is already taken by another tenant, you will also get `422` and must choose a different service name.
 
 ### Step 2 — Poll Until Running
 

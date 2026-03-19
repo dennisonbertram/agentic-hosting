@@ -1,6 +1,6 @@
 ---
 name: agentic-hosting
-description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", "set up a new server", "install agentic-hosting", "bootstrap a fresh server", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", "deploy to my server", or "set up PaaS from scratch".
+description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
 ---
 
 # agentic-hosting Operator Skill
@@ -101,7 +101,40 @@ done
 
 ### Service URLs
 
-Services receive a `<id>.localhost` URL by default — **not publicly routable**. To expose on a real domain, write a Traefik dynamic config file. See `references/custom-domains.md` for the full procedure.
+The URL a service receives depends on whether the platform was started with `--base-domain`:
+
+**Without `--base-domain` (default):**
+```
+http://{service-id}.localhost
+```
+Not publicly routable — only accessible inside the server's Docker network. Useful for internal services or when you are managing routing yourself.
+
+**With `--base-domain apps.example.com`:**
+```
+https://{dns-label}.apps.example.com
+```
+The `dns_label` is derived from the service name: lowercased, non-alphanumeric characters replaced with hyphens. Example: service named `My App` gets label `my-app` → URL `https://my-app.apps.example.com`.
+
+**Check which mode the platform is in:**
+```bash
+curl -s -H "Authorization: Bearer $AH_KEY" \
+  $AH_URL/v1/system/health/detailed | python3 -m json.tool
+# Look for "baseDomain" in the response
+# If present and non-empty → subdomain mode is active
+# If absent or empty → localhost mode
+```
+
+**Service name constraints when base-domain is set:**
+- Must produce a valid DNS label (max 63 chars after conversion)
+- Reserved names are blocked: `api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry` — using one returns `422`
+- DNS labels are globally unique across all tenants (first-come-first-served) — if another tenant has `blog.apps.example.com`, your service named `blog` will be rejected with `422`
+
+**Predicting the URL before creating a service:**
+Lowercase the name, replace any non-alphanumeric character with a hyphen, trim leading/trailing hyphens. Check `baseDomain` from the health endpoint, then the URL will be `https://{label}.{baseDomain}`.
+
+**The URL is stable.** Once a service is deployed its URL does not change, even if the daemon restarts with a different `--base-domain` value. The `dns_label` is stored in the database at creation time.
+
+See `references/custom-domains.md` for DNS wildcard setup and the full procedure for server operators.
 
 ---
 
@@ -206,7 +239,7 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban/admin-token | pytho
 | Error | Fix |
 |-------|-----|
 | `401 Unauthorized` | Check key format: `keyid.secret` |
-| `422 Unprocessable Entity` | Name/email already exists, or missing required field |
+| `422 Unprocessable Entity` | Name/email already exists, missing required field, reserved subdomain (`api`, `admin`, etc.), or DNS label too long |
 | `429 Too Many Requests` | Back off; respect `Retry-After` header |
 | `503 Service Unavailable` | Disk >90% or Docker down — check `/v1/system/health/detailed` |
 | Service stuck `deploying` >10 min | Server marks it `failed` at 10 min; check health, delete and retry |
@@ -221,13 +254,11 @@ For idempotency, limits, and advanced operations see `references/operations.md`.
 
 - No runtime log streaming (#11) — build logs work; container stdout/stderr via API not yet available
 - No API key recovery if all keys lost (#12) — requires SSH to the server
-- Custom domain assignment not in the API (#14) — use Traefik YAML workaround in `references/custom-domains.md`
 
 ---
 
 ## Additional Resources
 
-- **`references/server-setup.md`** — Install agentic-hosting on a fresh Ubuntu server from scratch
 - **`references/api-reference.md`** — Full endpoint listing with request/response shapes
 - **`references/operations.md`** — Idempotency, rate limits, circuit breaker, disk management
 - **`references/custom-domains.md`** — How to expose a service on a real domain via Traefik

@@ -1,10 +1,64 @@
 # Custom Domain Routing
 
+## Agent Quick Reference
+
+### 1 — Check if base-domain is configured
+
+```bash
+curl -s -H "Authorization: Bearer $AH_KEY" \
+  $AH_URL/v1/system/health/detailed | python3 -m json.tool
+```
+
+Look for `"baseDomain"` in the response:
+- `"baseDomain": "apps.example.com"` — subdomain mode active, services get `https://{label}.apps.example.com`
+- `"baseDomain": ""` or key absent — localhost mode, services get `http://{service-id}.localhost` (not publicly routable)
+
+### 2 — Predict the URL before creating a service
+
+Given service name `My Blog App` and baseDomain `apps.example.com`:
+1. Lowercase: `my blog app`
+2. Replace non-alphanumeric with hyphens: `my-blog-app`
+3. Trim leading/trailing hyphens (none here)
+4. Result: `https://my-blog-app.apps.example.com`
+
+The `url` field in the `POST /v1/services` response confirms the actual assigned URL.
+
+### 3 — What to do if service creation returns 422
+
+A `422` on service creation when base-domain is active means one of:
+
+| Reason | What to do |
+|--------|------------|
+| Reserved name (`api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry`) | Rename the service — append a suffix, e.g. `myapp-api` instead of `api` |
+| DNS label exceeds 63 characters | Shorten the service name |
+| DNS label already claimed by another tenant | Choose a different name — first-come-first-served is global across all tenants |
+| Name/email already exists (non-domain cause) | Standard duplicate check — use a unique name |
+
+```bash
+# Check what label your name would produce:
+echo "my-service-name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/^-//;s/-$//'
+```
+
+### 4 — URL stability
+
+The URL assigned at creation time is permanent and stored in the database. It will NOT change if:
+- The daemon restarts
+- `--base-domain` is changed or removed
+- The service is stopped and restarted
+
+The DNS label is locked to the service for its lifetime. Deleting the service releases the label.
+
+---
+
 ## Current State
 
-Services deployed via the API receive an auto-generated URL in the form `http://<uuid>.localhost`. This is **not publicly routable** — it only resolves inside the server's Docker network.
+There are two URL modes depending on how the daemon was started:
 
-Custom domain assignment via the API is not yet implemented (GitHub issue #14). Use the Traefik dynamic config workaround below until the API supports it.
+**Localhost mode (default, no `--base-domain`):**
+Services receive `http://<uuid>.localhost` — not publicly routable, only accessible inside the server's Docker network. Manual Traefik config is required to expose these publicly (see workaround below).
+
+**Subdomain mode (`--base-domain apps.example.com`):**
+Services automatically receive `https://{dns-label}.apps.example.com` via Traefik file provider. No manual Traefik config needed — routing is created automatically when the service is deployed. Requires a wildcard DNS record `*.apps.example.com → server IP` and a wildcard TLS certificate or wildcard ACME challenge.
 
 ---
 
@@ -88,15 +142,18 @@ http:
 
 ---
 
-## When the API Supports Custom Domains (future)
+## DNS Setup for Subdomain Mode (Server Operators)
 
-Once issue #14 ships, the workflow will be:
+To enable `--base-domain apps.example.com`:
 
-```bash
-curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/domains \
-  -H "Authorization: Bearer $AH_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"domain":"myapp.example.com"}'
-```
+1. **Wildcard DNS record**: Add `*.apps.example.com A <server-ip>` at your DNS provider. This routes all subdomains to the server.
 
-Until then, use the SSH + Traefik YAML approach above.
+2. **Start paasd with the flag**:
+   ```bash
+   paasd serve --base-domain apps.example.com ...
+   ```
+   The daemon writes Traefik dynamic config files under `/etc/traefik/dynamic/` automatically when services are deployed.
+
+3. **TLS**: Traefik requests Let's Encrypt certificates per-subdomain on first access. For high-volume deployments consider a wildcard cert to avoid rate limits. Point Traefik's ACME storage at a persistent path.
+
+4. **Verify**: After deploying a test service, the subdomain should respond within 30 seconds (Traefik file provider hot-reloads, Let's Encrypt HTTPS challenge completes).

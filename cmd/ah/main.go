@@ -48,6 +48,7 @@ func main() {
 	listenAddr := flag.String("listen-addr", "", "Listen address (default: 127.0.0.1; use 0.0.0.0 to bind all interfaces)")
 	dbPath := flag.String("db-path", cfg.DBPath, "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", cfg.MasterKeyPath, "Path to master encryption key")
+	baseDomain := flag.String("base-domain", cfg.BaseDomain, "Base domain for public service URLs (e.g. example.com)")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
@@ -154,6 +155,7 @@ func main() {
 		BuildManager:     buildMgr,
 		DatabaseManager:  dbMgr,
 		KanbanManager:    kanbanMgr,
+		BaseDomain:       *baseDomain,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

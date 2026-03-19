@@ -15,6 +15,7 @@ type Config struct {
 	BuildDir      string // nixpacks build work directory (default: {DataDir}/builds)
 	NixpacksPath  string // path to nixpacks binary (default: /usr/local/bin/nixpacks)
 	DockerDataDir string // Docker data root for disk checks (default: /var/lib/docker)
+	BaseDomain    string // base domain for public service URLs (default: "" = localhost fallback)
 }
 
 const defaultDataDir = "/var/lib/ah"
@@ -46,6 +47,7 @@ func FromEnv() Config {
 		BuildDir:      envOr("AH_BUILD_DIR", filepath.Join(dataDir, "builds")),
 		NixpacksPath:  envOr("AH_NIXPACKS_PATH", "/usr/local/bin/nixpacks"),
 		DockerDataDir: envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
+		BaseDomain:    os.Getenv("AH_BASE_DOMAIN"),
 	}
 }
 

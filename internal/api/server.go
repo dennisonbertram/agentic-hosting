@@ -33,6 +33,7 @@ type ServerConfig struct {
 	BuildManager     *builds.Manager
 	DatabaseManager  databaseManager
 	KanbanManager    kanbanManager
+	BaseDomain       string
 }
 
 type kanbanManager interface {
@@ -57,6 +58,7 @@ type Server struct {
 	devMode           bool
 	bootstrapToken    string
 	openRegistration  bool
+	baseDomain        string
 	router            chi.Router
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
@@ -94,6 +96,7 @@ func NewServer(cfg ServerConfig) *Server {
 		devMode:           cfg.DevMode,
 		bootstrapToken:    cfg.BootstrapToken,
 		openRegistration:  cfg.OpenRegistration,
+		baseDomain:        cfg.BaseDomain,
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,

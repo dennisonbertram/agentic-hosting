@@ -14,10 +14,11 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
-	"github.com/dennisonbertram/agentic-hosting/internal/kanban"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/snapshots"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
@@ -31,7 +32,14 @@ type ServerConfig struct {
 	Docker           docker.Client
 	BuildManager     *builds.Manager
 	DatabaseManager  databaseManager
-	KanbanManager    *kanban.Manager
+	KanbanManager    kanbanManager
+}
+
+type kanbanManager interface {
+	Create(ctx context.Context, tenantID string) (*kanbans.Kanban, error)
+	Get(ctx context.Context, tenantID string) (*kanbans.Kanban, error)
+	GetAdminToken(ctx context.Context, tenantID string) (string, error)
+	Delete(ctx context.Context, tenantID string) error
 }
 
 type databaseManager interface {
@@ -53,9 +61,10 @@ type Server struct {
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
 	svcManager        *services.Manager
+	snapshotManager   *snapshots.Manager
 	buildManager      *builds.Manager
 	dbManager         databaseManager
-	kanbanManager     *kanban.Manager
+	kanbanManager     kanbanManager
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
@@ -73,8 +82,10 @@ func NewServer(cfg ServerConfig) *Server {
 	idem := middleware.NewIdempotencyStore()
 
 	var svcMgr *services.Manager
+	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
 		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 
 	s := &Server{
@@ -86,6 +97,7 @@ func NewServer(cfg ServerConfig) *Server {
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,
+		snapshotManager:   snapMgr,
 		buildManager:      cfg.BuildManager,
 		dbManager:         cfg.DatabaseManager,
 		kanbanManager:     cfg.KanbanManager,
@@ -161,6 +173,12 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/services/{serviceID}/env", s.handleServiceEnvSet)
 		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)
 
+		// Snapshot routes
+		r.Post("/v1/services/{serviceID}/snapshots", s.handleSnapshotCreate)
+		r.Get("/v1/snapshots", s.handleSnapshotList)
+		r.Get("/v1/snapshots/{snapshotID}", s.handleSnapshotGet)
+		r.Delete("/v1/snapshots/{snapshotID}", s.handleSnapshotDelete)
+
 		// Build routes
 		r.Get("/v1/builds", s.handleBuildListAll)
 		r.Post("/v1/services/{serviceID}/builds", s.handleBuildCreate)
@@ -177,9 +195,8 @@ func (s *Server) setupRoutes() {
 
 		// Kanban routes (except POST which needs longer timeout)
 		r.Get("/v1/kanban", s.handleKanbanGet)
-		r.Get("/v1/kanban/{kanbanID}", s.handleKanbanGet)
-		r.Get("/v1/kanban/{kanbanID}/api-token", s.handleKanbanAPIToken)
-		r.Delete("/v1/kanban/{kanbanID}", s.handleKanbanDelete)
+		r.Get("/v1/kanban/admin-token", s.handleKanbanAdminToken)
+		r.Delete("/v1/kanban", s.handleKanbanDelete)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally

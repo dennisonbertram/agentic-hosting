@@ -317,19 +317,37 @@ func TestTraefikLabels(t *testing.T) {
 }
 
 func TestCreateSetsDNSLabel(t *testing.T) {
-	stateDB := testutil.NewStateDB(t)
-	seedTenant(t, stateDB)
-	mock := &testutil.MockDockerClient{}
-	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	t.Run("with baseDomain", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		seedTenant(t, stateDB)
+		mock := &testutil.MockDockerClient{}
+		masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "")
-	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
-		Name:  "my-service",
-		Image: "nginx:latest",
-		Port:  8080,
+		mgr := NewManager(stateDB, mock, masterKey, "example.com")
+		svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
+			Name:  "my-service",
+			Image: "nginx:latest",
+			Port:  8080,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "my-service", svc.DNSLabel, "dns_label should be derived from service name when baseDomain is set")
 	})
-	require.NoError(t, err)
-	assert.Equal(t, "my-service", svc.DNSLabel, "dns_label should be derived from service name")
+
+	t.Run("without baseDomain skips dns_label", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		seedTenant(t, stateDB)
+		mock := &testutil.MockDockerClient{}
+		masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+		mgr := NewManager(stateDB, mock, masterKey, "")
+		svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
+			Name:  "my-service",
+			Image: "nginx:latest",
+			Port:  8080,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "", svc.DNSLabel, "dns_label should be empty when baseDomain is not set")
+	})
 }
 
 func seedTenant(t *testing.T, db *sql.DB) {

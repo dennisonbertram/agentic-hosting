@@ -96,9 +96,10 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	}
 
 	now := time.Now().Unix()
+	url := publicURL(serviceID, svc.DNSLabel, tenantID, m.baseDomain)
 	res, err := m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
-		containerID, now, serviceID, tenantID,
+		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		containerID, url, now, serviceID, tenantID,
 	)
 	if err != nil {
 		_ = m.docker.StopContainer(ctx, containerID)

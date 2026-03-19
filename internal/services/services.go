@@ -164,6 +164,12 @@ func traefikLabels(serviceID, dnsLabel, tenantID, baseDomain string, port int) m
 		return fallback
 	}
 
+	// Re-validate dnsLabel to guard against corrupt data reaching Traefik.
+	if !isDNSLabelSafe(dnsLabel) {
+		log.Printf("WARNING: invalid dnsLabel %q in traefikLabels — falling back to localhost", dnsLabel)
+		return fallback
+	}
+
 	// Validate baseDomain to prevent injection via corrupted config.
 	if !baseDomainRe.MatchString(baseDomain) {
 		log.Printf("WARNING: invalid baseDomain %q in traefikLabels — falling back to localhost", baseDomain)
@@ -275,6 +281,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	if err := ValidateImage(req.Image); err != nil {
 		return nil, err
 	}
+	if err := ValidateDNSName(req.Name); err != nil {
+		return nil, err
+	}
 
 	// Validate env vars if provided
 	if len(req.Env) > 0 {
@@ -316,11 +325,18 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, apierr.Validation("port must be between 1 and 65535")
 	}
 
-	// Derive DNS label from service name
-	dnsLabel := toDNSLabel(req.Name)
-	if !isDNSLabelSafe(dnsLabel) {
-		dnsLabel = "" // fallback to UUID-based URL
+	// Derive DNS label from service name only when baseDomain is configured.
+	// When baseDomain is empty (localhost fallback), skip dns_label to avoid
+	// squatting globally-unique subdomains that can't actually be routed.
+	var dnsLabel string
+	if m.baseDomain != "" {
+		dnsLabel = toDNSLabel(req.Name)
+		if !isDNSLabelSafe(dnsLabel) {
+			dnsLabel = "" // fallback to UUID-based URL
+		}
 	}
+
+	url := publicURL(id, dnsLabel, tenantID, m.baseDomain)
 
 	// Use a transaction so service insert + env vars are atomic.
 	tx, err := m.db.BeginTx(ctx, nil)
@@ -330,9 +346,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'created', ?, ?, '', ?, ?)`,
-		id, tenantID, req.Name, dnsLabel, req.Image, port, now, now,
+		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 'created', ?, ?, '', ?, ?, ?)`,
+		id, tenantID, req.Name, dnsLabel, req.Image, port, url, now, now,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "dns_label") {
@@ -371,7 +387,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		Status:    "created",
 		Image:     req.Image,
 		Port:      port,
-		URL:       publicURL(id, dnsLabel, tenantID, m.baseDomain),
+		URL:       url,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
@@ -477,9 +493,10 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 
 	now := time.Now().Unix()
+	url := publicURL(serviceID, svc.DNSLabel, tenantID, m.baseDomain)
 	res, err := m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
-		containerID, now, serviceID, tenantID,
+		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		containerID, url, now, serviceID, tenantID,
 	)
 	if err != nil {
 		// Container is running but DB update failed; try to clean up
@@ -684,7 +701,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		offset = 0
 	}
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
+		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, url, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
 		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		tenantID, limit, offset,
 	)
@@ -699,7 +716,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		var containerID sql.NullString
 		var lastCrashedAt sql.NullInt64
 		var circuitOpen int
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpen, &lastCrashedAt, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.URL, &s.LastError, &s.CrashCount, &circuitOpen, &lastCrashedAt, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan service: %w", err)
 		}
 		if containerID.Valid {
@@ -709,7 +726,10 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		if lastCrashedAt.Valid {
 			s.LastCrashedAt = lastCrashedAt.Int64
 		}
-		s.URL = publicURL(s.ID, s.DNSLabel, s.TenantID, m.baseDomain)
+		// Fall back to computed URL for backward compatibility (pre-migration rows).
+		if s.URL == "" {
+			s.URL = publicURL(s.ID, s.DNSLabel, s.TenantID, m.baseDomain)
+		}
 		svcs = append(svcs, s)
 	}
 	return svcs, rows.Err()
@@ -728,7 +748,10 @@ func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service
 			svc.Status = info.Status
 		}
 	}
-	svc.URL = publicURL(svc.ID, svc.DNSLabel, svc.TenantID, m.baseDomain)
+	// Fall back to computed URL for backward compatibility (pre-migration rows with empty url).
+	if svc.URL == "" {
+		svc.URL = publicURL(svc.ID, svc.DNSLabel, svc.TenantID, m.baseDomain)
+	}
 	return svc, nil
 }
 
@@ -799,10 +822,10 @@ func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Se
 	var circuitOpenInt int
 	var lastCrashedAtNull sql.NullInt64
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
+		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, url, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
 		 FROM services WHERE id = ? AND tenant_id = ?`,
 		serviceID, tenantID,
-	).Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpenInt, &lastCrashedAtNull, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.URL, &s.LastError, &s.CrashCount, &circuitOpenInt, &lastCrashedAtNull, &s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("service not found")
 	}

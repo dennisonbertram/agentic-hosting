@@ -31,6 +31,12 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID := middleware.GetTenantID(r.Context())
 
+	// Support creating a service from a snapshot.
+	if fromSnapshot := r.URL.Query().Get("from_snapshot"); fromSnapshot != "" {
+		s.handleServiceCreateFromSnapshot(w, r, tenantID, fromSnapshot)
+		return
+	}
+
 	var req services.CreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDecodeError(w, err)
@@ -73,6 +79,90 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
 			log.Printf("deploy failed for service %s: %v", sid, err)
+			return
+		}
+	}(tenantID, svc.ID)
+
+	svc.Status = "deploying"
+	writeJSON(w, http.StatusCreated, svc)
+}
+
+// handleServiceCreateFromSnapshot creates a new service from an existing snapshot.
+// The snapshot's image, env vars, and port are used as the template for the new service.
+func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.Request, tenantID, snapshotID string) {
+	if !s.requireSnapshotManager(w) {
+		return
+	}
+
+	// Decode request body for the new service name (and optional overrides).
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if len(body.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
+		return
+	}
+
+	// Load the snapshot.
+	snap, err := s.snapshotManager.Get(r.Context(), tenantID, snapshotID)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	// Restore env vars from the snapshot (tenant-scoped for isolation).
+	envVars, err := s.snapshotManager.RestoreEnvVars(r.Context(), tenantID, snapshotID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to restore snapshot env vars")
+		log.Printf("snapshot restore env vars error: %v", err)
+		return
+	}
+
+	// Validate snapshot data before creating (defense-in-depth against corrupted snapshots).
+	if err := services.ValidateImage(snap.ImageRef); err != nil {
+		writeError(w, http.StatusBadRequest, "snapshot contains invalid image: "+err.Error())
+		return
+	}
+	if len(envVars) > 0 {
+		if err := services.ValidateEnvVars(envVars); err != nil {
+			writeError(w, http.StatusBadRequest, "snapshot contains invalid env vars: "+err.Error())
+			return
+		}
+	}
+	if snap.Port < 1 || snap.Port > 65535 {
+		writeError(w, http.StatusBadRequest, "snapshot contains invalid port")
+		return
+	}
+
+	// Create the service using the snapshot's image and port.
+	req := services.CreateRequest{
+		Name:  body.Name,
+		Image: snap.ImageRef,
+		Port:  snap.Port,
+		Env:   envVars,
+	}
+
+	svc, err := s.svcManager.Create(r.Context(), tenantID, req)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	// Deploy asynchronously. The image is already in the local registry so this
+	// should be nearly instant (<5s) since no Nixpacks build or remote pull is needed.
+	go func(tid, sid string) {
+		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
+			log.Printf("deploy from snapshot failed for service %s: %v", sid, err)
 			return
 		}
 	}(tenantID, svc.ID)

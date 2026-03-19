@@ -7,3 +7,6 @@ master.key
 .env
 vendor/
 repomix.txt
+# Code review artifacts
+repomix-output.txt
+code-reviews/

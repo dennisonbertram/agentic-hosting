@@ -31,6 +31,8 @@ type Client interface {
 	LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
 	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
 	PullImage(ctx context.Context, img string) error
+	TagImage(ctx context.Context, source, target string) error
+	RemoveImage(ctx context.Context, imageRef string) error
 	ListContainersByLabel(ctx context.Context, label, value string) ([]string, error)
 	GetContainerLabels(ctx context.Context, containerID string) map[string]string
 	GetContainerName(ctx context.Context, containerID string) string
@@ -331,6 +333,17 @@ func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 	defer reader.Close()
 	_, _ = io.Copy(io.Discard, reader)
 	return nil
+}
+
+// TagImage adds a new tag to an existing image.
+func (c *DockerClient) TagImage(ctx context.Context, source, target string) error {
+	return c.cli.ImageTag(ctx, source, target)
+}
+
+// RemoveImage removes an image by reference. Used to clean up snapshot tags.
+func (c *DockerClient) RemoveImage(ctx context.Context, imageRef string) error {
+	_, err := c.cli.ImageRemove(ctx, imageRef, image.RemoveOptions{PruneChildren: false})
+	return err
 }
 
 // ListContainersByLabel lists containers matching a label filter.

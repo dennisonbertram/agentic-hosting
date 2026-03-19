@@ -17,6 +17,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/snapshots"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
@@ -51,6 +52,7 @@ type Server struct {
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
 	svcManager        *services.Manager
+	snapshotManager   *snapshots.Manager
 	buildManager      *builds.Manager
 	dbManager         databaseManager
 	authRateLimiter   *middleware.RateLimiter
@@ -70,8 +72,10 @@ func NewServer(cfg ServerConfig) *Server {
 	idem := middleware.NewIdempotencyStore()
 
 	var svcMgr *services.Manager
+	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
 		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 
 	s := &Server{
@@ -83,6 +87,7 @@ func NewServer(cfg ServerConfig) *Server {
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,
+		snapshotManager:   snapMgr,
 		buildManager:      cfg.BuildManager,
 		dbManager:         cfg.DatabaseManager,
 		authRateLimiter:   rl,
@@ -156,6 +161,12 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/env", s.handleServiceEnvGet)
 		r.Post("/v1/services/{serviceID}/env", s.handleServiceEnvSet)
 		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)
+
+		// Snapshot routes
+		r.Post("/v1/services/{serviceID}/snapshots", s.handleSnapshotCreate)
+		r.Get("/v1/snapshots", s.handleSnapshotList)
+		r.Get("/v1/snapshots/{snapshotID}", s.handleSnapshotGet)
+		r.Delete("/v1/snapshots/{snapshotID}", s.handleSnapshotDelete)
 
 		// Build routes
 		r.Get("/v1/builds", s.handleBuildListAll)

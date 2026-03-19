@@ -113,5 +113,10 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return fmt.Errorf("service deleted during deploy")
 	}
 
+	// Write Traefik file-provider route (non-fatal on error)
+	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
+		log.Printf("WARNING: failed to write traefik route for service %s: %v", serviceID, err)
+	}
+
 	return nil
 }

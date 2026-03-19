@@ -146,7 +146,7 @@ func main() {
 	var buildMgr *builds.Manager
 	if nixBuilder != nil {
 		// Create service manager early to get DeployImage function
-		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain)
+		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 
@@ -168,6 +168,7 @@ func main() {
 		DatabaseManager:  dbMgr,
 		KanbanManager:    kanbanMgr,
 		BaseDomain:       *baseDomain,
+		TraefikConfigDir: cfg.TraefikConfigDir,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

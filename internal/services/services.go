@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,65 +152,87 @@ func publicURL(serviceID, dnsLabel, baseDomain string) string {
 	return fmt.Sprintf("http://%s.localhost", serviceID)
 }
 
-// traefikLabels returns Traefik routing labels for a service container.
+// traefikLabels returns an empty map. Routing is now handled by the Traefik file
+// provider (writeTraefikRoute/deleteTraefikRoute) instead of Docker labels.
+// Container-level traefik.enable=false is set in buildServiceContainerConfig to
+// prevent malicious image labels from being read by Traefik's Docker provider.
 func traefikLabels(serviceID, dnsLabel, baseDomain string, port int) map[string]string {
-	// Localhost fallback labels (used when baseDomain is empty or validation fails).
-	fallback := map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                     fmt.Sprintf("Host(`%s.localhost`)", serviceID),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):              "web",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
-	}
+	return map[string]string{}
+}
 
-	if baseDomain == "" || dnsLabel == "" {
-		return fallback
+// writeTraefikRoute writes a Traefik dynamic config file for a service.
+// The file is read by Traefik's file provider and hot-reloaded.
+// Returns nil (no-op) in localhost mode or when traefikConfigDir is empty.
+func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain string, port int) error {
+	if m.traefikConfigDir == "" || dnsLabel == "" || baseDomain == "" {
+		return nil
 	}
-
-	// Re-validate dnsLabel to guard against corrupt data reaching Traefik.
-	if !isDNSLabelSafe(dnsLabel) {
-		log.Printf("WARNING: invalid dnsLabel %q in traefikLabels — falling back to localhost", dnsLabel)
-		return fallback
+	if !isDNSLabelSafe(dnsLabel) || !baseDomainRe.MatchString(baseDomain) {
+		return nil
 	}
-
-	// Validate baseDomain to prevent injection via corrupted config.
-	if !baseDomainRe.MatchString(baseDomain) {
-		log.Printf("WARNING: invalid baseDomain %q in traefikLabels — falling back to localhost", baseDomain)
-		return fallback
-	}
-
 	host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
-	return map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                      fmt.Sprintf("Host(`%s`)", host),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):               "websecure",
-		fmt.Sprintf("traefik.http.routers.%s.tls", serviceID):                       "true",
-		fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", serviceID):          "letsencrypt",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
+	containerName := fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
+	portStr := strconv.Itoa(port)
+
+	content := fmt.Sprintf(`http:
+  routers:
+    svc-%s:
+      rule: "Host(`+"`%s`"+`)"
+      entryPoints:
+        - websecure
+      service: svc-%s
+      tls:
+        certResolver: letsencrypt
+  services:
+    svc-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%s"
+`, serviceID, host, serviceID, serviceID, containerName, portStr)
+
+	path := filepath.Join(m.traefikConfigDir, serviceID+".yml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write traefik route %s: %w", path, err)
 	}
+	return nil
+}
+
+// deleteTraefikRoute removes the Traefik dynamic config file for a service.
+func (m *Manager) deleteTraefikRoute(serviceID string) error {
+	if m.traefikConfigDir == "" {
+		return nil
+	}
+	path := filepath.Join(m.traefikConfigDir, serviceID+".yml")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete traefik route %s: %w", path, err)
+	}
+	return nil
 }
 
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
-	db          *sql.DB
-	docker      docker.Client
-	masterKey   []byte
-	baseDomain  string
-	deploySem   chan struct{} // bounded deploy concurrency
-	deployQueue chan struct{} // bounded queue for waiting deploys
+	db               *sql.DB
+	docker           docker.Client
+	masterKey        []byte
+	baseDomain       string
+	traefikConfigDir string       // Traefik file provider directory; empty disables file-based routing
+	deploySem        chan struct{} // bounded deploy concurrency
+	deployQueue      chan struct{} // bounded queue for waiting deploys
 }
 
 // NewManager creates a service manager.
-func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain string) *Manager {
+func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain, traefikConfigDir string) *Manager {
 	if docker == nil {
 		panic("ah: NewManager requires a non-nil Docker client")
 	}
 	return &Manager{
-		db:          db,
-		docker:      docker,
-		masterKey:   masterKey,
-		baseDomain:  baseDomain,
-		deploySem:   make(chan struct{}, maxConcurrentDeploys),
-		deployQueue: make(chan struct{}, maxQueuedDeploys),
+		db:               db,
+		docker:           docker,
+		masterKey:        masterKey,
+		baseDomain:       baseDomain,
+		traefikConfigDir: traefikConfigDir,
+		deploySem:        make(chan struct{}, maxConcurrentDeploys),
+		deployQueue:      make(chan struct{}, maxQueuedDeploys),
 	}
 }
 
@@ -514,6 +539,12 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		_ = m.docker.RemoveContainer(ctx, containerID)
 		return fmt.Errorf("service deleted during deploy")
 	}
+
+	// Write Traefik file-provider route (non-fatal on error)
+	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
+		log.Printf("WARNING: failed to write traefik route for service %s: %v", serviceID, err)
+	}
+
 	return nil
 }
 
@@ -622,6 +653,11 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 	if cleanupErr := m.docker.StopAndRemoveByName(ctx, expectedName); cleanupErr != nil {
 		// Not an error — container may not exist by this name
 		log.Printf("services: cleanup by name %s: %v", expectedName, cleanupErr)
+	}
+
+	// Remove Traefik file-provider route (non-fatal on error)
+	if err := m.deleteTraefikRoute(serviceID); err != nil {
+		log.Printf("WARNING: failed to delete traefik route for service %s: %v", serviceID, err)
 	}
 
 	_, err = m.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND tenant_id = ?`, serviceID, tenantID)

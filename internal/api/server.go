@@ -34,6 +34,7 @@ type ServerConfig struct {
 	DatabaseManager  databaseManager
 	KanbanManager    kanbanManager
 	BaseDomain       string
+	TraefikConfigDir string
 }
 
 type kanbanManager interface {
@@ -86,7 +87,7 @@ func NewServer(cfg ServerConfig) *Server {
 	var svcMgr *services.Manager
 	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
-		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain)
+		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir)
 		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 

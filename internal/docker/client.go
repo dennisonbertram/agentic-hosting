@@ -187,8 +187,14 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 		},
 	}
 
+	containerCfg := buildServiceContainerConfig(tenantID, serviceID, img, port, envVars, extraLabels)
+	// CRITICAL: force traefik.enable=false to prevent Traefik's Docker provider
+	// from reading ANY labels from this container (including malicious image labels).
+	// Routing is handled by the Traefik file provider instead.
+	containerCfg.Labels["traefik.enable"] = "false"
+
 	resp, err := c.cli.ContainerCreate(ctx,
-		buildServiceContainerConfig(tenantID, serviceID, img, port, envVars, extraLabels),
+		containerCfg,
 		hostCfg,
 		&network.NetworkingConfig{},
 		nil,

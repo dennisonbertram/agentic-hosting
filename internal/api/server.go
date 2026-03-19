@@ -14,6 +14,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanban"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
@@ -30,6 +31,7 @@ type ServerConfig struct {
 	Docker           docker.Client
 	BuildManager     *builds.Manager
 	DatabaseManager  databaseManager
+	KanbanManager    *kanban.Manager
 }
 
 type databaseManager interface {
@@ -53,6 +55,7 @@ type Server struct {
 	svcManager        *services.Manager
 	buildManager      *builds.Manager
 	dbManager         databaseManager
+	kanbanManager     *kanban.Manager
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
@@ -85,6 +88,7 @@ func NewServer(cfg ServerConfig) *Server {
 		svcManager:        svcMgr,
 		buildManager:      cfg.BuildManager,
 		dbManager:         cfg.DatabaseManager,
+		kanbanManager:     cfg.KanbanManager,
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
@@ -170,6 +174,12 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/databases/{dbID}", s.handleDatabaseGet)
 		r.Get("/v1/databases/{dbID}/connection-string", s.handleDatabaseConnectionString)
 		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
+
+		// Kanban routes (except POST which needs longer timeout)
+		r.Get("/v1/kanban", s.handleKanbanGet)
+		r.Get("/v1/kanban/{kanbanID}", s.handleKanbanGet)
+		r.Get("/v1/kanban/{kanbanID}/api-token", s.handleKanbanAPIToken)
+		r.Delete("/v1/kanban/{kanbanID}", s.handleKanbanDelete)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -182,6 +192,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
+		r.Post("/v1/kanban", s.handleKanbanCreate)
 	})
 
 	s.router = r

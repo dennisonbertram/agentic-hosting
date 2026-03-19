@@ -20,6 +20,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanban"
 	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )
@@ -139,6 +140,13 @@ func main() {
 	// Create database manager
 	dbMgr := databases.NewManager(store.StateDB, dockerClient, masterKey[:32])
 
+	// Create kanban manager
+	kanbanDomain := strings.TrimSpace(os.Getenv("AH_KANBAN_DOMAIN"))
+	if kanbanDomain == "" {
+		kanbanDomain = "kanban.agentic.hosting"
+	}
+	kanbanMgr := kanban.NewManager(store.StateDB, dockerClient, masterKey[:32], kanbanDomain)
+
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
 		Store:            store,
@@ -149,6 +157,7 @@ func main() {
 		Docker:           dockerClient,
 		BuildManager:     buildMgr,
 		DatabaseManager:  dbMgr,
+		KanbanManager:    kanbanMgr,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

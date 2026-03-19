@@ -58,6 +58,9 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 	if len(req.Name) > 128 {
 		return nil, apierr.Validation("snapshot name must be 128 characters or fewer")
 	}
+	if len(req.Description) > 1024 {
+		return nil, apierr.Validation("snapshot description must be 1024 characters or fewer")
+	}
 
 	// Look up the source service and verify tenant ownership.
 	var svcID, svcTenantID, svcName, svcStatus, svcImage string
@@ -126,11 +129,18 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 	if err != nil && err != sql.ErrNoRows {
 		return nil, fmt.Errorf("query tenant quotas: %w", err)
 	}
-	if err == nil {
-		rcJSON, err := json.Marshal(map[string]interface{}{
-			"max_memory_mb": maxMemoryMB.Int64,
-			"max_cpu_cores": maxCPUCores.Float64,
-		})
+	if err == sql.ErrNoRows {
+		log.Printf("WARNING: no tenant quotas found for tenant %s during snapshot creation", tenantID)
+	}
+	if maxMemoryMB.Valid || maxCPUCores.Valid {
+		rc := make(map[string]interface{})
+		if maxMemoryMB.Valid {
+			rc["max_memory_mb"] = maxMemoryMB.Int64
+		}
+		if maxCPUCores.Valid {
+			rc["max_cpu_cores"] = maxCPUCores.Float64
+		}
+		rcJSON, err := json.Marshal(rc)
 		if err != nil {
 			return nil, fmt.Errorf("marshal resource config: %w", err)
 		}
@@ -139,13 +149,25 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 
 	now := time.Now().Unix()
 
-	_, err = m.db.ExecContext(ctx,
+	// Use a transaction so we can rollback the DB insert if it fails,
+	// keeping the tagged image as best-effort cleanup.
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshotID, tenantID, serviceID, req.Name, req.Description, imageRef, string(envJSON), resourceConfig, svcPort, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert snapshot: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit snapshot: %w", err)
 	}
 
 	return &Snapshot{
@@ -239,12 +261,12 @@ func (m *Manager) Delete(ctx context.Context, tenantID, snapshotID string) error
 }
 
 // RestoreEnvVars decrypts and returns the environment variables stored in a
-// snapshot. This is used internally during create-from-snapshot flows.
-func (m *Manager) RestoreEnvVars(ctx context.Context, snapshotID string) (map[string]string, error) {
+// snapshot. Requires tenantID for tenant isolation — never call without it.
+func (m *Manager) RestoreEnvVars(ctx context.Context, tenantID, snapshotID string) (map[string]string, error) {
 	var envEncrypted string
 	err := m.db.QueryRowContext(ctx,
-		`SELECT env_encrypted FROM snapshots WHERE id = ?`,
-		snapshotID,
+		`SELECT env_encrypted FROM snapshots WHERE id = ? AND tenant_id = ?`,
+		snapshotID, tenantID,
 	).Scan(&envEncrypted)
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("snapshot not found")

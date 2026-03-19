@@ -118,8 +118,8 @@ func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Restore env vars from the snapshot.
-	envVars, err := s.snapshotManager.RestoreEnvVars(r.Context(), snapshotID)
+	// Restore env vars from the snapshot (tenant-scoped for isolation).
+	envVars, err := s.snapshotManager.RestoreEnvVars(r.Context(), tenantID, snapshotID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to restore snapshot env vars")
 		log.Printf("snapshot restore env vars error: %v", err)

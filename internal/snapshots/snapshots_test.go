@@ -183,7 +183,7 @@ func TestSnapshotCreate_WithEnvVars(t *testing.T) {
 	assert.Equal(t, "nginx:latest", mock.TagImageCalls[0][0])
 
 	// Verify env vars are captured by restoring them.
-	restored, err := mgr.RestoreEnvVars(ctx, snap.ID)
+	restored, err := mgr.RestoreEnvVars(ctx, tenantID, snap.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "localhost", restored["DB_HOST"])
 	assert.Equal(t, "secret123", restored["DB_PASSWORD"])
@@ -353,11 +353,31 @@ func TestSnapshotRestoreEnvVars_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Restore and verify decrypted values.
-	restored, err := mgr.RestoreEnvVars(ctx, snap.ID)
+	restored, err := mgr.RestoreEnvVars(ctx, tenantID, snap.ID)
 	require.NoError(t, err)
 	assert.Len(t, restored, 2)
 	assert.Equal(t, "abc123", restored["API_KEY"])
 	assert.Equal(t, "xyz789", restored["SECRET_KEY"])
+}
+
+func TestSnapshotRestoreEnvVars_WrongTenant(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	snap, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "isolated-env"})
+	require.NoError(t, err)
+
+	// Insert a second tenant.
+	_, err = db.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+		"tenant-2", "Other Tenant", "other@example.com",
+	)
+	require.NoError(t, err)
+
+	// Attempt to restore as wrong tenant — should not be found.
+	_, err = mgr.RestoreEnvVars(ctx, "tenant-2", snap.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
 }
 
 func TestSnapshotRestoreEnvVars_Empty(t *testing.T) {
@@ -368,7 +388,7 @@ func TestSnapshotRestoreEnvVars_Empty(t *testing.T) {
 	snap, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "no-env"})
 	require.NoError(t, err)
 
-	restored, err := mgr.RestoreEnvVars(ctx, snap.ID)
+	restored, err := mgr.RestoreEnvVars(ctx, tenantID, snap.ID)
 	require.NoError(t, err)
 	assert.NotNil(t, restored)
 	assert.Empty(t, restored)

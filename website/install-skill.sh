@@ -13,7 +13,8 @@ mkdir -p "$SKILL_DIR" "$REF_DIR" "$CMD_DIR"
 # Skill
 curl -fsSL "$REPO/.claude/skills/agentic-hosting/SKILL.md" -o "$SKILL_DIR/SKILL.md"
 
-# Reference files (loaded on demand — full API docs, operations guide, custom domains)
+# Reference files (loaded on demand — full API docs, operations guide, custom domains, server setup)
+curl -fsSL "$REPO/.claude/skills/agentic-hosting/references/server-setup.md"    -o "$REF_DIR/server-setup.md"
 curl -fsSL "$REPO/.claude/skills/agentic-hosting/references/api-reference.md"   -o "$REF_DIR/api-reference.md"
 curl -fsSL "$REPO/.claude/skills/agentic-hosting/references/operations.md"      -o "$REF_DIR/operations.md"
 curl -fsSL "$REPO/.claude/skills/agentic-hosting/references/custom-domains.md"  -o "$REF_DIR/custom-domains.md"
@@ -25,7 +26,7 @@ done
 
 echo ""
 echo "✓ Skill installed:    $SKILL_DIR"
-echo "✓ References:         $REF_DIR (3 files)"
+echo "✓ References:         $REF_DIR (4 files)"
 echo "✓ Commands installed: /ah-deploy /ah-status /ah-db /ah-logs /ah-register /ah-snapshot"
 echo ""
 echo "Set your server credentials in your shell profile:"

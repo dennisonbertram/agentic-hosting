@@ -1,6 +1,6 @@
 ---
 name: agentic-hosting
-description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
+description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", "set up a new server", "install agentic-hosting", "bootstrap a fresh server", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", "deploy to my server", or "set up PaaS from scratch".
 ---
 
 # agentic-hosting Operator Skill
@@ -227,6 +227,7 @@ For idempotency, limits, and advanced operations see `references/operations.md`.
 
 ## Additional Resources
 
+- **`references/server-setup.md`** — Install agentic-hosting on a fresh Ubuntu server from scratch
 - **`references/api-reference.md`** — Full endpoint listing with request/response shapes
 - **`references/operations.md`** — Idempotency, rate limits, circuit breaker, disk management
 - **`references/custom-domains.md`** — How to expose a service on a real domain via Traefik

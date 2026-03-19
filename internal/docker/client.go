@@ -238,13 +238,15 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 		env = append(env, k+"="+v)
 	}
 
-	labels := map[string]string{
-		"ah.tenant":  tenantID,
-		"ah.service": serviceID,
-	}
+	// Apply extraLabels first so that ah.* labels below cannot be overwritten.
+	labels := make(map[string]string, len(extraLabels)+2)
 	for k, v := range extraLabels {
 		labels[k] = v
 	}
+	// ah.* labels are set last — they are immutable control-plane keys used
+	// for cleanup/attribution and must not be overridable by callers.
+	labels["ah.tenant"] = tenantID
+	labels["ah.service"] = serviceID
 
 	return &container.Config{
 		Image:  img,

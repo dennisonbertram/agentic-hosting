@@ -139,9 +139,19 @@ func toDNSLabel(name string) string {
 	return s
 }
 
-// baseDomainRe validates a base domain: lowercase alphanumeric labels separated
-// by dots or hyphens, no leading/trailing dot or hyphen, no consecutive dots.
-var baseDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+// baseDomainRe validates a base domain: labels of lowercase alphanumeric/hyphens
+// separated by single dots, no leading/trailing dot or hyphen, no consecutive dots.
+var baseDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// reservedDNSLabels is a denylist of subdomains tenants cannot claim under the
+// shared base domain. These names are either platform-reserved or are commonly
+// expected to be platform endpoints.
+var reservedDNSLabels = map[string]bool{
+	"api": true, "admin": true, "dashboard": true, "traefik": true,
+	"www": true, "mail": true, "smtp": true, "health": true,
+	"status": true, "metrics": true, "grafana": true, "prometheus": true,
+	"registry": true, "auth": true, "login": true, "oauth": true,
+}
 
 // publicURL returns the public URL for a service.
 // baseDomain is validated before use; falls back to localhost if invalid.
@@ -190,9 +200,16 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
           - url: "http://%s:%s"
 `, serviceID, host, serviceID, serviceID, containerName, portStr)
 
+	// Write atomically: write to a temp file then rename to avoid Traefik
+	// reading a partially-written config during a hot reload.
 	path := filepath.Join(m.traefikConfigDir, serviceID+".yml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return fmt.Errorf("write traefik route %s: %w", path, err)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0640); err != nil {
+		return fmt.Errorf("write traefik route tmp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename traefik route %s: %w", path, err)
 	}
 	return nil
 }
@@ -361,6 +378,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		dnsLabel = toDNSLabel(req.Name)
 		if !isDNSLabelSafe(dnsLabel) {
 			dnsLabel = "" // fallback to UUID-based URL
+		}
+		if reservedDNSLabels[dnsLabel] {
+			return nil, apierr.Validation(fmt.Sprintf("service name %q is reserved and cannot be used as a subdomain", dnsLabel))
 		}
 	}
 

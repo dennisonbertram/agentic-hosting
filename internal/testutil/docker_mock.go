@@ -90,6 +90,30 @@ type MockDockerClient struct {
 	// ListVolumes
 	ListVolumesFn    func(ctx context.Context, prefix string) ([]string, error)
 	ListVolumesCalls []string // prefixes queried
+
+	// RunDevEnvironment
+	RunDevEnvironmentFn    func(ctx context.Context, cfg docker.RunDevEnvConfig) (string, error)
+	RunDevEnvironmentCalls int
+
+	// ExecCreate
+	ExecCreateFn    func(ctx context.Context, containerID string, cmd []string, tty bool) (string, error)
+	ExecCreateCalls int
+
+	// ExecAttach
+	ExecAttachFn    func(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error)
+	ExecAttachCalls int
+
+	// ExecInspect
+	ExecInspectFn    func(ctx context.Context, execID string) (int, bool, error)
+	ExecInspectCalls int
+
+	// CopyToContainer
+	CopyToContainerFn    func(ctx context.Context, containerID, dstPath string, content io.Reader) error
+	CopyToContainerCalls int
+
+	// CopyFromContainer
+	CopyFromContainerFn    func(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error)
+	CopyFromContainerCalls int
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -253,4 +277,53 @@ func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]st
 		return m.ListVolumesFn(ctx, prefix)
 	}
 	return nil, nil
+}
+
+func (m *MockDockerClient) RunDevEnvironment(ctx context.Context, cfg docker.RunDevEnvConfig) (string, error) {
+	m.RunDevEnvironmentCalls++
+	if m.RunDevEnvironmentFn != nil {
+		return m.RunDevEnvironmentFn(ctx, cfg)
+	}
+	return "mock-env-container-" + cfg.EnvID, nil
+}
+
+func (m *MockDockerClient) ExecCreate(ctx context.Context, containerID string, cmd []string, tty bool) (string, error) {
+	m.ExecCreateCalls++
+	if m.ExecCreateFn != nil {
+		return m.ExecCreateFn(ctx, containerID, cmd, tty)
+	}
+	return "mock-exec-id", nil
+}
+
+func (m *MockDockerClient) ExecAttach(ctx context.Context, execID string) (io.Reader, io.Writer, func() error, error) {
+	m.ExecAttachCalls++
+	if m.ExecAttachFn != nil {
+		return m.ExecAttachFn(ctx, execID)
+	}
+	r, w := io.Pipe()
+	return r, w, func() error { return nil }, nil
+}
+
+func (m *MockDockerClient) ExecInspect(ctx context.Context, execID string) (int, bool, error) {
+	m.ExecInspectCalls++
+	if m.ExecInspectFn != nil {
+		return m.ExecInspectFn(ctx, execID)
+	}
+	return 0, false, nil
+}
+
+func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader) error {
+	m.CopyToContainerCalls++
+	if m.CopyToContainerFn != nil {
+		return m.CopyToContainerFn(ctx, containerID, dstPath, content)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error) {
+	m.CopyFromContainerCalls++
+	if m.CopyFromContainerFn != nil {
+		return m.CopyFromContainerFn(ctx, containerID, srcPath)
+	}
+	return io.NopCloser(strings.NewReader("")), nil
 }

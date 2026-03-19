@@ -14,6 +14,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
@@ -22,14 +23,15 @@ import (
 )
 
 type ServerConfig struct {
-	Store            *db.Store
-	MasterKey        []byte
-	DevMode          bool
-	BootstrapToken   string
-	OpenRegistration bool
-	Docker           docker.Client
-	BuildManager     *builds.Manager
-	DatabaseManager  databaseManager
+	Store              *db.Store
+	MasterKey          []byte
+	DevMode            bool
+	BootstrapToken     string
+	OpenRegistration   bool
+	Docker             docker.Client
+	BuildManager       *builds.Manager
+	DatabaseManager    databaseManager
+	EnvironmentManager environmentManager
 }
 
 type databaseManager interface {
@@ -39,6 +41,18 @@ type databaseManager interface {
 	Get(ctx context.Context, tenantID, dbID string) (*databases.Database, error)
 	GetConnectionString(ctx context.Context, tenantID, dbID string) (string, error)
 	Delete(ctx context.Context, tenantID, dbID string) error
+}
+
+type environmentManager interface {
+	Create(ctx context.Context, tenantID string, req environments.CreateRequest) (*environments.Environment, error)
+	List(ctx context.Context, tenantID string) ([]*environments.Environment, error)
+	ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*environments.Environment, error)
+	Get(ctx context.Context, tenantID, envID string) (*environments.Environment, error)
+	Delete(ctx context.Context, tenantID, envID string) error
+	Start(ctx context.Context, tenantID, envID string) error
+	Stop(ctx context.Context, tenantID, envID string) error
+	TouchActivity(ctx context.Context, tenantID, envID string)
+	GetContainerID(ctx context.Context, tenantID, envID string) (string, error)
 }
 
 type Server struct {
@@ -53,6 +67,8 @@ type Server struct {
 	svcManager        *services.Manager
 	buildManager      *builds.Manager
 	dbManager         databaseManager
+	envManager        environmentManager
+	docker            docker.Client
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
@@ -85,6 +101,8 @@ func NewServer(cfg ServerConfig) *Server {
 		svcManager:        svcMgr,
 		buildManager:      cfg.BuildManager,
 		dbManager:         cfg.DatabaseManager,
+		envManager:        cfg.EnvironmentManager,
+		docker:            cfg.Docker,
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
@@ -101,7 +119,6 @@ func (s *Server) setupRoutes() {
 	// Authorization and bootstrap tokens are never logged.
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
-	r.Use(maxBodySize(1 << 20))
 	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
 	r.Use(chimw.Throttle(200))
 
@@ -118,6 +135,7 @@ func (s *Server) setupRoutes() {
 
 	// Public routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
+		r.Use(maxBodySize(1 << 20))
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
@@ -129,6 +147,7 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
 		r.Use(s.idempotencyStore.Middleware)
+		r.Use(maxBodySize(1 << 20))
 		r.Use(chimw.Timeout(30 * time.Second))
 
 		r.Get("/v1/system/health/detailed", s.handleHealthDetailed)
@@ -170,6 +189,14 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/databases/{dbID}", s.handleDatabaseGet)
 		r.Get("/v1/databases/{dbID}/connection-string", s.handleDatabaseConnectionString)
 		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
+
+		// Environment routes
+		r.Post("/v1/environments", s.handleEnvironmentCreate)
+		r.Get("/v1/environments", s.handleEnvironmentList)
+		r.Get("/v1/environments/{envID}", s.handleEnvironmentGet)
+		r.Delete("/v1/environments/{envID}", s.handleEnvironmentDelete)
+		r.Post("/v1/environments/{envID}/start", s.handleEnvironmentStart)
+		r.Post("/v1/environments/{envID}/stop", s.handleEnvironmentStop)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -179,9 +206,30 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
 		r.Use(s.idempotencyStore.Middleware)
+		r.Use(maxBodySize(1 << 20))
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
+
+		// Environment file download (no body needed)
+		r.Get("/v1/environments/{envID}/files/*", s.handleEnvironmentFileDownload)
+	})
+
+	// Environment file upload — larger body size
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMW)
+		r.Use(s.authRateLimiter.Middleware)
+		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(maxBodySize(50 << 20))
+		r.Post("/v1/environments/{envID}/files", s.handleEnvironmentFileUpload)
+	})
+
+	// WebSocket routes (no timeout, no idempotency)
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMW)
+		r.Use(s.authRateLimiter.Middleware)
+		r.Use(s.globalRateLimiter.Middleware)
+		r.Get("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
 	})
 
 	s.router = r

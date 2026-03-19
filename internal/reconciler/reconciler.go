@@ -210,13 +210,16 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						ELSE circuit_open_count
 					END
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+				now, now, now, now, now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
 			}
-			var circuitOpen int
-			r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+			var circuitOpen, openCount int
+			r.db.QueryRowContext(ctx, `SELECT circuit_open, circuit_open_count FROM services WHERE id = ?`, s.id).Scan(&circuitOpen, &openCount)
 			if circuitOpen == 1 {
+				// Set retry_at using actual open count for exponential backoff
+				retryAt := time.Now().Add(circuitRetryBackoff(openCount)).Unix()
+				r.db.ExecContext(ctx, `UPDATE services SET circuit_retry_at = ? WHERE id = ?`, retryAt, s.id)
 				log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
 				// Stop the container when circuit opens to defeat Docker restart policy.
 				_ = r.docker.StopContainer(ctx, s.containerID)
@@ -279,13 +282,15 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 					ELSE circuit_open_count
 				END
 			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+			now, now, now, now, now, s.id, s.tenantID)
 		if err != nil {
 			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
 		}
-		var circuitOpen int
-		r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
+		var circuitOpen, openCount int
+		r.db.QueryRowContext(ctx, `SELECT circuit_open, circuit_open_count FROM services WHERE id = ?`, s.id).Scan(&circuitOpen, &openCount)
 		if circuitOpen == 1 {
+			retryAt := time.Now().Add(circuitRetryBackoff(openCount)).Unix()
+			r.db.ExecContext(ctx, `UPDATE services SET circuit_retry_at = ? WHERE id = ?`, retryAt, s.id)
 			log.Printf("reconciler: service %s circuit breaker OPEN after unhealthy restarts — removing container", s.id)
 			_ = r.docker.RemoveContainer(ctx, s.containerID)
 		}
@@ -415,6 +420,60 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			if currentDBCID != cid {
 				log.Printf("reconciler: WARNING: split-brain detected — container %s claims service %s but DB has container_id=%q; GC will clean up after age gate",
 					cid[:12], svcID, currentDBCID)
+			}
+		}
+	}
+
+	// 5. Check environments marked "running" — if container gone or exited, mark "stopped"
+	envRows, err := r.db.QueryContext(ctx,
+		`SELECT id, container_id FROM environments WHERE status = 'running' AND container_id != ''`)
+	if err != nil {
+		log.Printf("reconciler: failed to query environments: %v", err)
+	} else {
+		type envRecord struct{ id, containerID string }
+		var runningEnvs []envRecord
+		for envRows.Next() {
+			var e envRecord
+			if err := envRows.Scan(&e.id, &e.containerID); err != nil {
+				continue
+			}
+			runningEnvs = append(runningEnvs, e)
+		}
+		envRows.Close()
+
+		for _, e := range runningEnvs {
+			checked++
+			if !containerSet[e.containerID] {
+				_, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil && isNotFoundError(inspectErr) {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', container_id = '', updated_at = ? WHERE id = ?`,
+						time.Now().Unix(), e.id)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container not found)", e.id)
+						fixed++
+					}
+				} else if inspectErr != nil {
+					log.Printf("reconciler: transient Docker error for environment %s, skipping: %v", e.id, inspectErr)
+				}
+			} else {
+				info, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil {
+					continue
+				}
+				if info.Status == "exited" || info.Status == "dead" {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ?`,
+						time.Now().Unix(), e.id)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container %s)", e.id, info.Status)
+						fixed++
+					}
+				}
 			}
 		}
 	}

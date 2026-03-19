@@ -139,7 +139,7 @@ func toDNSLabel(name string) string {
 // publicURL returns the public URL for a service.
 func publicURL(serviceID, dnsLabel, tenantID, baseDomain string) string {
 	if baseDomain != "" && dnsLabel != "" {
-		return fmt.Sprintf("https://%s.%s.%s", dnsLabel, tenantID, baseDomain)
+		return fmt.Sprintf("https://%s.%s", dnsLabel, baseDomain)
 	}
 	return fmt.Sprintf("http://%s.localhost", serviceID)
 }
@@ -164,19 +164,13 @@ func traefikLabels(serviceID, dnsLabel, tenantID, baseDomain string, port int) m
 		return fallback
 	}
 
-	// Validate tenantID to prevent Traefik rule injection.
-	if !tenantIDRe.MatchString(tenantID) {
-		log.Printf("WARNING: invalid tenantID %q in traefikLabels — falling back to localhost", tenantID)
-		return fallback
-	}
-
 	// Validate baseDomain to prevent injection via corrupted config.
 	if !baseDomainRe.MatchString(baseDomain) {
 		log.Printf("WARNING: invalid baseDomain %q in traefikLabels — falling back to localhost", baseDomain)
 		return fallback
 	}
 
-	host := fmt.Sprintf("%s.%s.%s", dnsLabel, tenantID, baseDomain)
+	host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
 	return map[string]string{
 		"traefik.enable": "true",
 		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                      fmt.Sprintf("Host(`%s`)", host),
@@ -341,6 +335,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		id, tenantID, req.Name, dnsLabel, req.Image, port, now, now,
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "dns_label") {
+			return nil, apierr.Conflict("subdomain already taken: " + dnsLabel + " — choose a different service name")
+		}
 		return nil, fmt.Errorf("insert service: %w", err)
 	}
 

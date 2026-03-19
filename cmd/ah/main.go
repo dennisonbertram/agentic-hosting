@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -52,6 +53,17 @@ func main() {
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
+
+	// Validate --base-domain if provided.
+	if *baseDomain != "" {
+		if strings.Contains(*baseDomain, "://") {
+			log.Fatalf("invalid --base-domain %q: must be a bare domain (e.g. example.com), not a URL", *baseDomain)
+		}
+		baseDomainValidRe := regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
+		if !baseDomainValidRe.MatchString(*baseDomain) {
+			log.Fatalf("invalid --base-domain %q: must be a valid DNS name (lowercase alphanumeric, dots, hyphens)", *baseDomain)
+		}
+	}
 
 	// Bootstrap token is always required unless --dev + --open-registration
 	bootstrapToken := strings.TrimSpace(os.Getenv("AH_BOOTSTRAP_TOKEN"))

@@ -249,7 +249,7 @@ func TestToDNSLabel(t *testing.T) {
 func TestPublicURL(t *testing.T) {
 	t.Run("with baseDomain", func(t *testing.T) {
 		url := publicURL("svc-123", "my-app", "tenant-1", "example.com")
-		assert.Equal(t, "https://my-app.tenant-1.example.com", url)
+		assert.Equal(t, "https://my-app.example.com", url)
 	})
 
 	t.Run("without baseDomain", func(t *testing.T) {
@@ -269,7 +269,7 @@ func TestTraefikLabels(t *testing.T) {
 		labels := traefikLabels("svc-123", "my-app", "abc123def456", "example.com", 8080)
 
 		assert.Equal(t, "true", labels["traefik.enable"])
-		assert.Equal(t, "Host(`my-app.abc123def456.example.com`)", labels[fmt.Sprintf("traefik.http.routers.%s.rule", "svc-123")])
+		assert.Equal(t, "Host(`my-app.example.com`)", labels[fmt.Sprintf("traefik.http.routers.%s.rule", "svc-123")])
 		assert.Equal(t, "websecure", labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", "svc-123")])
 		assert.Equal(t, "true", labels[fmt.Sprintf("traefik.http.routers.%s.tls", "svc-123")])
 		assert.Equal(t, "letsencrypt", labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", "svc-123")])
@@ -297,11 +297,11 @@ func TestTraefikLabels(t *testing.T) {
 		assert.True(t, hasRouter, "router rule should use serviceID as key")
 	})
 
-	t.Run("invalid tenantID falls back to localhost", func(t *testing.T) {
-		// tenantID with hyphens, uppercase, or special chars should fall back
+	t.Run("tenantID not in host rule", func(t *testing.T) {
+		// tenantID is no longer part of the host — only dnsLabel.baseDomain
 		labels := traefikLabels("svc-1", "app", "tenant-1", "example.com", 8080)
-		assert.Equal(t, "Host(`svc-1.localhost`)", labels["traefik.http.routers.svc-1.rule"])
-		assert.Equal(t, "web", labels["traefik.http.routers.svc-1.entrypoints"])
+		assert.Equal(t, "Host(`app.example.com`)", labels["traefik.http.routers.svc-1.rule"])
+		assert.Equal(t, "websecure", labels["traefik.http.routers.svc-1.entrypoints"])
 	})
 
 	t.Run("invalid baseDomain falls back to localhost", func(t *testing.T) {
@@ -309,9 +309,10 @@ func TestTraefikLabels(t *testing.T) {
 		assert.Equal(t, "Host(`svc-1.localhost`)", labels["traefik.http.routers.svc-1.rule"])
 	})
 
-	t.Run("empty tenantID falls back to localhost", func(t *testing.T) {
+	t.Run("empty tenantID still produces domain labels", func(t *testing.T) {
+		// tenantID is no longer part of the host rule
 		labels := traefikLabels("svc-1", "app", "", "example.com", 8080)
-		assert.Equal(t, "Host(`svc-1.localhost`)", labels["traefik.http.routers.svc-1.rule"])
+		assert.Equal(t, "Host(`app.example.com`)", labels["traefik.http.routers.svc-1.rule"])
 	})
 }
 

@@ -43,9 +43,9 @@ func TestBuildServiceContainerConfig_Labels(t *testing.T) {
 		t.Errorf("ah.service = %q, want %q", got, serviceID)
 	}
 
-	// traefik.docker.network base label
-	if got := cfg.Labels["traefik.docker.network"]; got != "traefik-public" {
-		t.Errorf("traefik.docker.network = %q, want %q", got, "traefik-public")
+	// traefik.docker.network base label should NOT be present (removed for cross-tenant isolation)
+	if _, ok := cfg.Labels["traefik.docker.network"]; ok {
+		t.Error("traefik.docker.network should not be set as a base label")
 	}
 
 	// Hardcoded Traefik routing labels should NOT be present — they come from extraLabels now

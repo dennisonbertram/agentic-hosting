@@ -221,15 +221,6 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 		return "", fmt.Errorf("start container: %w", err)
 	}
 
-	// Connect the service container to traefik-public so Traefik can route to it
-	// regardless of which tenant network it's on. Non-fatal: dev mode may not have
-	// the traefik-public network.
-	if connErr := c.cli.NetworkConnect(ctx, "traefik-public", resp.ID, nil); connErr != nil {
-		if !strings.Contains(connErr.Error(), "already") {
-			log.Printf("WARNING: failed to connect container %s to traefik-public: %v", resp.ID, connErr)
-		}
-	}
-
 	return resp.ID, nil
 }
 
@@ -242,9 +233,8 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 	}
 
 	labels := map[string]string{
-		"ah.tenant":              tenantID,
-		"ah.service":             serviceID,
-		"traefik.docker.network": "traefik-public",
+		"ah.tenant":  tenantID,
+		"ah.service": serviceID,
 	}
 	for k, v := range extraLabels {
 		labels[k] = v
@@ -257,23 +247,23 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 	}
 }
 
-// findTraefikContainer finds the Traefik container by image or name.
+// findTraefikContainer finds the platform Traefik container by exact name.
+// Only matches the container named "paas-traefik" to prevent tenant containers
+// from being mistaken for Traefik (e.g. by deploying a traefik image).
 func (c *DockerClient) findTraefikContainer(ctx context.Context) (string, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
 	if err != nil {
 		return "", err
 	}
 	for _, ctr := range containers {
-		if strings.Contains(ctr.Image, "traefik") {
-			return ctr.ID, nil
-		}
 		for _, name := range ctr.Names {
-			if strings.Contains(name, "traefik") {
+			// Docker prefixes container names with "/".
+			if name == "/paas-traefik" || name == "paas-traefik" {
 				return ctr.ID, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("traefik container not found")
+	return "", fmt.Errorf("traefik container not found (expected container named paas-traefik)")
 }
 
 // StopContainer stops a running container with a 10s timeout.

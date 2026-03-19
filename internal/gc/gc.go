@@ -193,6 +193,32 @@ func (g *GC) findOrphanedContainers(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	// Check environment containers
+	envContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "environment")
+	if err != nil {
+		return orphaned, nil // don't fail the whole function
+	}
+	for _, id := range envContainers {
+		info, inspectErr := g.docker.InspectContainer(ctx, id)
+		if inspectErr != nil {
+			continue
+		}
+		if info.CreatedAt.After(cutoff) {
+			continue
+		}
+
+		var count int
+		err := g.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM environments WHERE container_id = ?`, id).Scan(&count)
+		if err != nil {
+			log.Printf("gc: DB error checking environment container %s, skipping: %v", id[:12], err)
+			continue
+		}
+		if count == 0 {
+			orphaned = append(orphaned, id)
+		}
+	}
+
 	return orphaned, nil
 }
 
@@ -215,6 +241,27 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 		if err != nil {
 			// DB error — do NOT treat as orphaned. Log and skip.
 			log.Printf("gc: DB error checking volume %s, skipping: %v", name, err)
+			continue
+		}
+		if count == 0 {
+			orphaned = append(orphaned, name)
+		}
+	}
+
+	// Also check environment volumes
+	envVolumes, err := g.docker.ListVolumes(ctx, "ah-env-")
+	if err != nil {
+		return orphaned, nil
+	}
+	for _, name := range envVolumes {
+		if !strings.HasPrefix(name, "ah-env-") {
+			continue
+		}
+		var count int
+		err := g.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM environments WHERE volume_name = ?`, name).Scan(&count)
+		if err != nil {
+			log.Printf("gc: DB error checking env volume %s, skipping: %v", name, err)
 			continue
 		}
 		if count == 0 {

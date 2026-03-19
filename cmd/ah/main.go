@@ -18,6 +18,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/config"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
 	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
@@ -139,6 +140,9 @@ func main() {
 	// Create database manager
 	dbMgr := databases.NewManager(store.StateDB, dockerClient, masterKey[:32])
 
+	// Create environment manager
+	envMgr := environments.NewManager(store.StateDB, dockerClient)
+
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
 		Store:            store,
@@ -148,7 +152,8 @@ func main() {
 		OpenRegistration: *openRegistration,
 		Docker:           dockerClient,
 		BuildManager:     buildMgr,
-		DatabaseManager:  dbMgr,
+		DatabaseManager:    dbMgr,
+		EnvironmentManager: envMgr,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).
@@ -196,10 +201,17 @@ func main() {
 	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute, cfg.BuildDir)
 	go garbageCollector.Run(gcCtx)
 
+	// Start environment idle detector (60s interval)
+	idleCtx, idleCancel := context.WithCancel(context.Background())
+	defer idleCancel()
+	idleDetector := environments.NewIdleDetector(store.StateDB, dockerClient, 60*time.Second)
+	go idleDetector.Run(idleCtx)
+
 	<-done
 	log.Println("shutting down...")
 	reconcilerCancel()
 	gcCancel()
+	idleCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

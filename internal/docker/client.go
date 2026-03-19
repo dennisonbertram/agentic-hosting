@@ -42,6 +42,12 @@ type Client interface {
 	StopAndRemoveByName(ctx context.Context, name string) error
 	PruneDanglingImages(ctx context.Context) (int, error)
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
+	RunDevEnvironment(ctx context.Context, cfg RunDevEnvConfig) (string, error)
+	ExecCreate(ctx context.Context, containerID string, cmd []string, tty bool) (string, error)
+	ExecAttach(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error)
+	ExecInspect(ctx context.Context, execID string) (int, bool, error)
+	CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader) error
+	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error)
 }
 
 // Compile-time check: DockerClient must satisfy Client.
@@ -503,6 +509,133 @@ func (c *DockerClient) PruneDanglingImages(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("prune images: %w", err)
 	}
 	return len(report.ImagesDeleted), nil
+}
+
+// RunDevEnvConfig holds parameters for running a dev environment container.
+type RunDevEnvConfig struct {
+	TenantID   string
+	EnvID      string
+	Image      string
+	VolumeName string
+	Limits     *ResourceLimits
+}
+
+// RunDevEnvironment creates and starts a dev environment container with gVisor.
+// Unlike services: writable filesystem, no Traefik routing, sleep infinity entrypoint,
+// /workspace volume mount, higher PidsLimit (512), larger tmpfs.
+func (c *DockerClient) RunDevEnvironment(ctx context.Context, cfg RunDevEnvConfig) (string, error) {
+	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID[:8], cfg.EnvID[:16])
+	tenantNet := TenantNetworkName(cfg.TenantID)
+
+	memoryBytes := int64(512 * 1024 * 1024)
+	nanoCPUs := int64(1_000_000_000)
+	if cfg.Limits != nil {
+		if cfg.Limits.MemoryMB > 0 {
+			memoryBytes = cfg.Limits.MemoryMB * 1024 * 1024
+		}
+		if cfg.Limits.CPUCores > 0 {
+			nanoCPUs = int64(cfg.Limits.CPUCores * 1_000_000_000)
+		}
+	}
+
+	hostCfg := &container.HostConfig{
+		Runtime: "runsc",
+		Resources: container.Resources{
+			Memory:     memoryBytes,
+			NanoCPUs:   nanoCPUs,
+			PidsLimit:  int64Ptr(512),
+			MemorySwap: memoryBytes,
+		},
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
+		NetworkMode:   container.NetworkMode(tenantNet),
+		CapDrop:       []string{"ALL"},
+		SecurityOpt:   []string{"no-new-privileges"},
+		Tmpfs: map[string]string{
+			"/tmp": "rw,noexec,nosuid,size=256m",
+		},
+		Mounts: []mount.Mount{
+			{
+				Type:   mount.TypeVolume,
+				Source: cfg.VolumeName,
+				Target: "/workspace",
+			},
+		},
+	}
+
+	containerCfg := &container.Config{
+		Image:      cfg.Image,
+		Entrypoint: []string{"sleep", "infinity"},
+		WorkingDir: "/workspace",
+		Labels: map[string]string{
+			"ah.managed":     "true",
+			"ah.type":        "environment",
+			"ah.tenant":      cfg.TenantID,
+			"ah.environment": cfg.EnvID,
+		},
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, &network.NetworkingConfig{}, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("create environment container: %w", err)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("start environment container: %w", err)
+	}
+
+	return resp.ID, nil
+}
+
+// ExecCreate creates an exec instance in a container and returns the exec ID.
+func (c *DockerClient) ExecCreate(ctx context.Context, containerID string, cmd []string, tty bool) (string, error) {
+	resp, err := c.cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          tty,
+	})
+	if err != nil {
+		return "", fmt.Errorf("exec create: %w", err)
+	}
+	return resp.ID, nil
+}
+
+// ExecAttach attaches to an exec instance and returns the I/O streams.
+// The returned ReadCloser provides stdout/stderr; the Writer accepts stdin.
+// Caller must close the ReadCloser when done.
+func (c *DockerClient) ExecAttach(ctx context.Context, execID string) (io.ReadCloser, io.Writer, error) {
+	resp, err := c.cli.ContainerExecAttach(ctx, execID, container.ExecAttachOptions{
+		Tty: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("exec attach: %w", err)
+	}
+	return io.NopCloser(resp.Reader), resp.Conn, nil
+}
+
+// ExecInspect returns the exit code and running state of an exec instance.
+func (c *DockerClient) ExecInspect(ctx context.Context, execID string) (int, bool, error) {
+	resp, err := c.cli.ContainerExecInspect(ctx, execID)
+	if err != nil {
+		return 0, false, fmt.Errorf("exec inspect: %w", err)
+	}
+	return resp.ExitCode, resp.Running, nil
+}
+
+// CopyToContainer copies a tar archive stream into the container at dstPath.
+func (c *DockerClient) CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader) error {
+	return c.cli.CopyToContainer(ctx, containerID, dstPath, content, container.CopyToContainerOptions{})
+}
+
+// CopyFromContainer returns a tar archive of the file/directory at srcPath.
+func (c *DockerClient) CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error) {
+	rc, _, err := c.cli.CopyFromContainer(ctx, containerID, srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("copy from container: %w", err)
+	}
+	return rc, nil
 }
 
 // ListVolumes returns volume names matching the given prefix.

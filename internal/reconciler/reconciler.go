@@ -419,6 +419,60 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 	}
 
+	// 5. Check environments marked "running" — if container gone or exited, mark "stopped"
+	envRows, err := r.db.QueryContext(ctx,
+		`SELECT id, container_id FROM environments WHERE status = 'running' AND container_id != ''`)
+	if err != nil {
+		log.Printf("reconciler: failed to query environments: %v", err)
+	} else {
+		type envRecord struct{ id, containerID string }
+		var runningEnvs []envRecord
+		for envRows.Next() {
+			var e envRecord
+			if err := envRows.Scan(&e.id, &e.containerID); err != nil {
+				continue
+			}
+			runningEnvs = append(runningEnvs, e)
+		}
+		envRows.Close()
+
+		for _, e := range runningEnvs {
+			checked++
+			if !containerSet[e.containerID] {
+				_, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil && isNotFoundError(inspectErr) {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', container_id = '', updated_at = ? WHERE id = ?`,
+						time.Now().Unix(), e.id)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container not found)", e.id)
+						fixed++
+					}
+				} else if inspectErr != nil {
+					log.Printf("reconciler: transient Docker error for environment %s, skipping: %v", e.id, inspectErr)
+				}
+			} else {
+				info, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil {
+					continue
+				}
+				if info.Status == "exited" || info.Status == "dead" {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ?`,
+						time.Now().Unix(), e.id)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container %s)", e.id, info.Status)
+						fixed++
+					}
+				}
+			}
+		}
+	}
+
 	if checked > 0 || fixed > 0 {
 		log.Printf("reconciler: checked=%d fixed=%d", checked, fixed)
 	}

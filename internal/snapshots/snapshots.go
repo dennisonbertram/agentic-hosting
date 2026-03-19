@@ -91,6 +91,16 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 		return nil, fmt.Errorf("tag image for snapshot: %w", err)
 	}
 
+	// If anything below fails, best-effort remove the orphaned tag.
+	committed := false
+	defer func() {
+		if !committed {
+			if err := m.docker.RemoveImage(ctx, imageRef); err != nil {
+				log.Printf("WARNING: failed to clean up orphaned snapshot image %s: %v", imageRef, err)
+			}
+		}
+	}()
+
 	// Capture encrypted env vars as a JSON blob.
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT key, value_encrypted FROM service_env WHERE service_id = ?`,
@@ -119,7 +129,7 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 	}
 
 	// Capture resource config from tenant quotas.
-	var resourceConfig string
+	resourceConfig := "{}"
 	var maxMemoryMB sql.NullInt64
 	var maxCPUCores sql.NullFloat64
 	err = m.db.QueryRowContext(ctx,
@@ -169,6 +179,7 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit snapshot: %w", err)
 	}
+	committed = true
 
 	return &Snapshot{
 		ID:             snapshotID,
@@ -246,7 +257,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, snapshotID string) error
 
 	// Best-effort image removal — log but don't fail the delete.
 	if snap.ImageRef != "" {
-		log.Printf("WARNING: snapshot image %s cleanup skipped (image removal not implemented in docker client)", snap.ImageRef)
+		if err := m.docker.RemoveImage(ctx, snap.ImageRef); err != nil {
+			log.Printf("WARNING: failed to remove snapshot image %s: %v", snap.ImageRef, err)
+		}
 	}
 
 	_, err = m.db.ExecContext(ctx,

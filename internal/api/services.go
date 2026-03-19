@@ -126,6 +126,22 @@ func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Validate snapshot data before creating (defense-in-depth against corrupted snapshots).
+	if err := services.ValidateImage(snap.ImageRef); err != nil {
+		writeError(w, http.StatusBadRequest, "snapshot contains invalid image: "+err.Error())
+		return
+	}
+	if len(envVars) > 0 {
+		if err := services.ValidateEnvVars(envVars); err != nil {
+			writeError(w, http.StatusBadRequest, "snapshot contains invalid env vars: "+err.Error())
+			return
+		}
+	}
+	if snap.Port < 1 || snap.Port > 65535 {
+		writeError(w, http.StatusBadRequest, "snapshot contains invalid port")
+		return
+	}
+
 	// Create the service using the snapshot's image and port.
 	req := services.CreateRequest{
 		Name:  body.Name,

@@ -51,6 +51,10 @@ type MockDockerClient struct {
 	TagImageFn    func(ctx context.Context, source, target string) error
 	TagImageCalls [][2]string // [source, target] pairs
 
+	// RemoveImage
+	RemoveImageFn    func(ctx context.Context, imageRef string) error
+	RemoveImageCalls []string
+
 	// ListContainersByLabel
 	ListContainersByLabelFn    func(ctx context.Context, label, value string) ([]string, error)
 	ListContainersByLabelCalls int
@@ -175,6 +179,14 @@ func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) 
 	m.TagImageCalls = append(m.TagImageCalls, [2]string{source, target})
 	if m.TagImageFn != nil {
 		return m.TagImageFn(ctx, source, target)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) RemoveImage(ctx context.Context, imageRef string) error {
+	m.RemoveImageCalls = append(m.RemoveImageCalls, imageRef)
+	if m.RemoveImageFn != nil {
+		return m.RemoveImageFn(ctx, imageRef)
 	}
 	return nil
 }

@@ -18,9 +18,9 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/config"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
-	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 )

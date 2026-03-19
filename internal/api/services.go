@@ -52,6 +52,12 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate service name produces a valid DNS label for routing
+	if err := services.ValidateDNSName(req.Name); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
 	// Validate image format and registry allowlist
 	if err := services.ValidateImage(req.Image); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -108,6 +114,12 @@ func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.
 	}
 	if len(body.Name) > 128 {
 		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
+		return
+	}
+
+	// Validate service name produces a valid DNS label for routing
+	if err := services.ValidateDNSName(body.Name); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 

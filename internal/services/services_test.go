@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -45,7 +47,7 @@ func TestCreate_Success(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -64,7 +66,7 @@ func TestCreate_DefaultPort(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -79,7 +81,7 @@ func TestCreate_QuotaExceeded(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 
 	// Create first service
 	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
@@ -103,7 +105,7 @@ func TestCreate_InvalidImage(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "evil.example.com/malware:latest",
@@ -118,7 +120,7 @@ func TestGet_NotFound(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 	_, err := mgr.Get(context.Background(), "tenant-1", "nonexistent")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, apierr.ErrNotFound))
@@ -130,7 +132,7 @@ func TestListPaginated(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 
 	// Create 3 services
 	for i := 0; i < 3; i++ {
@@ -158,7 +160,7 @@ func TestDelete_Success(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey)
+	mgr := NewManager(stateDB, mock, masterKey, "")
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -195,6 +197,118 @@ func TestValidateEnvVars(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsDNSLabelSafe(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "plain lowercase name", input: "myapp", want: true},
+		{name: "hyphen in middle", input: "my-app", want: true},
+		{name: "single char", input: "a", want: true},
+		{name: "digits only", input: "123", want: true},
+		{name: "leading hyphen", input: "-myapp", want: false},
+		{name: "trailing hyphen", input: "myapp-", want: false},
+		{name: "uppercase letters", input: "MyApp", want: false},
+		{name: "too long 64 chars", input: strings.Repeat("a", 64), want: false},
+		{name: "exactly 63 chars", input: strings.Repeat("a", 63), want: true},
+		{name: "empty string", input: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isDNSLabelSafe(tc.input)
+			assert.Equal(t, tc.want, got, "isDNSLabelSafe(%q)", tc.input)
+		})
+	}
+}
+
+func TestToDNSLabel(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "spaces to hyphens", input: "my app", want: "my-app"},
+		{name: "mixed case and special chars", input: "My_App!", want: "my-app"},
+		{name: "all hyphens", input: "---", want: ""},
+		{name: "long name truncated", input: strings.Repeat("a", 70), want: strings.Repeat("a", 63)},
+		{name: "trailing hyphens stripped after truncation", input: strings.Repeat("a", 62) + "!bcdef", want: strings.Repeat("a", 62)},
+		{name: "already valid", input: "hello", want: "hello"},
+		{name: "empty input", input: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toDNSLabel(tc.input)
+			assert.Equal(t, tc.want, got, "toDNSLabel(%q)", tc.input)
+		})
+	}
+}
+
+func TestPublicURL(t *testing.T) {
+	t.Run("with baseDomain", func(t *testing.T) {
+		url := publicURL("svc-123", "my-app", "tenant-1", "example.com")
+		assert.Equal(t, "https://my-app.tenant-1.example.com", url)
+	})
+
+	t.Run("without baseDomain", func(t *testing.T) {
+		url := publicURL("svc-123", "my-app", "tenant-1", "")
+		assert.Equal(t, "http://svc-123.localhost", url)
+	})
+
+	t.Run("baseDomain set but empty dnsLabel", func(t *testing.T) {
+		url := publicURL("svc-123", "", "tenant-1", "example.com")
+		assert.Equal(t, "http://svc-123.localhost", url)
+	})
+}
+
+func TestTraefikLabels(t *testing.T) {
+	t.Run("with baseDomain produces TLS labels", func(t *testing.T) {
+		labels := traefikLabels("svc-123", "my-app", "tenant-1", "example.com", 8080)
+
+		assert.Equal(t, "true", labels["traefik.enable"])
+		assert.Equal(t, "Host(`my-app.tenant-1.example.com`)", labels[fmt.Sprintf("traefik.http.routers.%s.rule", "svc-123")])
+		assert.Equal(t, "websecure", labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", "svc-123")])
+		assert.Equal(t, "true", labels[fmt.Sprintf("traefik.http.routers.%s.tls", "svc-123")])
+		assert.Equal(t, "letsencrypt", labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", "svc-123")])
+		assert.Equal(t, "8080", labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", "svc-123")])
+		assert.Equal(t, "traefik-public", labels["traefik.docker.network"])
+	})
+
+	t.Run("without baseDomain no TLS labels", func(t *testing.T) {
+		labels := traefikLabels("svc-123", "my-app", "tenant-1", "", 8080)
+
+		assert.Equal(t, "true", labels["traefik.enable"])
+		assert.Equal(t, "web", labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", "svc-123")])
+		// TLS labels should NOT be present
+		_, hasTLS := labels[fmt.Sprintf("traefik.http.routers.%s.tls", "svc-123")]
+		assert.False(t, hasTLS, "tls label should not be present without baseDomain")
+		_, hasCertResolver := labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", "svc-123")]
+		assert.False(t, hasCertResolver, "certresolver label should not be present without baseDomain")
+	})
+
+	t.Run("router key uses serviceID", func(t *testing.T) {
+		labels := traefikLabels("my-svc-id", "app", "t1", "example.com", 3000)
+		_, hasRouter := labels["traefik.http.routers.my-svc-id.rule"]
+		assert.True(t, hasRouter, "router rule should use serviceID as key")
+	})
+}
+
+func TestCreateSetsDNSLabel(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	mgr := NewManager(stateDB, mock, masterKey, "")
+	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
+		Name:  "my-service",
+		Image: "nginx:latest",
+		Port:  8080,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "my-service", svc.DNSLabel, "dns_label should be derived from service name")
 }
 
 func seedTenant(t *testing.T, db *sql.DB) {

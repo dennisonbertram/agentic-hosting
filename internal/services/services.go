@@ -93,6 +93,29 @@ func isDNSLabelSafe(s string) bool {
 	return len(s) > 0 && len(s) <= 63 && dnsLabelRe.MatchString(s)
 }
 
+// ValidateDNSName checks that a service name can produce a valid DNS label.
+// Returns nil if OK, or an apierr.ValidationError describing the problem.
+func ValidateDNSName(name string) error {
+	// Replicate normalization without the truncation step to detect length issues.
+	s := strings.ToLower(name)
+	var b strings.Builder
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	label := strings.Trim(b.String(), "-")
+	if label == "" {
+		return apierr.Validation("service name must contain at least one alphanumeric character for DNS routing")
+	}
+	if len(label) > 63 {
+		return apierr.Validation("service name too long for DNS routing (max 63 chars)")
+	}
+	return nil
+}
+
 // toDNSLabel derives a DNS-safe label from a service name.
 // Lowercases, replaces non-alphanumeric with hyphens, trims hyphens, truncates to 63 chars.
 func toDNSLabel(name string) string {

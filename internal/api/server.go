@@ -13,6 +13,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
@@ -31,6 +32,14 @@ type ServerConfig struct {
 	Docker           docker.Client
 	BuildManager     *builds.Manager
 	DatabaseManager  databaseManager
+	KanbanManager    kanbanManager
+}
+
+type kanbanManager interface {
+	Create(ctx context.Context, tenantID string) (*kanbans.Kanban, error)
+	Get(ctx context.Context, tenantID string) (*kanbans.Kanban, error)
+	GetAdminToken(ctx context.Context, tenantID string) (string, error)
+	Delete(ctx context.Context, tenantID string) error
 }
 
 type databaseManager interface {
@@ -55,6 +64,7 @@ type Server struct {
 	snapshotManager   *snapshots.Manager
 	buildManager      *builds.Manager
 	dbManager         databaseManager
+	kanbanManager     kanbanManager
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
@@ -90,6 +100,7 @@ func NewServer(cfg ServerConfig) *Server {
 		snapshotManager:   snapMgr,
 		buildManager:      cfg.BuildManager,
 		dbManager:         cfg.DatabaseManager,
+		kanbanManager:     cfg.KanbanManager,
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
@@ -181,6 +192,11 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/databases/{dbID}", s.handleDatabaseGet)
 		r.Get("/v1/databases/{dbID}/connection-string", s.handleDatabaseConnectionString)
 		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
+
+		// Kanban routes (except POST which needs longer timeout)
+		r.Get("/v1/kanban", s.handleKanbanGet)
+		r.Get("/v1/kanban/admin-token", s.handleKanbanAdminToken)
+		r.Delete("/v1/kanban", s.handleKanbanDelete)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -193,6 +209,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
+		r.Post("/v1/kanban", s.handleKanbanCreate)
 	})
 
 	s.router = r

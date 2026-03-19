@@ -134,7 +134,7 @@ func main() {
 	var buildMgr *builds.Manager
 	if nixBuilder != nil {
 		// Create service manager early to get DeployImage function
-		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32])
+		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 

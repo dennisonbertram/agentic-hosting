@@ -43,17 +43,42 @@ func TestBuildServiceContainerConfig_Labels(t *testing.T) {
 		t.Errorf("ah.service = %q, want %q", got, serviceID)
 	}
 
-	// Traefik labels
+	// traefik.docker.network base label
+	if got := cfg.Labels["traefik.docker.network"]; got != "traefik-public" {
+		t.Errorf("traefik.docker.network = %q, want %q", got, "traefik-public")
+	}
+
+	// Hardcoded Traefik routing labels should NOT be present — they come from extraLabels now
+	if _, ok := cfg.Labels["traefik.enable"]; ok {
+		t.Error("traefik.enable should not be set as a base label")
+	}
+	routerKey := fmt.Sprintf("traefik.http.routers.%s.rule", serviceID)
+	if _, ok := cfg.Labels[routerKey]; ok {
+		t.Errorf("hardcoded router rule label %q should not be set", routerKey)
+	}
+	portKey := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID)
+	if _, ok := cfg.Labels[portKey]; ok {
+		t.Errorf("hardcoded port label %q should not be set", portKey)
+	}
+}
+
+func TestBuildServiceContainerConfig_ExtraLabelsSetTraefikRouting(t *testing.T) {
+	// Traefik routing labels now come via extraLabels from the services layer.
+	serviceID := "svc-xyz"
+	extra := map[string]string{
+		"traefik.enable": "true",
+		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                      fmt.Sprintf("Host(`%s.example.com`)", serviceID),
+		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):               "websecure",
+		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): "3000",
+	}
+	cfg := buildServiceContainerConfig("t-abc", serviceID, "myimage:latest", 3000, nil, extra)
+
 	if got := cfg.Labels["traefik.enable"]; got != "true" {
 		t.Errorf("traefik.enable = %q, want %q", got, "true")
 	}
 	routerRule := cfg.Labels[fmt.Sprintf("traefik.http.routers.%s.rule", serviceID)]
 	if !strings.Contains(routerRule, serviceID) {
 		t.Errorf("router rule %q does not contain service ID", routerRule)
-	}
-	portLabel := cfg.Labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID)]
-	if portLabel != fmt.Sprintf("%d", port) {
-		t.Errorf("loadbalancer port label = %q, want %q", portLabel, fmt.Sprintf("%d", port))
 	}
 }
 

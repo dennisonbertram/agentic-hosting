@@ -89,7 +89,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	limits := m.getResourceLimits(ctx, tenantID)
 
-	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, nil, limits)
+	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, traefikLabels(serviceID, svc.DNSLabel, tenantID, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		return fmt.Errorf("run container: %w", err)

@@ -23,6 +23,7 @@ type Service struct {
 	ID            string `json:"id"`
 	TenantID      string `json:"tenant_id"`
 	Name          string `json:"name"`
+	DNSLabel      string `json:"dns_label,omitempty"`
 	Status        string `json:"status"`
 	Image         string `json:"image"`
 	ContainerID   string `json:"container_id,omitempty"`
@@ -83,17 +84,77 @@ func isNotFoundError(err error) bool {
 		strings.Contains(msg, "404")
 }
 
+// dnsLabelRe matches a valid DNS label: lowercase alphanumeric, hyphens allowed
+// (not at start/end), max 63 chars.
+var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// isDNSLabelSafe returns true if s is a valid DNS label.
+func isDNSLabelSafe(s string) bool {
+	return len(s) > 0 && len(s) <= 63 && dnsLabelRe.MatchString(s)
+}
+
+// toDNSLabel derives a DNS-safe label from a service name.
+// Lowercases, replaces non-alphanumeric with hyphens, trims hyphens, truncates to 63 chars.
+func toDNSLabel(name string) string {
+	s := strings.ToLower(name)
+	var b strings.Builder
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	s = strings.Trim(b.String(), "-")
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	s = strings.TrimRight(s, "-")
+	return s
+}
+
+// publicURL returns the public URL for a service.
+func publicURL(serviceID, dnsLabel, tenantID, baseDomain string) string {
+	if baseDomain != "" && dnsLabel != "" {
+		return fmt.Sprintf("https://%s.%s.%s", dnsLabel, tenantID, baseDomain)
+	}
+	return fmt.Sprintf("http://%s.localhost", serviceID)
+}
+
+// traefikLabels returns Traefik routing labels for a service container.
+func traefikLabels(serviceID, dnsLabel, tenantID, baseDomain string, port int) map[string]string {
+	if baseDomain != "" && dnsLabel != "" {
+		host := fmt.Sprintf("%s.%s.%s", dnsLabel, tenantID, baseDomain)
+		return map[string]string{
+			"traefik.enable": "true",
+			fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):            fmt.Sprintf("Host(`%s`)", host),
+			fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):     "websecure",
+			fmt.Sprintf("traefik.http.routers.%s.tls", serviceID):             "true",
+			fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", serviceID): "letsencrypt",
+			fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
+			"traefik.docker.network": "traefik-public",
+		}
+	}
+	return map[string]string{
+		"traefik.enable": "true",
+		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                         fmt.Sprintf("Host(`%s.localhost`)", serviceID),
+		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):                  "web",
+		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID):     fmt.Sprintf("%d", port),
+	}
+}
+
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
 	db          *sql.DB
 	docker      docker.Client
 	masterKey   []byte
+	baseDomain  string
 	deploySem   chan struct{} // bounded deploy concurrency
 	deployQueue chan struct{} // bounded queue for waiting deploys
 }
 
 // NewManager creates a service manager.
-func NewManager(db *sql.DB, docker docker.Client, masterKey []byte) *Manager {
+func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain string) *Manager {
 	if docker == nil {
 		panic("ah: NewManager requires a non-nil Docker client")
 	}
@@ -101,6 +162,7 @@ func NewManager(db *sql.DB, docker docker.Client, masterKey []byte) *Manager {
 		db:          db,
 		docker:      docker,
 		masterKey:   masterKey,
+		baseDomain:  baseDomain,
 		deploySem:   make(chan struct{}, maxConcurrentDeploys),
 		deployQueue: make(chan struct{}, maxQueuedDeploys),
 	}
@@ -216,6 +278,12 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, apierr.Validation("port must be between 1 and 65535")
 	}
 
+	// Derive DNS label from service name
+	dnsLabel := toDNSLabel(req.Name)
+	if !isDNSLabelSafe(dnsLabel) {
+		dnsLabel = "" // fallback to UUID-based URL
+	}
+
 	// Use a transaction so service insert + env vars are atomic.
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -224,9 +292,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
-		 VALUES (?, ?, ?, 'created', ?, ?, '', ?, ?)`,
-		id, tenantID, req.Name, req.Image, port, now, now,
+		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 'created', ?, ?, '', ?, ?)`,
+		id, tenantID, req.Name, dnsLabel, req.Image, port, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert service: %w", err)
@@ -258,10 +326,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		ID:        id,
 		TenantID:  tenantID,
 		Name:      req.Name,
+		DNSLabel:  dnsLabel,
 		Status:    "created",
 		Image:     req.Image,
 		Port:      port,
-		URL:       fmt.Sprintf("http://%s.localhost", id),
+		URL:       publicURL(id, dnsLabel, tenantID, m.baseDomain),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
@@ -360,7 +429,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	// Load resource limits from tenant quotas
 	limits := m.getResourceLimits(ctx, tenantID)
 
-	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, nil, limits)
+	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, traefikLabels(serviceID, svc.DNSLabel, tenantID, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		return fmt.Errorf("run container: %w", err)
@@ -574,7 +643,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		offset = 0
 	}
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
+		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
 		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		tenantID, limit, offset,
 	)
@@ -589,7 +658,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		var containerID sql.NullString
 		var lastCrashedAt sql.NullInt64
 		var circuitOpen int
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpen, &lastCrashedAt, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpen, &lastCrashedAt, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan service: %w", err)
 		}
 		if containerID.Valid {
@@ -599,7 +668,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 		if lastCrashedAt.Valid {
 			s.LastCrashedAt = lastCrashedAt.Int64
 		}
-		s.URL = fmt.Sprintf("http://%s.localhost", s.ID)
+		s.URL = publicURL(s.ID, s.DNSLabel, s.TenantID, m.baseDomain)
 		svcs = append(svcs, s)
 	}
 	return svcs, rows.Err()
@@ -618,7 +687,7 @@ func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service
 			svc.Status = info.Status
 		}
 	}
-	svc.URL = fmt.Sprintf("http://%s.localhost", svc.ID)
+	svc.URL = publicURL(svc.ID, svc.DNSLabel, svc.TenantID, m.baseDomain)
 	return svc, nil
 }
 
@@ -689,10 +758,10 @@ func (m *Manager) getOwned(ctx context.Context, tenantID, serviceID string) (*Se
 	var circuitOpenInt int
 	var lastCrashedAtNull sql.NullInt64
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
+		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
 		 FROM services WHERE id = ? AND tenant_id = ?`,
 		serviceID, tenantID,
-	).Scan(&s.ID, &s.TenantID, &s.Name, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpenInt, &lastCrashedAtNull, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.TenantID, &s.Name, &s.DNSLabel, &s.Status, &s.Image, &s.Port, &containerID, &s.LastError, &s.CrashCount, &circuitOpenInt, &lastCrashedAtNull, &s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("service not found")
 	}

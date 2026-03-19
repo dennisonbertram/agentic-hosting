@@ -86,7 +86,7 @@ func NewServer(cfg ServerConfig) *Server {
 	var svcMgr *services.Manager
 	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
-		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain)
 		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 

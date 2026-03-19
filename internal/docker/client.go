@@ -221,6 +221,15 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 		return "", fmt.Errorf("start container: %w", err)
 	}
 
+	// Connect the service container to traefik-public so Traefik can route to it
+	// regardless of which tenant network it's on. Non-fatal: dev mode may not have
+	// the traefik-public network.
+	if connErr := c.cli.NetworkConnect(ctx, "traefik-public", resp.ID, nil); connErr != nil {
+		if !strings.Contains(connErr.Error(), "already") {
+			log.Printf("WARNING: failed to connect container %s to traefik-public: %v", resp.ID, connErr)
+		}
+	}
+
 	return resp.ID, nil
 }
 
@@ -233,12 +242,9 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 	}
 
 	labels := map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", serviceID):                      fmt.Sprintf("Host(`%s.localhost`)", serviceID),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", serviceID):               "web",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceID): fmt.Sprintf("%d", port),
-		"ah.tenant":  tenantID,
-		"ah.service": serviceID,
+		"ah.tenant":              tenantID,
+		"ah.service":             serviceID,
+		"traefik.docker.network": "traefik-public",
 	}
 	for k, v := range extraLabels {
 		labels[k] = v

@@ -399,6 +399,7 @@ type RunDatabaseConfig struct {
 	Cmd           []string
 	VolumeName    string
 	MountPath     string
+	Labels        map[string]string // optional: overrides default labels when set
 }
 
 // CreateVolume creates a named Docker volume.
@@ -425,9 +426,9 @@ func (c *DockerClient) RemoveVolumeSafe(ctx context.Context, name string) error 
 	return c.cli.VolumeRemove(ctx, name, false)
 }
 
-// RunDatabase creates and starts a database container with host port mapping
-// and persistent volume. Database containers do NOT use gVisor (they need direct
-// filesystem access for data storage), but are bound to 127.0.0.1 only.
+// RunDatabase creates and starts a container with host port mapping and
+// persistent volume. Uses gVisor (runsc) runtime. Bound to 127.0.0.1 only.
+// Used for databases and other infrastructure containers (e.g. Vikunja kanban).
 func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
 	env := make([]string, 0, len(cfg.Env))
 	for k, v := range cfg.Env {
@@ -453,16 +454,21 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 	}
 
+	labels := map[string]string{
+		"ah.managed": "true",
+		"ah.type":    "database",
+	}
+	if cfg.Labels != nil {
+		labels = cfg.Labels
+	}
+
 	containerCfg := &container.Config{
 		Image: cfg.Image,
 		Env:   env,
 		ExposedPorts: nat.PortSet{
 			nat.Port(portStr): struct{}{},
 		},
-		Labels: map[string]string{
-			"ah.managed": "true",
-			"ah.type":    "database",
-		},
+		Labels: labels,
 	}
 
 	if len(cfg.Cmd) > 0 {

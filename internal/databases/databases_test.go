@@ -273,9 +273,29 @@ func TestDelete_WipesVolumeBeforeRemoval(t *testing.T) {
 
 	dockerClient := &testutil.MockDockerClient{
 		RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			// Start a fake Postgres server on the allocated port so that
+			// waitForPostgres succeeds with full protocol-level verification.
 			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(cfg.HostPort))
 			require.NoError(t, err)
 			listeners = append(listeners, ln)
+
+			go func() {
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					go func(c net.Conn) {
+						defer c.Close()
+						buf := make([]byte, 256)
+						c.Read(buf) //nolint:errcheck
+						// AuthenticationOK response
+						resp := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}
+						c.Write(resp) //nolint:errcheck
+					}(conn)
+				}
+			}()
+
 			return "container-" + cfg.Name, nil
 		},
 		WipeVolumeFn: func(ctx context.Context, name string) error {

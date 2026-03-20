@@ -513,13 +513,17 @@ func (m *Manager) runRedis(ctx context.Context, name, volume string, port int, p
 	})
 }
 
+// waitForPostgres probes Postgres at the protocol level. It sends a minimal
+// StartupMessage (protocol 3.0) over a raw TCP connection and checks that the
+// server responds with any valid Postgres message byte (AuthenticationOK 'R',
+// AuthenticationMD5Password 'R', or ErrorResponse 'E'). Any such response
+// means the server process is initialised and accepting queries; a plain TCP
+// accept with no bytes means the container is still starting up.
 func (m *Manager) waitForPostgres(port int, password string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			conn.Close()
+		if postgresReady(addr) {
 			return true
 		}
 		time.Sleep(1 * time.Second)
@@ -527,18 +531,93 @@ func (m *Manager) waitForPostgres(port int, password string, timeout time.Durati
 	return false
 }
 
+// postgresReady returns true when the Postgres server at addr has completed
+// initialisation and is ready to authenticate connections.
+func postgresReady(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	// Build a StartupMessage for protocol 3.0 with user "ah" and database "ah".
+	// Wire format: int32 total_length | int32 protocol_version | key\0value\0 ... \0
+	user := "ah"
+	dbName := "ah"
+	// Parameters section: "user\0<user>\0database\0<dbname>\0\0"
+	params := "user\x00" + user + "\x00database\x00" + dbName + "\x00\x00"
+	// Total length = 4 (length field) + 4 (protocol version) + len(params)
+	totalLen := int32(4 + 4 + len(params))
+	msg := make([]byte, totalLen)
+	// Length (big-endian int32)
+	msg[0] = byte(totalLen >> 24)
+	msg[1] = byte(totalLen >> 16)
+	msg[2] = byte(totalLen >> 8)
+	msg[3] = byte(totalLen)
+	// Protocol version 3.0 = 0x00030000
+	msg[4] = 0x00
+	msg[5] = 0x03
+	msg[6] = 0x00
+	msg[7] = 0x00
+	copy(msg[8:], params)
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write(msg); err != nil {
+		return false
+	}
+
+	// Read the first byte of the server response. Any valid Postgres backend
+	// message type here confirms the server is running:
+	//   'R' = Authentication message (AuthenticationOK or auth challenge)
+	//   'E' = ErrorResponse (e.g. wrong password, unknown user — still means up)
+	//   'N' = NoticeResponse
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err != nil {
+		return false
+	}
+	b := buf[0]
+	return b == 'R' || b == 'E' || b == 'N'
+}
+
+// waitForRedis probes Redis at the protocol level. It sends a RESP PING
+// command and checks that the server responds with +PONG. A container that
+// accepts TCP but has not finished loading its data set or configuration will
+// not respond to PING yet.
 func (m *Manager) waitForRedis(port int, password string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			conn.Close()
+		if redisReady(addr) {
 			return true
 		}
 		time.Sleep(1 * time.Second)
 	}
 	return false
+}
+
+// redisReady returns true when the Redis server at addr responds to a PING
+// with +PONG, indicating it is fully initialised.
+func redisReady(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// RESP inline PING: *1\r\n$4\r\nPING\r\n
+	if _, err := conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+		return false
+	}
+
+	// Read enough bytes to check for "+PONG"
+	buf := make([]byte, 7)
+	n, err := conn.Read(buf)
+	if err != nil || n < 5 {
+		return false
+	}
+	return strings.HasPrefix(string(buf[:n]), "+PONG")
 }
 
 func generateID() (string, error) {

@@ -163,7 +163,7 @@ ssh root@<server> "sqlite3 /var/lib/paasd/paasd.db 'SELECT name FROM schema_migr
 
 ```bash
 # Backup the state database (contains all tenant/service/database metadata)
-ssh root@<server> "/agentic-paasd/bin/paasd backup /var/lib/paasd/paasd.db"
+ssh root@<server> "/agentic-hosting/bin/paasd backup /var/lib/paasd/paasd.db"
 # Output: /var/lib/paasd/backups/paasd-<timestamp>.db
 
 # The master key must also be backed up separately — without it, all

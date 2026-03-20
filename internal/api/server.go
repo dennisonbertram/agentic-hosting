@@ -143,6 +143,9 @@ func (s *Server) setupRoutes() {
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
+		// Recovery endpoint: authenticated by bootstrap token, not an API key.
+		// Allows tenants who have lost all their keys to obtain a new one.
+		r.Post("/v1/auth/recover", s.handleKeyRecover)
 	})
 
 	// Authenticated short-lived routes keep the standard request timeout.

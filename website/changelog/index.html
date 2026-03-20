@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Changelog — agentic.hosting</title>
+  <meta name="description" content="What's new in agentic.hosting — release notes, new features, fixes, and architecture decisions.">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            'instrument-serif': ['"Instrument Serif"', '"Instrument Serif Fallback"', 'serif'],
+            'inter': ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            'mono': ['"SF Mono"', '"Fira Code"', '"Fira Mono"', '"JetBrains Mono"', '"Roboto Mono"', '"Courier New"', 'monospace'],
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .font-instrument-serif { font-family: 'Instrument Serif', 'Instrument Serif Fallback', serif; }
+    .font-mono-stack { font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'JetBrains Mono', 'Roboto Mono', 'Courier New', monospace; }
+  </style>
+</head>
+<body class="bg-stone-50 text-stone-900 antialiased">
+
+  <!-- NAV -->
+  <nav class="sticky top-0 z-50 bg-stone-50/95 backdrop-blur flex items-center justify-between px-6 py-4">
+    <a href="/" class="flex items-center gap-2.5">
+      <div class="w-7 h-7 bg-stone-900 rounded flex items-center justify-center flex-shrink-0">
+        <span class="text-stone-50 font-bold text-xs font-mono-stack">ah</span>
+      </div>
+      <div>
+        <div class="font-bold text-sm text-stone-900 tracking-wide leading-none">agentic.hosting</div>
+        <div class="text-[10px] text-stone-500 leading-none mt-0.5">built for agents</div>
+      </div>
+    </a>
+    <div class="flex items-center gap-5">
+      <a href="https://github.com/dennisonbertram/agentic-hosting" class="text-xs text-stone-600 hover:text-stone-900 transition-colors flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+      <a href="/dashboard/" class="text-xs text-stone-600 hover:text-stone-900 transition-colors">Dashboard</a>
+      <a href="/changelog/" class="text-xs text-stone-900 font-medium transition-colors">Changelog</a>
+      <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="text-xs text-stone-600 hover:text-stone-900 transition-colors">Runbook</a>
+      <a href="https://github.com/dennisonbertram/agentic-hosting" class="text-xs text-stone-50 bg-stone-900 rounded-full px-3 py-1.5 flex items-center gap-1.5 hover:opacity-90 transition-opacity">&#9733; Star</a>
+    </div>
+  </nav>
+
+  <!-- HEADER -->
+  <section class="pt-20 pb-12 sm:pt-28 sm:pb-16 bg-stone-50">
+    <div class="max-w-3xl mx-auto px-6">
+      <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">What's new</p>
+      <h1 class="font-instrument-serif italic text-4xl sm:text-5xl text-stone-900 mb-4 leading-tight">
+        Changelog
+      </h1>
+      <p class="text-stone-500 text-base leading-relaxed max-w-2xl">
+        New features, fixes, and architecture decisions for agentic.hosting. Follow along as the platform evolves.
+      </p>
+    </div>
+  </section>
+
+  <!-- CHANGELOG ENTRIES -->
+  <section class="pb-20 sm:pb-28 bg-stone-50">
+    <div class="max-w-3xl mx-auto px-6">
+
+      <!-- UNRELEASED -->
+      <article class="mb-16">
+        <div class="flex items-center gap-4 mb-8">
+          <h2 class="font-instrument-serif italic text-3xl text-stone-900">Unreleased</h2>
+          <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-amber-100 text-amber-700">since v0.3.0</span>
+        </div>
+
+        <!-- Added -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(77,184,144,0.1); color: #10b981">Added</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Custom domain support &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">--base-domain</code> CLI flag makes service URLs <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">https://{name}.{base-domain}</code> with Traefik auto-TLS via Let's Encrypt <a href="https://github.com/dennisonbertram/agentic-hosting/issues/14" class="text-blue-600 hover:text-blue-800">#14</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Snapshot and template support for instant environment forking <a href="https://github.com/dennisonbertram/agentic-hosting/issues/43" class="text-blue-600 hover:text-blue-800">#43</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Per-tenant Vikunja kanban board provisioning <a href="https://github.com/dennisonbertram/agentic-hosting/issues/46" class="text-blue-600 hover:text-blue-800">#46</a>, <a href="https://github.com/dennisonbertram/agentic-hosting/issues/47" class="text-blue-600 hover:text-blue-800">#47</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Supervisory dashboard &mdash; tenant control plane for services, databases, builds, and keys <a href="https://github.com/dennisonbertram/agentic-hosting/issues/37" class="text-blue-600 hover:text-blue-800">#37</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>API key recovery via bootstrap token: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">POST /v1/auth/recover</code> <a href="https://github.com/dennisonbertram/agentic-hosting/issues/12" class="text-blue-600 hover:text-blue-800">#12</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Redeploy endpoint: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">POST /v1/services/{id}/redeploy</code> and deployment history: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">GET /v1/services/{id}/deployments</code> <a href="https://github.com/dennisonbertram/agentic-hosting/issues/6" class="text-blue-600 hover:text-blue-800">#6</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Dev-only localhost Traefik routing when <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">baseDomain</code> is unset <a href="https://github.com/dennisonbertram/agentic-hosting/issues/67" class="text-blue-600 hover:text-blue-800">#67</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Cron-friendly health check script with webhook alerting <a href="https://github.com/dennisonbertram/agentic-hosting/issues/21" class="text-blue-600 hover:text-blue-800">#21</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Typed API errors, LRU auth cache, pagination improvements <a href="https://github.com/dennisonbertram/agentic-hosting/issues/39" class="text-blue-600 hover:text-blue-800">#39</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Claude Code skill restructured with progressive disclosure and <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ah-</code> slash commands</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Fixed -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(91,155,213,0.1); color: #3b82f6">Fixed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Protocol-level readiness checks for Postgres and Redis &mdash; no more false positives from silent TCP listeners <a href="https://github.com/dennisonbertram/agentic-hosting/issues/51" class="text-blue-600 hover:text-blue-800">#51</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Support SHA refs in git builds via two-phase clone+checkout <a href="https://github.com/dennisonbertram/agentic-hosting/issues/56" class="text-blue-600 hover:text-blue-800">#56</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Preflight-check build existence before streaming logs <a href="https://github.com/dennisonbertram/agentic-hosting/issues/53" class="text-blue-600 hover:text-blue-800">#53</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Circuit breaker backoff now escalates with <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_open_count</code> <a href="https://github.com/dennisonbertram/agentic-hosting/issues/54" class="text-blue-600 hover:text-blue-800">#54</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Databases and kanbans stopped when tenant is suspended or deleted <a href="https://github.com/dennisonbertram/agentic-hosting/issues/55" class="text-blue-600 hover:text-blue-800">#55</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Volume data wiped before removal on database delete <a href="https://github.com/dennisonbertram/agentic-hosting/issues/9" class="text-blue-600 hover:text-blue-800">#9</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Restart now recreates container so env var changes take effect</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Renamed <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">/agentic-paasd</code> to <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">/agentic-hosting</code> across docs and server <a href="https://github.com/dennisonbertram/agentic-hosting/issues/19" class="text-blue-600 hover:text-blue-800">#19</a></span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Security & Architecture Documentation -->
+        <div>
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(155,126,200,0.1); color: #8b5cf6">Security &amp; Architecture</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>HKDF key-separation scheme with 5 purpose-specific subkeys <a href="https://github.com/dennisonbertram/agentic-hosting/issues/8" class="text-blue-600 hover:text-blue-800">#8</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Tenant-to-Traefik reachability analysis with iptables mitigation <a href="https://github.com/dennisonbertram/agentic-hosting/issues/50" class="text-blue-600 hover:text-blue-800">#50</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Build egress allowlist architecture decision &mdash; Squid proxy approach <a href="https://github.com/dennisonbertram/agentic-hosting/issues/3" class="text-blue-600 hover:text-blue-800">#3</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Firecracker integration plan from gVisor <a href="https://github.com/dennisonbertram/agentic-hosting/issues/1" class="text-blue-600 hover:text-blue-800">#1</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Horizontal scaling gap analysis &mdash; 24 single-host assumptions identified <a href="https://github.com/dennisonbertram/agentic-hosting/issues/2" class="text-blue-600 hover:text-blue-800">#2</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Daemonless build prototype &mdash; Kaniko recommended <a href="https://github.com/dennisonbertram/agentic-hosting/issues/7" class="text-blue-600 hover:text-blue-800">#7</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Dev-environments MVP specification <a href="https://github.com/dennisonbertram/agentic-hosting/issues/41" class="text-blue-600 hover:text-blue-800">#41</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>ah vs OpenShell comparison <a href="https://github.com/dennisonbertram/agentic-hosting/issues/45" class="text-blue-600 hover:text-blue-800">#45</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Traefik network fanout measurement script <a href="https://github.com/dennisonbertram/agentic-hosting/issues/15" class="text-blue-600 hover:text-blue-800">#15</a></span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <hr class="border-stone-200 mb-16">
+
+      <!-- v0.3.0 -->
+      <article class="mb-16">
+        <div class="flex items-center gap-4 mb-8">
+          <h2 class="font-instrument-serif italic text-3xl text-stone-900">v0.3.0</h2>
+          <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-stone-200 text-stone-600">March 10, 2026</span>
+        </div>
+
+        <!-- Added -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(77,184,144,0.1); color: #10b981">Added</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Self-healer: liveness probes via Docker HEALTHCHECK on all service containers</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Self-healer: reconciler auto-detects unhealthy containers and stops them</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Self-healer: auto circuit breaker recovery with exponential backoff (30m &rarr; 1h &rarr; 4h)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>DB migration: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_retry_at</code>, <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_open_count</code> columns</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span><code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ContainerInfo.HealthStatus</code> field (nil-safe)</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Changed -->
+        <div>
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(212,165,74,0.1); color: #f59e0b">Changed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>Reconciler interval: 60s &rarr; 30s (matches documented behavior)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span><code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_open</code> UPDATE now sets <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_retry_at</code> and increments <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">circuit_open_count</code></span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <hr class="border-stone-200 mb-16">
+
+      <!-- v0.2.0 -->
+      <article class="mb-16">
+        <div class="flex items-center gap-4 mb-8">
+          <h2 class="font-instrument-serif italic text-3xl text-stone-900">v0.2.0</h2>
+          <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-stone-200 text-stone-600">February 15, 2026</span>
+        </div>
+
+        <!-- Added -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(77,184,144,0.1); color: #10b981">Added</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Claude Code skill for AI agent automation of common operations</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span><code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">/security-review</code> slash command (4-pass audit)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>One-line curl installer (<code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">curl agentic.hosting/install.sh | bash</code>)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>AI agent runbook</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Bash automation scripts: register, deploy, status, logs, db-provision</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Traefik static config with Let's Encrypt for agentic.hosting</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Website source with landing page</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Changed -->
+        <div>
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(212,165,74,0.1); color: #f59e0b">Changed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>Binary renamed: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">paasd</code> &rarr; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ah</code></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>Project renamed: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">agentic-paasd</code> &rarr; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">agentic-hosting</code></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>All env vars: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">PAASD_*</code> &rarr; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">AH_*</code></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>Service: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">paasd.service</code> &rarr; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ah.service</code></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&Delta;</span>
+              <span>Data dir: <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">/var/lib/paasd</code> &rarr; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">/var/lib/ah</code></span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <hr class="border-stone-200 mb-16">
+
+      <!-- v0.1.0 -->
+      <article class="mb-16">
+        <div class="flex items-center gap-4 mb-8">
+          <h2 class="font-instrument-serif italic text-3xl text-stone-900">v0.1.0</h2>
+          <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-stone-200 text-stone-600">January 20, 2026</span>
+        </div>
+
+        <!-- Added -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(77,184,144,0.1); color: #10b981">Added</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Multi-tenant HTTP API (chi v5 router)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Tenant registration with bootstrap token (HMAC-compare, timing-safe)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>API key management: HMAC-SHA256 hashed, max 20/tenant, expiration support</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Service CRUD and lifecycle (start/stop/restart/reset)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Container deployment via Docker Engine API with gVisor (runsc) runtime</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Per-tenant Docker bridge networks (internal, ICC=false, no internet egress)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>AES-256-GCM encrypted environment variables per service</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Nixpacks build pipeline: git URL &rarr; image &rarr; running container</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Build log streaming with <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">follow=true</code> (chunked HTTP)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Managed Postgres 15 and Redis 7 provisioning</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Per-database Docker volumes with <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ah-db-*</code> naming</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Encrypted database passwords and connection strings</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>State reconciler: 30s loop syncing DB state to Docker reality</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Circuit breaker: 5 crashes / 10min window opens circuit</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Garbage collector: orphaned containers, volumes, images (5min interval)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Disk watermarks: warn at 80%, block at 95%</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>WAL-safe SQLite backup with gzip compression</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Auth middleware with 30s cache (5000 entries)</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Per-tenant rate limiting: 100 rps / 200 burst</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Global rate limiting: 500 rps / 1000 burst</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Idempotency cache: SHA-256 request body hash, 10min TTL</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>HTTPS enforcement, loopback-only proxy trust</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>systemd unit with security hardening</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Health endpoints: public and detailed (authed)</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Security -->
+        <div>
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(155,126,200,0.1); color: #8b5cf6">Security</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>gVisor syscall interception for all containers</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>ReadonlyRootfs + tmpfs for writable paths</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>CAP DROP ALL, NO_NEW_PRIVILEGES</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>PidsLimit=256, no swap allowed</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>bcrypt password hashing</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-violet-500 mt-0.5 flex-shrink-0">&#9671;</span>
+              <span>Email enumeration prevention</span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-stone-200 bg-stone-50">
+    <div class="max-w-5xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-5 text-xs text-stone-500">
+        <span>Open Source &middot; MIT License</span>
+        <a href="https://github.com/dennisonbertram/agentic-hosting" class="hover:text-stone-900 transition-colors">GitHub</a>
+        <a href="/dashboard/" class="hover:text-stone-900 transition-colors">Dashboard</a>
+        <a href="/changelog/" class="hover:text-stone-900 transition-colors">Changelog</a>
+        <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="hover:text-stone-900 transition-colors">Runbook</a>
+        <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/docs/implementation/build-log.md" class="hover:text-stone-900 transition-colors">Docs</a>
+        <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/docs/exploration/ah-vs-openshell.md" class="hover:text-stone-900 transition-colors">ah vs OpenShell</a>
+      </div>
+      <span class="text-xs text-stone-400">agentic.hosting &middot; Hosting infrastructure built for AI agents</span>
+    </div>
+  </footer>
+
+</body>
+</html>

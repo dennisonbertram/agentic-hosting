@@ -110,17 +110,20 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 	// 1. Check services marked "running" — if container gone or exited, mark "crashed"
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, container_id, tenant_id FROM services WHERE status = 'running' AND container_id != ''`)
+		`SELECT id, container_id, tenant_id, circuit_open_count FROM services WHERE status = 'running' AND container_id != ''`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	type svcRecord struct{ id, containerID, tenantID string }
+	type svcRecord struct {
+		id, containerID, tenantID string
+		circuitOpenCount          int
+	}
 	var runningServices []svcRecord
 	for rows.Next() {
 		var s svcRecord
-		if err := rows.Scan(&s.id, &s.containerID, &s.tenantID); err != nil {
+		if err := rows.Scan(&s.id, &s.containerID, &s.tenantID, &s.circuitOpenCount); err != nil {
 			continue
 		}
 		runningServices = append(runningServices, s)
@@ -193,7 +196,9 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
 				continue
 			}
-			// Step 2: Evaluate circuit_open based on the now-updated values
+			// Step 2: Evaluate circuit_open based on the now-updated values.
+			// circuit_open_count + 1 is the new count after this opening; use it for the backoff
+			// so the delay escalates correctly: 1st open → 30m, 2nd → 1h, 3rd+ → 4h.
 			_, err = r.db.ExecContext(ctx, `
 				UPDATE services SET
 					circuit_open = CASE
@@ -210,7 +215,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 						ELSE circuit_open_count
 					END
 				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+				now, now, now, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), now, s.id, s.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
 			}
@@ -263,6 +268,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			log.Printf("reconciler: failed to update crash state for unhealthy service %s: %v", s.id, err)
 			continue
 		}
+		// circuit_open_count + 1 is the new count after this opening; use it for the backoff
+		// so the delay escalates correctly: 1st open → 30m, 2nd → 1h, 3rd+ → 4h.
 		_, err = r.db.ExecContext(ctx, `
 			UPDATE services SET
 				circuit_open = CASE
@@ -279,7 +286,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 					ELSE circuit_open_count
 				END
 			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, time.Now().Add(circuitRetryBackoff(1)).Unix(), now, s.id, s.tenantID)
+			now, now, now, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), now, s.id, s.tenantID)
 		if err != nil {
 			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
 		}

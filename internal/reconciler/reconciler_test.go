@@ -150,6 +150,63 @@ func TestReconciler_UnhealthyRestart(t *testing.T) {
 	assert.Equal(t, "crashed", status, "unhealthy service should be marked as crashed")
 }
 
+// TestReconciler_CircuitBreakerBackoffEscalation verifies that the retry delay escalates with
+// circuit_open_count: after 3 circuit opens the delay should be 4h, not 30m.
+func TestReconciler_CircuitBreakerBackoffEscalation(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"tenant-1", "Test Tenant", "test@example.com", "active", now, now)
+	require.NoError(t, err)
+
+	// Service with crash_count=4 and circuit_open_count=2 (already opened twice before).
+	// The next crash will be the 3rd circuit open → backoff should be 4h.
+	windowStart := now - 100
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO services (id, tenant_id, name, status, container_id, crash_count, circuit_open, crash_window_start, circuit_open_count, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-escalate", "tenant-1", "escalation-svc", "running", "container-esc",
+		4, 0, windowStart, 2, now, now)
+	require.NoError(t, err)
+
+	// Mock Docker: container is in the list but reports exited.
+	mock := &testutil.MockDockerClient{}
+	mock.ListContainersByLabelFn = func(ctx context.Context, label, value string) ([]string, error) {
+		if label == "ah.tenant" {
+			return []string{"container-esc"}, nil
+		}
+		return nil, nil
+	}
+	mock.InspectContainerFn = func(ctx context.Context, containerID string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "exited", ExitCode: 1}, nil
+	}
+
+	before := time.Now()
+	r := reconciler.New(db, mock, time.Minute)
+	require.NoError(t, r.ReconcileOnce(ctx))
+
+	var circuitOpen, circuitOpenCount int
+	var circuitRetryAt int64
+	err = db.QueryRowContext(ctx,
+		`SELECT circuit_open, circuit_open_count, circuit_retry_at FROM services WHERE id = ?`, "svc-escalate").
+		Scan(&circuitOpen, &circuitOpenCount, &circuitRetryAt)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, circuitOpen, "circuit should be open after 5th crash")
+	assert.Equal(t, 3, circuitOpenCount, "circuit_open_count should be 3")
+
+	// circuit_retry_at must be ~4h from now, not 30m.
+	minExpected := before.Add(4 * time.Hour).Unix()
+	maxExpected := time.Now().Add(4*time.Hour + 5*time.Second).Unix()
+	assert.GreaterOrEqual(t, circuitRetryAt, minExpected,
+		"retry delay after 3rd open should be at least 4h (got %ds from now)", circuitRetryAt-now)
+	assert.LessOrEqual(t, circuitRetryAt, maxExpected,
+		"retry delay should not exceed 4h+5s")
+}
+
 // TestReconciler_StaleDeployment verifies services stuck deploying >10min are marked failed.
 func TestReconciler_StaleDeployment(t *testing.T) {
 	db := testutil.NewStateDB(t)

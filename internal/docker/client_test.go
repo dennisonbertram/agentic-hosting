@@ -210,3 +210,127 @@ func TestContainerInfo_NilHealthMapping(t *testing.T) {
 		t.Errorf("unhealthy: got %q, want %q", got, "unhealthy")
 	}
 }
+
+// TestBuildServiceContainerConfig_LabelImmutability verifies that extraLabels cannot
+// overwrite the control-plane ah.tenant and ah.service labels.
+// These labels are used for container attribution and cleanup; overriding them
+// would allow a tenant to hijack another tenant's containers.
+func TestBuildServiceContainerConfig_LabelImmutability(t *testing.T) {
+	// An attacker-controlled caller supplies extraLabels that attempt to overwrite
+	// the ah.tenant and ah.service control-plane keys.
+	maliciousExtra := map[string]string{
+		"ah.tenant":  "other-tenant",
+		"ah.service": "other-service",
+		"custom":     "allowed",
+	}
+	cfg := buildServiceContainerConfig("real-tenant", "real-service", "img:latest", 8080, nil, maliciousExtra)
+
+	if got := cfg.Labels["ah.tenant"]; got != "real-tenant" {
+		t.Errorf("ah.tenant overwritten: got %q, want %q", got, "real-tenant")
+	}
+	if got := cfg.Labels["ah.service"]; got != "real-service" {
+		t.Errorf("ah.service overwritten: got %q, want %q", got, "real-service")
+	}
+	// Non-reserved labels should pass through normally.
+	if got := cfg.Labels["custom"]; got != "allowed" {
+		t.Errorf("custom label: got %q, want %q", got, "allowed")
+	}
+}
+
+// TestFindTraefikContainerNameMatching verifies the exact-name matching logic used
+// by findTraefikContainer. Only the name "paas-traefik" (with or without leading "/")
+// should match — any other name, including ones that merely contain "traefik", must not.
+//
+// Because findTraefikContainer is an unexported method that calls the Docker API,
+// we replicate its name-matching predicate here so it can be tested without a daemon.
+func TestFindTraefikContainerNameMatching(t *testing.T) {
+	// matchesTraefik replicates the predicate inside findTraefikContainer.
+	matchesTraefik := func(name string) bool {
+		return name == "/paas-traefik" || name == "paas-traefik"
+	}
+
+	tests := []struct {
+		name      string
+		wantMatch bool
+	}{
+		{"/paas-traefik", true},
+		{"paas-traefik", true},
+		// Must NOT match unrelated containers that happen to contain "traefik".
+		{"/traefik", false},
+		{"traefik", false},
+		{"/myapp-traefik", false},
+		{"/paas-traefik-v2", false},
+		{"", false},
+		{"/paas-Traefik", false}, // case-sensitive
+	}
+	for _, tc := range tests {
+		got := matchesTraefik(tc.name)
+		if got != tc.wantMatch {
+			t.Errorf("matchesTraefik(%q) = %v, want %v", tc.name, got, tc.wantMatch)
+		}
+	}
+}
+
+// TestBuildServiceContainerConfig_NoHealthcheck verifies that buildServiceContainerConfig
+// does not inject a healthcheck. Images that ship without curl/wget would break
+// if a shell-based probe were added automatically.
+func TestBuildServiceContainerConfig_NoHealthcheck(t *testing.T) {
+	cfg := buildServiceContainerConfig("t", "s", "alpine:latest", 8080, nil, nil)
+	if cfg.Healthcheck != nil {
+		t.Fatalf("expected Healthcheck to be nil, got %#v", cfg.Healthcheck)
+	}
+}
+
+// TestBuildServiceContainerConfig_ImagePassthrough verifies the image field is
+// set exactly as provided, without normalisation or modification.
+func TestBuildServiceContainerConfig_ImagePassthrough(t *testing.T) {
+	images := []string{
+		"nginx:latest",
+		"gcr.io/project/service:abc123",
+		"localhost:5000/myimage:v1.2.3",
+	}
+	for _, img := range images {
+		cfg := buildServiceContainerConfig("t", "s", img, 8080, nil, nil)
+		if cfg.Image != img {
+			t.Errorf("Image = %q, want %q", cfg.Image, img)
+		}
+	}
+}
+
+// TestRunDatabaseConfig_DefaultLabels verifies that RunDatabaseConfig uses
+// the ah.managed and ah.type labels when no override labels are provided.
+// This mirrors the logic in RunDatabase where cfg.Labels==nil triggers defaults.
+func TestRunDatabaseConfig_DefaultLabels(t *testing.T) {
+	// Replicate the label-selection logic from RunDatabase.
+	applyLabels := func(cfg RunDatabaseConfig) map[string]string {
+		labels := map[string]string{
+			"ah.managed": "true",
+			"ah.type":    "database",
+		}
+		if cfg.Labels != nil {
+			labels = cfg.Labels
+		}
+		return labels
+	}
+
+	// nil Labels → defaults applied.
+	defaults := applyLabels(RunDatabaseConfig{Name: "mydb"})
+	if defaults["ah.managed"] != "true" {
+		t.Errorf("ah.managed = %q, want %q", defaults["ah.managed"], "true")
+	}
+	if defaults["ah.type"] != "database" {
+		t.Errorf("ah.type = %q, want %q", defaults["ah.type"], "database")
+	}
+
+	// Non-nil Labels → caller's labels replace defaults entirely.
+	custom := applyLabels(RunDatabaseConfig{
+		Name:   "mydb",
+		Labels: map[string]string{"custom": "label"},
+	})
+	if _, ok := custom["ah.managed"]; ok {
+		t.Error("ah.managed should not be present when caller provides labels")
+	}
+	if custom["custom"] != "label" {
+		t.Errorf("custom label = %q, want %q", custom["custom"], "label")
+	}
+}

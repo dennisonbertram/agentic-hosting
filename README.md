@@ -403,6 +403,10 @@ AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
 
 See [`scripts/README.md`](scripts/README.md) for full documentation.
 
+## Comparisons
+
+- [ah vs OpenShell / NemoClaw](docs/exploration/ah-vs-openshell.md) — where each tool fits and how they complement each other
+
 ## Planned Work
 
 See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) for planned enhancements including:

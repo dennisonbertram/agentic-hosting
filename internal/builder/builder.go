@@ -197,6 +197,20 @@ func sanitizeLogLine(line string) string {
 	}, line)
 }
 
+// isGitSHA returns true if ref looks like a full (40-char) or abbreviated (7+ char)
+// git commit SHA — i.e. 7 to 40 lowercase hex characters.
+func isGitSHA(ref string) bool {
+	if len(ref) < 7 || len(ref) > 40 {
+		return false
+	}
+	for _, c := range ref {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir string, logCb func(string)) error {
 	ref := req.SourceRef
 	if ref == "" {
@@ -208,44 +222,126 @@ func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir strin
 	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	// Run git clone as ah-builder user via systemd-run for isolation
 	unitName := fmt.Sprintf("ah-clone-%s.scope", req.BuildID[:16])
-	cmd := exec.CommandContext(cloneCtx,
-		"systemd-run", "--scope", "--quiet",
-		"--unit="+unitName,
-		"-p", "MemoryMax=512M",
-		"/usr/sbin/runuser", "-u", "ah-builder", "--",
-		"git", "clone", "--depth=1", "--branch", ref,
-		"--config", "http.followRedirects=false",
-		req.SourceURL, buildDir,
-	)
-	cmd.Dir = b.workDir
-	cmd.Env = []string{
-		"HOME=/tmp",
-		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"GIT_TERMINAL_PROMPT=0",
-	}
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
+	if isGitSHA(ref) {
+		// Two-phase clone for SHA refs: git clone does not support --branch <sha>,
+		// so we do a full clone first and then checkout the specific commit.
+		logCb("[ah] Ref looks like a SHA — performing full clone then checkout")
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start git clone: %w", err)
-	}
-	b.trackUnit(req.BuildID, unitName)
-	defer b.untrackUnit(req.BuildID)
+		// Phase 1: full clone (no --depth, no --branch)
+		cmd := exec.CommandContext(cloneCtx,
+			"systemd-run", "--scope", "--quiet",
+			"--unit="+unitName,
+			"-p", "MemoryMax=512M",
+			"/usr/sbin/runuser", "-u", "ah-builder", "--",
+			"git", "clone",
+			"--config", "http.followRedirects=false",
+			req.SourceURL, buildDir,
+		)
+		cmd.Dir = b.workDir
+		cmd.Env = []string{
+			"HOME=/tmp",
+			"PATH=/usr/local/bin:/usr/bin:/bin",
+			"GIT_TERMINAL_PROMPT=0",
+		}
 
-	go streamLines(stdout, logCb)
-	go streamLines(stderr, logCb)
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("git clone failed: %w", err)
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start git clone: %w", err)
+		}
+		b.trackUnit(req.BuildID, unitName)
+		defer b.untrackUnit(req.BuildID)
+
+		go streamLines(stdout, logCb)
+		go streamLines(stderr, logCb)
+
+		if err := cmd.Wait(); err != nil {
+			return fmt.Errorf("git clone failed: %w", err)
+		}
+
+		// Phase 2: checkout the specific commit SHA
+		checkoutUnitName := fmt.Sprintf("ah-checkout-%s.scope", req.BuildID[:16])
+		checkoutCmd := exec.CommandContext(cloneCtx,
+			"systemd-run", "--scope", "--quiet",
+			"--unit="+checkoutUnitName,
+			"-p", "MemoryMax=512M",
+			"/usr/sbin/runuser", "-u", "ah-builder", "--",
+			"git", "-C", buildDir, "checkout", ref,
+		)
+		checkoutCmd.Dir = b.workDir
+		checkoutCmd.Env = []string{
+			"HOME=/tmp",
+			"PATH=/usr/local/bin:/usr/bin:/bin",
+			"GIT_TERMINAL_PROMPT=0",
+		}
+
+		checkoutStderr, err := checkoutCmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		checkoutStdout, err := checkoutCmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
+
+		if err := checkoutCmd.Start(); err != nil {
+			return fmt.Errorf("start git checkout: %w", err)
+		}
+
+		go streamLines(checkoutStdout, logCb)
+		go streamLines(checkoutStderr, logCb)
+
+		if err := checkoutCmd.Wait(); err != nil {
+			return fmt.Errorf("git checkout %s failed: %w", ref, err)
+		}
+	} else {
+		// Branch/tag ref: shallow clone directly to the ref (fast path).
+		cmd := exec.CommandContext(cloneCtx,
+			"systemd-run", "--scope", "--quiet",
+			"--unit="+unitName,
+			"-p", "MemoryMax=512M",
+			"/usr/sbin/runuser", "-u", "ah-builder", "--",
+			"git", "clone", "--depth=1", "--branch", ref,
+			"--config", "http.followRedirects=false",
+			req.SourceURL, buildDir,
+		)
+		cmd.Dir = b.workDir
+		cmd.Env = []string{
+			"HOME=/tmp",
+			"PATH=/usr/local/bin:/usr/bin:/bin",
+			"GIT_TERMINAL_PROMPT=0",
+		}
+
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start git clone: %w", err)
+		}
+		b.trackUnit(req.BuildID, unitName)
+		defer b.untrackUnit(req.BuildID)
+
+		go streamLines(stdout, logCb)
+		go streamLines(stderr, logCb)
+
+		if err := cmd.Wait(); err != nil {
+			return fmt.Errorf("git clone failed: %w", err)
+		}
 	}
 
 	logCb("[ah] Clone complete")

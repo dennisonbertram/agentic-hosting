@@ -134,6 +134,64 @@ func TestActivityList_ReturnsRecentEvents(t *testing.T) {
 	assert.Contains(t, actions, "api_key.revoked")
 }
 
+func TestBuildLogsStream_Returns404WhenBuildNotFound(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	buildMgr := builds.NewManager(stateDB, apiStubBuilder{}, nil)
+	srv := NewServer(ServerConfig{
+		Store:        &db.Store{StateDB: stateDB},
+		MasterKey:    masterKey,
+		DevMode:      true,
+		BuildManager: buildMgr,
+	})
+
+	// Request streaming logs for a build that does not exist.
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-1/builds/nonexistent/logs?follow=true", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	// Must receive 404 with a JSON error body, NOT a 200 with a silent failure.
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "build not found")
+}
+
+func TestBuildLogsStream_Returns404WhenBuildBelongsToDifferentTenant(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Seed a second tenant with a service and build that belongs to it.
+	_, err := stateDB.Exec(`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES ('tenant-other', 'Other', 'other@example.com', 'active', 1, 1)`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES ('tenant-other')`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at) VALUES ('svc-other', 'tenant-other', 'web', 'running', 'nginx:latest', 8080, 10, 20)`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at) VALUES ('b-other', 'svc-other', 'tenant-other', 'running', 'git', 'https://github.com/example/repo', 'main', 'img', 10)`)
+	require.NoError(t, err)
+
+	buildMgr := builds.NewManager(stateDB, apiStubBuilder{}, nil)
+	srv := NewServer(ServerConfig{
+		Store:        &db.Store{StateDB: stateDB},
+		MasterKey:    masterKey,
+		DevMode:      true,
+		BuildManager: buildMgr,
+	})
+
+	// tenant-1 requests logs for a build owned by tenant-other.
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-other/builds/b-other/logs?follow=true", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	// GetBuild scopes by tenantID, so this should return 404 (not a cross-tenant leak).
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "build not found")
+}
+
 func TestServiceLogsRoute_IsRegistered(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")

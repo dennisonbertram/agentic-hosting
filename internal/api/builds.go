@@ -115,6 +115,14 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	follow := r.URL.Query().Get("follow") == "true"
 
 	if follow {
+		// Preflight: verify the build exists and belongs to the tenant before
+		// committing to a streaming response. Once WriteHeader(200) is called,
+		// we can no longer send a proper error status to the client.
+		if _, err := s.buildManager.GetBuild(r.Context(), tenantID, buildID); err != nil {
+			apierr.WriteAPIError(w, err)
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Transfer-Encoding", "chunked")

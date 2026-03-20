@@ -421,6 +421,53 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 	return nil
 }
 
+// StopAllForTenant stops and removes all database containers for the tenant,
+// updating each record's status to "stopped". The database records are kept so
+// they can be restarted if the tenant is ever reactivated. Errors are logged
+// but do not abort processing of remaining databases.
+func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, container_id FROM databases WHERE tenant_id = ? AND status NOT IN ('failed', 'stopped')`,
+		tenantID,
+	)
+	if err != nil {
+		log.Printf("databases: StopAllForTenant query failed for tenant %s: %v", tenantID, err)
+		return
+	}
+	defer rows.Close()
+
+	var dbs []struct{ id, containerID string }
+	for rows.Next() {
+		var d struct{ id, containerID string }
+		if err := rows.Scan(&d.id, &d.containerID); err != nil {
+			log.Printf("databases: StopAllForTenant scan failed: %v", err)
+			continue
+		}
+		dbs = append(dbs, d)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("databases: StopAllForTenant rows error: %v", err)
+	}
+
+	for _, d := range dbs {
+		if d.containerID != "" {
+			if err := m.docker.StopContainer(ctx, d.containerID); err != nil {
+				log.Printf("databases: StopAllForTenant stop container %s: %v", d.containerID, err)
+			}
+			if err := m.docker.RemoveContainer(ctx, d.containerID); err != nil {
+				if !strings.Contains(err.Error(), "No such container") &&
+					!strings.Contains(err.Error(), "not found") {
+					log.Printf("databases: StopAllForTenant remove container %s: %v", d.containerID, err)
+				}
+			}
+		}
+		m.updateStatus(ctx, d.id, "stopped")
+	}
+	if len(dbs) > 0 {
+		log.Printf("databases: StopAllForTenant stopped %d databases for tenant %s", len(dbs), tenantID)
+	}
+}
+
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {
 	// Use a fresh context to ensure status updates succeed even if the
 	// request context is cancelled or timed out.

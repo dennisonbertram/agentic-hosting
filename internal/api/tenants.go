@@ -400,6 +400,16 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		s.svcManager.StopAllForTenant(r.Context(), tenantID)
 	}
 
+	// Stop all database containers for this tenant (records kept for potential reactivation)
+	if s.dbManager != nil {
+		s.dbManager.StopAllForTenant(r.Context(), tenantID)
+	}
+
+	// Stop the kanban board container for this tenant (record kept for potential reactivation)
+	if s.kanbanManager != nil {
+		s.kanbanManager.StopForTenant(r.Context(), tenantID)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

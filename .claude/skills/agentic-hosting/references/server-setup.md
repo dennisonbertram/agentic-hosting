@@ -52,8 +52,8 @@ which nixpacks   # must return a path
 ## 5. Clone and Build
 
 ```bash
-mkdir -p /agentic-paasd
-cd /agentic-paasd
+mkdir -p /agentic-hosting
+cd /agentic-hosting
 git clone https://github.com/dennisonbertram/agentic-hosting .
 export PATH=$PATH:/usr/local/go/bin
 CGO_ENABLED=1 go build -o /usr/local/bin/paasd ./cmd/ah/

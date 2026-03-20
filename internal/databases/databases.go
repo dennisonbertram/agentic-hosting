@@ -401,6 +401,15 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 		}
 	}
 
+	// Securely wipe volume data before removal to prevent future tenants from
+	// recovering data (issue #9). Best-effort: a wipe failure is logged but does
+	// not block removal, since the volume will be deleted immediately after.
+	if d.VolumeName != "" {
+		if err := m.wipeVolume(ctx, d.VolumeName); err != nil {
+			log.Printf("databases: wipe volume %s failed (continuing with removal): %v", d.VolumeName, err)
+		}
+	}
+
 	// Remove volume
 	if d.VolumeName != "" {
 		if err := m.docker.RemoveVolume(ctx, d.VolumeName); err != nil {
@@ -466,6 +475,15 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	if len(dbs) > 0 {
 		log.Printf("databases: StopAllForTenant stopped %d databases for tenant %s", len(dbs), tenantID)
 	}
+}
+
+// wipeVolume runs a short-lived container to overwrite all files in the named
+// volume with zeros, ensuring a future tenant cannot recover data after a
+// database is deleted. The wipe uses a 2-minute timeout to bound the operation.
+func (m *Manager) wipeVolume(ctx context.Context, volumeName string) error {
+	wipeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return m.docker.WipeVolume(wipeCtx, volumeName)
 }
 
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {

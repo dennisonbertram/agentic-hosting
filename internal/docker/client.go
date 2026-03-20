@@ -40,6 +40,7 @@ type Client interface {
 	CreateVolume(ctx context.Context, name string) error
 	RemoveVolume(ctx context.Context, name string) error
 	RemoveVolumeSafe(ctx context.Context, name string) error
+	WipeVolume(ctx context.Context, name string) error
 	RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error)
 	StopAndRemoveByName(ctx context.Context, name string) error
 	PruneDanglingImages(ctx context.Context) (int, error)
@@ -441,6 +442,54 @@ func (c *DockerClient) RemoveVolume(ctx context.Context, name string) error {
 // be attached to a running container.
 func (c *DockerClient) RemoveVolumeSafe(ctx context.Context, name string) error {
 	return c.cli.VolumeRemove(ctx, name, false)
+}
+
+// WipeVolume overwrites all files in the named volume with zeros using a
+// short-lived busybox container. This prevents a future tenant from recovering
+// data after a database is deleted. The container is removed automatically
+// after the wipe completes (--rm equivalent via AutoRemove).
+// A best-effort operation: errors are logged but do not block volume removal.
+func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
+	containerCfg := &container.Config{
+		Image: "busybox:latest",
+		Cmd:   []string{"sh", "-c", "find /data -type f -exec sh -c 'dd if=/dev/zero of=\"$1\" bs=1M conv=notrunc 2>/dev/null; rm -f \"$1\"' _ {} \\;"},
+	}
+	hostCfg := &container.HostConfig{
+		Mounts: []mount.Mount{
+			{
+				Type:   mount.TypeVolume,
+				Source: name,
+				Target: "/data",
+			},
+		},
+		AutoRemove: true,
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("wipe volume %s: create container: %w", name, err)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		// Clean up the created-but-not-started container
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return fmt.Errorf("wipe volume %s: start container: %w", name, err)
+	}
+
+	// Wait for the wipe container to finish
+	statusCh, errCh := c.cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("wipe volume %s: wait: %w", name, err)
+		}
+	case body := <-statusCh:
+		if body.Error != nil {
+			return fmt.Errorf("wipe volume %s: container error: %s", name, body.Error.Message)
+		}
+	}
+
+	return nil
 }
 
 // RunDatabase creates and starts a container with host port mapping and

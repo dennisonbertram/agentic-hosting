@@ -253,6 +253,64 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	assert.ErrorContains(t, err, "database quota exceeded (max 1)")
 }
 
+// TestDelete_WipesVolumeBeforeRemoval verifies that WipeVolume is called before
+// RemoveVolume when a database is deleted, ensuring data cannot be recovered by
+// a future tenant (issue #9).
+func TestDelete_WipesVolumeBeforeRemoval(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+
+	var (
+		listeners  []net.Listener
+		callOrder  []string
+		wipeVolume string
+	)
+	t.Cleanup(func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+	})
+
+	dockerClient := &testutil.MockDockerClient{
+		RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(cfg.HostPort))
+			require.NoError(t, err)
+			listeners = append(listeners, ln)
+			return "container-" + cfg.Name, nil
+		},
+		WipeVolumeFn: func(ctx context.Context, name string) error {
+			callOrder = append(callOrder, "wipe")
+			wipeVolume = name
+			return nil
+		},
+		RemoveVolumeFn: func(ctx context.Context, name string) error {
+			callOrder = append(callOrder, "remove")
+			return nil
+		},
+	}
+
+	mgr := NewManager(stateDB, dockerClient, []byte("0123456789abcdef0123456789abcdef"))
+
+	// Create a postgres database
+	db, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "wipe-test", Type: "postgres"})
+	require.NoError(t, err)
+	require.Equal(t, "ready", db.Status)
+	expectedVolume := db.VolumeName
+
+	// Reset call order tracking to isolate delete behaviour
+	callOrder = nil
+
+	// Delete the database
+	err = mgr.Delete(context.Background(), "tenant-1", db.ID)
+	require.NoError(t, err)
+
+	// Wipe must have been called before remove, and on the correct volume
+	require.Equal(t, []string{"wipe", "remove"}, callOrder,
+		"WipeVolume must be called before RemoveVolume")
+	assert.Equal(t, expectedVolume, wipeVolume,
+		"WipeVolume must receive the database's volume name")
+}
+
 func seedDatabaseTestData(t *testing.T, stateDB *sql.DB, maxDatabases int) {
 	t.Helper()
 	_, err := stateDB.Exec(

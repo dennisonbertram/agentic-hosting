@@ -184,19 +184,32 @@ func traefikLabels(serviceID, dnsLabel, baseDomain string, port int) map[string]
 
 // writeTraefikRoute writes a Traefik dynamic config file for a service.
 // The file is read by Traefik's file provider and hot-reloaded.
-// Returns nil (no-op) in localhost mode or when traefikConfigDir is empty.
+//
+// Two modes:
+//   - Production (baseDomain set): routes {dnsLabel}.{baseDomain} via HTTPS/letsencrypt.
+//   - Localhost  (baseDomain empty): routes {serviceID}.localhost via HTTP (web entrypoint).
+//     This makes dev-mode services reachable at http://{serviceID}.localhost.
+//
+// Returns nil (no-op) when traefikConfigDir is empty.
 func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain string, port int) error {
-	if m.traefikConfigDir == "" || dnsLabel == "" || baseDomain == "" {
+	if m.traefikConfigDir == "" {
 		return nil
 	}
-	if !isDNSLabelSafe(dnsLabel) || !baseDomainRe.MatchString(baseDomain) {
-		return nil
-	}
-	host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
+
 	containerName := fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
 	portStr := strconv.Itoa(port)
 
-	content := fmt.Sprintf(`http:
+	var content string
+	if baseDomain != "" {
+		// Production mode: HTTPS with Let's Encrypt
+		if dnsLabel == "" {
+			return nil
+		}
+		if !isDNSLabelSafe(dnsLabel) || !baseDomainRe.MatchString(baseDomain) {
+			return nil
+		}
+		host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
+		content = fmt.Sprintf(`http:
   routers:
     svc-%s:
       rule: "Host(`+"`%s`"+`)"
@@ -211,6 +224,22 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
         servers:
           - url: "http://%s:%s"
 `, serviceID, host, serviceID, serviceID, containerName, portStr)
+	} else {
+		// Localhost mode: HTTP-only, {serviceID}.localhost
+		content = fmt.Sprintf(`http:
+  routers:
+    svc-%s:
+      rule: "Host(`+"`%s.localhost`"+`)"
+      entryPoints:
+        - web
+      service: svc-%s
+  services:
+    svc-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%s"
+`, serviceID, serviceID, serviceID, serviceID, containerName, portStr)
+	}
 
 	// Write atomically: write to a temp file then rename to avoid Traefik
 	// reading a partially-written config during a hot reload.

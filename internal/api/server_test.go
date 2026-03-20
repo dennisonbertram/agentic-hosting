@@ -13,14 +13,16 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeDatabaseManager struct {
-	createCalls int
-	createFn    func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
+	createCalls         int
+	stopAllForTenantCalls []string
+	createFn            func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
 }
 
 func (f *fakeDatabaseManager) Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
@@ -55,6 +57,34 @@ func (f *fakeDatabaseManager) GetConnectionString(ctx context.Context, tenantID,
 
 func (f *fakeDatabaseManager) Delete(ctx context.Context, tenantID, dbID string) error {
 	return nil
+}
+
+func (f *fakeDatabaseManager) StopAllForTenant(ctx context.Context, tenantID string) {
+	f.stopAllForTenantCalls = append(f.stopAllForTenantCalls, tenantID)
+}
+
+type fakeKanbanManager struct {
+	stopForTenantCalls []string
+}
+
+func (f *fakeKanbanManager) Create(ctx context.Context, tenantID string) (*kanbans.Kanban, error) {
+	return nil, nil
+}
+
+func (f *fakeKanbanManager) Get(ctx context.Context, tenantID string) (*kanbans.Kanban, error) {
+	return nil, nil
+}
+
+func (f *fakeKanbanManager) GetAdminToken(ctx context.Context, tenantID string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeKanbanManager) Delete(ctx context.Context, tenantID string) error {
+	return nil
+}
+
+func (f *fakeKanbanManager) StopForTenant(ctx context.Context, tenantID string) {
+	f.stopForTenantCalls = append(f.stopForTenantCalls, tenantID)
 }
 
 func TestDatabaseCreate_UsesIdempotencyMiddleware(t *testing.T) {
@@ -169,6 +199,41 @@ func TestServiceLogsRoute_IsRegisteredAndHasNoTimeoutDeadline(t *testing.T) {
 func TestTypedErrorRouting(t *testing.T) {
 	// Typed errors are now handled by apierr.WriteAPIError, no string matching needed.
 	// This test verifies the apierr package is correctly integrated (tested in apierr_test.go).
+}
+
+// TestTenantDelete_CleansUpAllManagers verifies that DELETE /v1/tenant triggers
+// StopAllForTenant on the database manager and StopForTenant on the kanban
+// manager in addition to stopping services. This is the fix for GitHub issue #55:
+// previously only services were stopped on tenant suspension, leaving database and
+// kanban containers running and consuming resources.
+func TestTenantDelete_CleansUpAllManagers(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	dbMgr := &fakeDatabaseManager{}
+	kanbanMgr := &fakeKanbanManager{}
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		DatabaseManager: dbMgr,
+		KanbanManager:   kanbanMgr,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/tenant", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	assert.Equal(t, []string{"tenant-1"}, dbMgr.stopAllForTenantCalls,
+		"database manager StopAllForTenant should be called with the tenant ID on deletion")
+	assert.Equal(t, []string{"tenant-1"}, kanbanMgr.stopForTenantCalls,
+		"kanban manager StopForTenant should be called with the tenant ID on deletion")
 }
 
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {

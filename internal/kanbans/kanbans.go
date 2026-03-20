@@ -419,6 +419,36 @@ func (m *Manager) Delete(ctx context.Context, tenantID string) error {
 	return nil
 }
 
+// StopForTenant stops the kanban container for a tenant without deleting the
+// DB record, so it can be restarted if the tenant is ever reactivated. Errors
+// are logged but not returned — suspension should be best-effort.
+func (m *Manager) StopForTenant(ctx context.Context, tenantID string) {
+	k, err := m.Get(ctx, tenantID)
+	if err != nil {
+		// Not found is expected when the tenant has no kanban board.
+		if strings.Contains(err.Error(), "not found") {
+			return
+		}
+		log.Printf("kanbans: StopForTenant get failed for tenant %s: %v", tenantID, err)
+		return
+	}
+
+	if k.ContainerID != "" {
+		if err := m.docker.StopContainer(ctx, k.ContainerID); err != nil {
+			log.Printf("kanbans: StopForTenant stop container %s: %v", k.ContainerID, err)
+		}
+		if err := m.docker.RemoveContainer(ctx, k.ContainerID); err != nil {
+			if !strings.Contains(err.Error(), "No such container") &&
+				!strings.Contains(err.Error(), "not found") {
+				log.Printf("kanbans: StopForTenant remove container %s: %v", k.ContainerID, err)
+			}
+		}
+	}
+
+	m.updateStatus(ctx, k.ID, "stopped")
+	log.Printf("kanbans: StopForTenant stopped kanban board for tenant %s", tenantID)
+}
+
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {
 	freshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

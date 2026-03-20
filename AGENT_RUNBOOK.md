@@ -57,6 +57,11 @@ curl -s -X POST "$BASE_URL/v1/auth/keys" \
 # List API keys
 curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/auth/keys" | jq .
 
+# Recover access when all API keys are lost (uses bootstrap token, not API key)
+curl -s -X POST "$BASE_URL/v1/auth/recover" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "tenant@example.com", "bootstrap_token": "'"$BOOTSTRAP_TOKEN"'"}' | jq .
+
 # Deploy a service from a Docker image
 curl -s -X POST "$BASE_URL/v1/services" \
   -H "Authorization: Bearer $API_KEY" \
@@ -538,7 +543,65 @@ Your API key is wrong, revoked, or missing.
 
 1. Verify the `Authorization: Bearer <key>` header is present and formatted correctly.
 2. Check whether the key was recently rotated or deleted: `GET /v1/auth/keys`
-3. If the key is gone, you need a new one — which requires a working key to create. If you have lost all keys, you need the bootstrap token to register a new tenant.
+3. If the key is gone, you need a new one — which requires a working key to create. If you have lost all keys, use the recovery endpoint below.
+
+---
+
+## Task: Recover Access When All API Keys Are Lost
+
+If every API key for your tenant has been revoked, expired, or deleted, use the recovery endpoint to issue a new key. This does **not** require an existing API key — it uses the bootstrap token instead.
+
+This is a privileged operation: the bootstrap token is the operator secret stored in `/etc/default/ah` on the server. Treat it like a root password.
+
+### Step 1 — Get the Bootstrap Token
+
+```bash
+BOOTSTRAP_TOKEN=$(ssh root@<your-server-ip> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah | cut -d= -f2")
+```
+
+### Step 2 — Call the Recovery Endpoint
+
+```bash
+curl -s -X POST "$BASE_URL/v1/auth/recover" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\": \"your-tenant@example.com\", \"bootstrap_token\": \"$BOOTSTRAP_TOKEN\"}" | jq .
+```
+
+A successful response:
+
+```json
+{
+  "id":         "key_...",
+  "key":        "keyid.secret",
+  "name":       "recovery-20260320",
+  "created_at": 1742432400
+}
+```
+
+### Step 3 — Save the New Key Immediately
+
+The `key` value is shown **once only** and cannot be retrieved again.
+
+```bash
+API_KEY="keyid.secret"   # replace with the actual value from the response
+```
+
+### Step 4 — Verify It Works
+
+```bash
+curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/tenant" | jq .
+```
+
+You should see your tenant info. The tenant account and all services/databases are intact — nothing is lost.
+
+### Notes
+
+- The recovery endpoint is rate-limited: **5 attempts per IP per hour**, 20 globally per hour. Do not hammer it.
+- An unknown email returns `401` (same as a bad token) to prevent tenant enumeration.
+- A suspended tenant account returns `403`. Contact the operator to reactivate.
+- If you receive `503`, the operator has not configured a bootstrap token. Contact them directly.
+
+---
 
 ### `429 Too Many Requests`
 
@@ -740,6 +803,8 @@ The reconciler means that manually stopping a Docker container outside the API w
 | Build sources supported | GitHub, GitLab, Bitbucket, sr.ht, Codeberg (HTTPS only) |
 | Idempotency key scope | POST, PUT, DELETE requests |
 | Service registration header | `X-Bootstrap-Token` (HMAC-compared) |
+| Key recovery rate limit (per IP) | 5 per hour |
+| Key recovery rate limit (global) | 20 per hour |
 
 ---
 

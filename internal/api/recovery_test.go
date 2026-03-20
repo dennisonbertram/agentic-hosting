@@ -1,0 +1,197 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// recoverRequest builds a POST /v1/auth/recover request with a distinct
+// source IP so tests do not share the same rate-limit bucket.  The limiter
+// is a package-level singleton that persists across all tests in the package,
+// so each test must use its own IP to avoid being erroneously rate-limited.
+func recoverRequest(ip string, body []byte) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/recover", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// httptest.NewRequest sets RemoteAddr to "192.0.2.1:1234" (loopback-adjacent
+	// test address).  We override X-Real-Ip from a loopback RemoteAddr so
+	// trustedRealIP picks up the per-test IP.
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Real-Ip", ip)
+	return req
+}
+
+func TestHandleKeyRecover(t *testing.T) {
+	const bootstrapToken = "test-bootstrap-token-for-recovery"
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// newServer creates a fresh in-memory DB with a single active tenant that
+	// has NO API keys — the scenario described in issue #12.
+	newServer := func(t *testing.T) *Server {
+		t.Helper()
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-recover", "Recovery Tenant", "recover@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-recover")
+		require.NoError(t, err)
+
+		return NewServer(ServerConfig{
+			Store:          &db.Store{StateDB: stateDB},
+			MasterKey:      masterKey,
+			DevMode:        true,
+			BootstrapToken: bootstrapToken,
+		})
+	}
+
+	t.Run("valid bootstrap token and email creates a new key", func(t *testing.T) {
+		srv := newServer(t)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "recover@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.1.1", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "expected 201, got: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.ID, "key ID should be set")
+		assert.NotEmpty(t, resp.Key, "raw key should be present")
+		assert.Contains(t, resp.Name, "recovery-", "name should be prefixed with recovery-")
+		assert.Greater(t, resp.CreatedAt, int64(0), "created_at should be positive unix timestamp")
+		// Key must be in "keyID.secret" format
+		assert.Contains(t, resp.Key, ".", "key should be in keyID.secret format")
+	})
+
+	t.Run("invalid bootstrap token returns 401", func(t *testing.T) {
+		srv := newServer(t)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "recover@example.com",
+			BootstrapToken: "wrong-token",
+		})
+		req := recoverRequest("10.0.1.2", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	})
+
+	t.Run("unknown email with valid bootstrap token returns 401 (no email enumeration)", func(t *testing.T) {
+		srv := newServer(t)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "nobody@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.1.3", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		// Must return 401 (not 404) to prevent tenant email enumeration.
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	})
+
+	t.Run("invalid email format returns 400", func(t *testing.T) {
+		srv := newServer(t)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "not-an-email",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.1.4", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("suspended tenant returns 403", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'suspended', 1, 1)`,
+			"tenant-suspended", "Suspended", "suspended@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-suspended")
+		require.NoError(t, err)
+
+		srv := NewServer(ServerConfig{
+			Store:          &db.Store{StateDB: stateDB},
+			MasterKey:      masterKey,
+			DevMode:        true,
+			BootstrapToken: bootstrapToken,
+		})
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "suspended@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.1.5", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusForbidden, rr.Code)
+	})
+
+	t.Run("empty bootstrap token in server config returns 503", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			// BootstrapToken intentionally omitted — recovery must be unavailable
+		})
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "anyone@example.com",
+			BootstrapToken: "anything",
+		})
+		req := recoverRequest("10.0.1.6", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	})
+
+	t.Run("recovered key is usable for authenticated requests", func(t *testing.T) {
+		srv := newServer(t)
+
+		// Step 1 — recover a key
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "recover@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		recoverReq := recoverRequest("10.0.1.7", body)
+		recoverRR := httptest.NewRecorder()
+		srv.ServeHTTP(recoverRR, recoverReq)
+		require.Equal(t, http.StatusCreated, recoverRR.Code, "recovery should return 201, got: %s", recoverRR.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(recoverRR.Body).Decode(&resp))
+
+		// Step 2 — use the recovered key to call an authenticated endpoint
+		tenantReq := httptest.NewRequest(http.MethodGet, "/v1/tenant", nil)
+		tenantReq.Header.Set("Authorization", "Bearer "+resp.Key)
+		tenantRR := httptest.NewRecorder()
+		srv.ServeHTTP(tenantRR, tenantReq)
+
+		assert.Equal(t, http.StatusOK, tenantRR.Code,
+			"recovered key should authenticate successfully: %s", tenantRR.Body.String())
+	})
+}

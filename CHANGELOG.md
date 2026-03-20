@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-20
+
+### Added
+
+- Custom domain support — `--base-domain` CLI flag makes service URLs `https://{name}.{base-domain}` with Traefik auto-TLS via Let's Encrypt (#14)
+- Snapshot and template support for instant environment forking (#43)
+- Per-tenant Vikunja kanban board provisioning (#46, #47)
+- Supervisory dashboard — tenant control plane for services, databases, builds, and keys (#37)
+- API key recovery via bootstrap token: `POST /v1/auth/recover` (#12)
+- Redeploy endpoint: `POST /v1/services/{id}/redeploy` and deployment history: `GET /v1/services/{id}/deployments` (#6)
+- Dev-only localhost Traefik routing when `baseDomain` is unset (#67)
+- Cron-friendly health check script with webhook alerting (#21)
+- Typed API errors, LRU auth cache, pagination improvements (#39)
+- Claude Code skill restructured with progressive disclosure and `ah-` slash commands
+- Changelog page on website (`/changelog/`)
+
+### Fixed
+
+- Protocol-level readiness checks for Postgres and Redis — no more false positives from silent TCP listeners (#51)
+- Support SHA refs in git builds via two-phase clone+checkout (#56)
+- Preflight-check build existence before streaming logs (#53)
+- Circuit breaker backoff now escalates with `circuit_open_count` (#54)
+- Databases and kanbans stopped when tenant is suspended or deleted (#55)
+- Volume data wiped before removal on database delete (#9)
+- Restart now recreates container so env var changes take effect
+- Renamed `/agentic-paasd` to `/agentic-hosting` across docs and server (#19)
+
+### Security
+
+- HKDF key-separation scheme documented with 5 purpose-specific subkeys (#8)
+- Tenant-to-Traefik reachability analysis with iptables mitigation (#50)
+- Build egress allowlist architecture decision — Squid proxy approach (#3)
+- Firecracker integration plan from gVisor (#1)
+- Horizontal scaling gap analysis — 24 single-host assumptions identified (#2)
+- Daemonless build prototype — Kaniko recommended (#7)
+- Dev-environments MVP specification (#41)
+
 ## [0.3.0] - 2026-03-10
 
 ### Added

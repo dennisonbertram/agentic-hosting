@@ -61,6 +61,14 @@ GET /v1/auth/keys
 
 # Revoke a key
 DELETE /v1/auth/keys/:keyID
+
+# Recover access (requires bootstrap token — use when all keys are lost)
+POST /v1/auth/recover
+Headers: X-Bootstrap-Token: <bootstrap-token>, Content-Type: application/json
+Body: {"email":"tenant@example.com"}
+# → {"api_key":"newkeyid.newsecret"}
+# Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
+# Email must match the tenant's registered email
 ```
 
 ---
@@ -78,6 +86,11 @@ Body: {
   "cpu_count": 1              # optional, default 1
 }
 # → {"id":"hex32","name":"...","status":"deploying","url":"http://<id>.localhost",...}
+
+# Create service from snapshot (instant fork — copies image, env, resource limits)
+POST /v1/services?from_snapshot=:snapshotID
+Body: {"name":"forked-service"}
+# → same response as create service
 
 # List services (paginated)
 GET /v1/services?limit=50&offset=0
@@ -108,6 +121,15 @@ Body: {"KEY":"value","OTHER":"value2"}
 
 # Env vars: delete one key
 DELETE /v1/services/:serviceID/env/:key
+
+# Redeploy (rebuild from same git URL/branch as last build)
+POST /v1/services/:serviceID/redeploy
+# → {"id":"...","status":"pending","created_at":unix}
+# Returns the new build object; equivalent to starting a new build with the same git_url/branch
+
+# Deployment history
+GET /v1/services/:serviceID/deployments
+# → [{"id":"...","image":"...","status":"running","deployed_at":unix}]
 
 # Stream runtime logs (basic — stdout/stderr not yet fully supported, see #11)
 GET /v1/services/:serviceID/logs

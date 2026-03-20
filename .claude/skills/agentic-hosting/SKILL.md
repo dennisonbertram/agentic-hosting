@@ -1,11 +1,11 @@
 ---
 name: agentic-hosting
-description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
+description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", "redeploy a service", "recover an API key", "check tenant usage", "view deployment history", "fork a service", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
 ---
 
 # agentic-hosting Operator Skill
 
-agentic-hosting (`ah`) is an agentic-first self-hosted PaaS. Operate it entirely via REST API — no GUI required. Every action is a curl command. The system builds and runs containerized apps using Nixpacks (from Git) or Docker images, with full gVisor sandbox isolation.
+agentic-hosting (`ah`) is an agentic-first self-hosted PaaS (v0.4.0). Operate it entirely via REST API — no GUI required. Every action is a curl command. The system builds and runs containerized apps using Nixpacks (from Git) or Docker images, with full gVisor sandbox isolation.
 
 ## Prerequisites
 
@@ -21,7 +21,20 @@ Verify connectivity:
 curl -s $AH_URL/v1/system/health          # → {"status":"ok"}
 ```
 
-Don't have an API key? See **Register a Tenant** below.
+Don't have an API key? See **Register a Tenant** or **Recover an API Key** below.
+
+## Slash Commands
+
+Six slash commands are available when the Claude Code skill is installed:
+
+| Command | Purpose |
+|---------|---------|
+| `/ah-deploy <git-url-or-image> <name> [port]` | Deploy a service from git URL or Docker image |
+| `/ah-status` | Full health dashboard — disk, services, databases, circuits |
+| `/ah-db <service-name> <postgres\|redis> [db-name]` | Provision a database and wire it to a service |
+| `/ah-logs <service-name> [build-id]` | Stream build logs for a service |
+| `/ah-register <tenant-name> <email>` | Register a new tenant and get an API key |
+| `/ah-snapshot <service-name> [snapshot-name]` | Take a snapshot for instant environment forking |
 
 ---
 
@@ -42,6 +55,19 @@ curl -s -X POST $AH_URL/v1/tenants/register \
 # SAVE the api_key — it is shown exactly once
 ```
 
+## Recover an API Key
+
+Lost all API keys? Recover access using the bootstrap token and your tenant email:
+
+```bash
+curl -s -X POST $AH_URL/v1/auth/recover \
+  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "agent@example.com"}'
+# → {"api_key": "newkeyid.newsecret"}
+# Rate limited: same limits as tenant registration (5/hour per IP)
+```
+
 ---
 
 ## Deploy a Service
@@ -58,9 +84,19 @@ echo "Service ID: $SERVICE_ID"
 echo "URL: $(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["url"])')"
 ```
 
+### From a snapshot (instant fork)
+
+```bash
+SVC=$(curl -s -X POST "$AH_URL/v1/services?from_snapshot=$SNAPSHOT_ID" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-fork"}')
+# Creates a new service with the same image, env vars, and resource limits as the snapshot
+```
+
 ### Build from Git (Nixpacks — zero config)
 
-Supported: GitHub, GitLab, Bitbucket, sr.ht, Codeberg (HTTPS URLs only)
+Supported: GitHub, GitLab, Bitbucket, sr.ht, Codeberg (HTTPS URLs only). Supports branch names and full SHA commit refs.
 
 ```bash
 # 1. Create service
@@ -70,7 +106,7 @@ SVC=$(curl -s -X POST $AH_URL/v1/services \
   -d '{"name":"my-app","port":3000}')
 SERVICE_ID=$(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 
-# 2. Start build
+# 2. Start build (branch or SHA ref)
 BUILD=$(curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/builds \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
@@ -80,6 +116,14 @@ BUILD_ID=$(echo $BUILD | python3 -c 'import sys,json; print(json.load(sys.stdin)
 # 3. Stream build logs (blocks until done)
 curl -sN -H "Authorization: Bearer $AH_KEY" \
   "$AH_URL/v1/services/$SERVICE_ID/builds/$BUILD_ID/logs?follow=true"
+```
+
+### Redeploy (rebuild from same git source)
+
+```bash
+curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/redeploy \
+  -H "Authorization: Bearer $AH_KEY"
+# Triggers a new build from the same git URL/branch as the last build
 ```
 
 ### Poll until running
@@ -99,15 +143,24 @@ for i in $(seq 1 120); do
 done
 ```
 
+### Deployment History
+
+```bash
+# View recent deployments for a service
+curl -s -H "Authorization: Bearer $AH_KEY" \
+  $AH_URL/v1/services/$SERVICE_ID/deployments | python3 -m json.tool
+# → [{"id":"...","image":"...","status":"running","deployed_at":unix}]
+```
+
 ### Service URLs
 
 The URL a service receives depends on whether the platform was started with `--base-domain`:
 
 **Without `--base-domain` (default):**
 ```
-http://{service-id}.localhost
+http://{dns-label}.localhost
 ```
-Not publicly routable — only accessible inside the server's Docker network. Useful for internal services or when you are managing routing yourself.
+When running locally, Traefik file-provider routes are auto-generated for each service. Access via `curl -H "Host: {dns-label}.localhost" http://localhost`.
 
 **With `--base-domain apps.example.com`:**
 ```
@@ -116,21 +169,12 @@ https://{dns-label}.apps.example.com
 The `dns_label` is derived from the service name: lowercased, non-alphanumeric characters replaced with hyphens. Example: service named `My App` gets label `my-app` → URL `https://my-app.apps.example.com`.
 
 **Check which mode the platform is in:**
-```bash
-curl -s -H "Authorization: Bearer $AH_KEY" \
-  $AH_URL/v1/system/health/detailed | python3 -m json.tool
-# Look for "baseDomain" in the response
-# If present and non-empty → subdomain mode is active
-# If absent or empty → localhost mode
-```
+Create any service and inspect the `url` field in the response. If it contains `.localhost`, the platform is in localhost mode. If it contains a real domain, subdomain mode is active.
 
 **Service name constraints when base-domain is set:**
 - Must produce a valid DNS label (max 63 chars after conversion)
 - Reserved names are blocked: `api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry` — using one returns `422`
 - DNS labels are globally unique across all tenants (first-come-first-served) — if another tenant has `blog.apps.example.com`, your service named `blog` will be rejected with `422`
-
-**Predicting the URL before creating a service:**
-Lowercase the name, replace any non-alphanumeric character with a hyphen, trim leading/trailing hyphens. Check `baseDomain` from the health endpoint, then the URL will be `https://{label}.{baseDomain}`.
 
 **The URL is stable.** Once a service is deployed its URL does not change, even if the daemon restarts with a different `--base-domain` value. The `dns_label` is stored in the database at creation time.
 
@@ -185,6 +229,9 @@ curl -s -X POST   $AH_URL/v1/services/$SERVICE_ID/start   -H "Authorization: Bea
 curl -s -X POST   $AH_URL/v1/services/$SERVICE_ID/restart -H "Authorization: Bearer $AH_KEY"
 curl -s -X DELETE $AH_URL/v1/services/$SERVICE_ID         -H "Authorization: Bearer $AH_KEY"
 
+# Redeploy (rebuild from same git source)
+curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/redeploy -H "Authorization: Bearer $AH_KEY"
+
 # Reset circuit breaker (after 5 crashes in 10 min)
 curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/reset -H "Authorization: Bearer $AH_KEY"
 
@@ -201,13 +248,23 @@ curl -s -X POST $AH_URL/v1/auth/keys \
   -d '{"name":"agent-key"}'
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/auth/keys | python3 -m json.tool
 curl -s -X DELETE $AH_URL/v1/auth/keys/$KEY_ID -H "Authorization: Bearer $AH_KEY"
+
+# Tenant info and usage quotas
+curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/tenant | python3 -m json.tool
+curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/tenant/usage | python3 -m json.tool
+
+# Update tenant name
+curl -s -X PATCH $AH_URL/v1/tenant \
+  -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"new-name"}'
+
+# Activity feed (synthetic event log across all resources)
+curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/activity?limit=50" | python3 -m json.tool
 ```
 
 ---
 
-## New Features (v2026-03)
-
-### Snapshots — fork a service instantly
+## Snapshots — fork a service instantly
 
 ```bash
 # Take a snapshot of a running service
@@ -217,9 +274,18 @@ curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/snapshots \
 
 # List snapshots
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/snapshots | python3 -m json.tool
+
+# Create a new service from a snapshot (instant fork)
+curl -s -X POST "$AH_URL/v1/services?from_snapshot=$SNAPSHOT_ID" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"forked-service"}'
+
+# Delete a snapshot
+curl -s -X DELETE $AH_URL/v1/snapshots/$SNAPSHOT_ID -H "Authorization: Bearer $AH_KEY"
 ```
 
-### Kanban — per-tenant Vikunja board
+## Kanban — per-tenant Vikunja board
 
 ```bash
 # Provision a Vikunja kanban board (takes ~30s, use idempotency key)
@@ -230,6 +296,9 @@ curl -s -X POST $AH_URL/v1/kanban \
 # Get board URL + credentials
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban | python3 -m json.tool
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban/admin-token | python3 -m json.tool
+
+# Delete board (irreversible)
+curl -s -X DELETE $AH_URL/v1/kanban -H "Authorization: Bearer $AH_KEY"
 ```
 
 ---
@@ -245,6 +314,7 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban/admin-token | pytho
 | Service stuck `deploying` >10 min | Server marks it `failed` at 10 min; check health, delete and retry |
 | `circuit_open` | Fix the app, then `POST .../reset`, then `POST .../start` |
 | Build `failed` | Stream build logs with `?follow=true` for the error |
+| All API keys lost | Use `POST /v1/auth/recover` with bootstrap token + tenant email |
 
 For idempotency, limits, and advanced operations see `references/operations.md`.
 
@@ -253,7 +323,6 @@ For idempotency, limits, and advanced operations see `references/operations.md`.
 ## Known Gaps
 
 - No runtime log streaming (#11) — build logs work; container stdout/stderr via API not yet available
-- No API key recovery if all keys lost (#12) — requires SSH to the server
 
 ---
 
@@ -262,3 +331,4 @@ For idempotency, limits, and advanced operations see `references/operations.md`.
 - **`references/api-reference.md`** — Full endpoint listing with request/response shapes
 - **`references/operations.md`** — Idempotency, rate limits, circuit breaker, disk management
 - **`references/custom-domains.md`** — How to expose a service on a real domain via Traefik
+- **`references/server-setup.md`** — Fresh server installation from scratch

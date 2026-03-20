@@ -83,6 +83,10 @@ type MockDockerClient struct {
 	RemoveVolumeSafeFn    func(ctx context.Context, name string) error
 	RemoveVolumeSafeCalls []string // volume names removed
 
+	// WipeVolume
+	WipeVolumeFn    func(ctx context.Context, name string) error
+	WipeVolumeCalls []string // volume names wiped
+
 	// RunDatabase
 	RunDatabaseFn    func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error)
 	RunDatabaseCalls int
@@ -243,6 +247,14 @@ func (m *MockDockerClient) RemoveVolumeSafe(ctx context.Context, name string) er
 	m.RemoveVolumeSafeCalls = append(m.RemoveVolumeSafeCalls, name)
 	if m.RemoveVolumeSafeFn != nil {
 		return m.RemoveVolumeSafeFn(ctx, name)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) WipeVolume(ctx context.Context, name string) error {
+	m.WipeVolumeCalls = append(m.WipeVolumeCalls, name)
+	if m.WipeVolumeFn != nil {
+		return m.WipeVolumeFn(ctx, name)
 	}
 	return nil
 }

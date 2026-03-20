@@ -298,7 +298,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, "letsencrypt")
 	})
 
-	t.Run("no-op without baseDomain", func(t *testing.T) {
+	t.Run("writes localhost route without baseDomain", func(t *testing.T) {
 		stateDB := testutil.NewStateDB(t)
 		seedTenant(t, stateDB)
 		mock := &testutil.MockDockerClient{}
@@ -309,9 +309,15 @@ func TestWriteTraefikRoute(t *testing.T) {
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "", 8080)
 		require.NoError(t, err)
 
-		// No file should be written
-		files, _ := os.ReadDir(dir)
-		assert.Empty(t, files)
+		data, err := os.ReadFile(dir + "/svc123.yml")
+		require.NoError(t, err)
+		content := string(data)
+		assert.Contains(t, content, "Host(`svc123.localhost`)")
+		assert.Contains(t, content, "web", "localhost mode should use HTTP entrypoint")
+		assert.NotContains(t, content, "websecure", "localhost mode should not use HTTPS entrypoint")
+		assert.NotContains(t, content, "letsencrypt", "localhost mode should not use TLS")
+		assert.Contains(t, content, "ah-tenant1-svc123")
+		assert.Contains(t, content, "8080")
 	})
 
 	t.Run("no-op without traefikConfigDir", func(t *testing.T) {
@@ -323,6 +329,37 @@ func TestWriteTraefikRoute(t *testing.T) {
 		mgr := NewManager(stateDB, mock, masterKey, "example.com", "")
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "example.com", 8080)
 		require.NoError(t, err)
+	})
+
+	t.Run("no-op without traefikConfigDir in localhost mode", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		seedTenant(t, stateDB)
+		mock := &testutil.MockDockerClient{}
+		masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+		mgr := NewManager(stateDB, mock, masterKey, "", "")
+		err := mgr.writeTraefikRoute("svc123", "tenant1", "", "", 8080)
+		require.NoError(t, err)
+	})
+
+	t.Run("localhost route uses serviceID not dnsLabel", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		seedTenant(t, stateDB)
+		mock := &testutil.MockDockerClient{}
+		masterKey := []byte("0123456789abcdef0123456789abcdef")
+		dir := t.TempDir()
+
+		mgr := NewManager(stateDB, mock, masterKey, "", dir)
+		// dnsLabel is empty in localhost mode (no baseDomain during Create)
+		err := mgr.writeTraefikRoute("svc-abc-123", "tenant1", "", "", 3000)
+		require.NoError(t, err)
+
+		data, err := os.ReadFile(dir + "/svc-abc-123.yml")
+		require.NoError(t, err)
+		content := string(data)
+		assert.Contains(t, content, "Host(`svc-abc-123.localhost`)")
+		assert.Contains(t, content, "3000")
+		assert.Contains(t, content, "ah-tenant1-svc-abc-123")
 	})
 }
 

@@ -117,9 +117,19 @@ curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/services/$SERVICE_ID/e
 curl -s -H "Authorization: Bearer $API_KEY" \
   "$BASE_URL/v1/services/$SERVICE_ID/env?reveal=true" | jq .
 
-# Restart a service
+# Restart a service (in-place signal: stop + start same container lineage)
 curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/restart" \
   -H "Authorization: Bearer $API_KEY" | jq .
+
+# Redeploy a service (explicit redeploy: stop old container, start new with current image + env)
+# Returns the updated service object. Use this after updating env vars or when you want
+# a clean container recreation without triggering a new build.
+curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/redeploy" \
+  -H "Authorization: Bearer $API_KEY" | jq .
+
+# List deploy history for a service
+curl -s -H "Authorization: Bearer $API_KEY" \
+  "$BASE_URL/v1/services/$SERVICE_ID/deployments" | jq .
 
 # Reset circuit breaker
 curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/reset" \
@@ -478,6 +488,56 @@ Each tenant can have at most 3 databases. If you need more, you will receive a `
 ```bash
 curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/databases" | jq '. | length'
 ```
+
+---
+
+## Task: Redeploy a Service (Apply New Env Vars or Force Container Recreation)
+
+Use `POST /v1/services/{id}/redeploy` to recreate a service container in-place using the current image and the current env vars stored in the database. This is equivalent to `POST /restart` but with clearer agent-facing semantics: it explicitly means "stop the old container and run a fresh one with current state". Unlike `/restart` which returns only a status string, `/redeploy` returns the full service object.
+
+**When to use redeploy vs restart vs build:**
+
+| Operation | When to use |
+|-----------|-------------|
+| `POST /restart` | Quick in-place restart; same semantics as redeploy but returns only `{status}` |
+| `POST /redeploy` | Explicit container recreation with current image + env; returns full service object |
+| `POST /builds` + redeploy | New code from Git: build first, then redeploy to pick up the new image |
+
+### Step 1 — Update Env Vars (if needed)
+
+```bash
+curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/env" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"DATABASE_URL": "postgres://...", "NODE_ENV": "production"}' | jq .
+```
+
+### Step 2 — Trigger Redeploy
+
+```bash
+SVC=$(curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/redeploy" \
+  -H "Authorization: Bearer $API_KEY")
+echo "$SVC" | jq .
+STATUS=$(echo "$SVC" | jq -r '.status')
+echo "Status after redeploy: $STATUS"
+```
+
+The response is the full service object. The status will reflect the new container state immediately (typically `running`).
+
+### What Can Go Wrong
+
+- **409 Conflict — "service has no container"**: The service was never deployed. Use `POST /v1/services` to create and deploy it first.
+- **409 Conflict — "circuit breaker is open"**: The service has crashed too many times. Fix the root cause, call `POST /reset`, then retry `POST /redeploy`.
+- **503 Service Unavailable — "deploy queue full"**: The server is busy with other deploys. Wait a few seconds and retry.
+
+### Check Deploy History
+
+```bash
+curl -s -H "Authorization: Bearer $API_KEY" \
+  "$BASE_URL/v1/services/$SERVICE_ID/deployments" | jq .
+```
+
+Returns an array of deploy records. Each record includes `id`, `service_id`, `status`, `image`, `started_at`, and `container_id`. Currently returns the most recent deploy state derived from the service record. A full audit-log-backed deployment table is planned (see issue #6).
 
 ---
 

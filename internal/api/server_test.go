@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -236,6 +238,144 @@ func TestTenantDelete_CleansUpAllManagers(t *testing.T) {
 		"kanban manager StopForTenant should be called with the tenant ID on deletion")
 }
 
+// TestServiceRedeploy_CallsRestartAndReturnsService verifies that POST /v1/services/{id}/redeploy
+// invokes the Restart path (stop + recreate container) and returns the updated service object.
+func TestServiceRedeploy_CallsRestartAndReturnsService(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Insert a running service with a container so Restart() can proceed.
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-redeploy", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-old", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	runCalls := 0
+	realMock := &testutil.MockDockerClient{
+		RunContainerFn: func(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *docker.ResourceLimits) (string, error) {
+			runCalls++
+			return "ctr-new", nil
+		},
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    realMock,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-redeploy/redeploy", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unexpected body: %s", rr.Body.String())
+
+	// Response must be a service object (has an "id" field).
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
+	assert.Equal(t, "svc-redeploy", body["id"], "response should include service id")
+	assert.Equal(t, 1, runCalls, "RunContainer should have been called once for the redeploy")
+}
+
+// TestServiceRedeploy_NoContainer_Returns409 verifies that redeploying a service
+// with no container returns a 409 Conflict (same as restart with no container).
+func TestServiceRedeploy_NoContainer_Returns409(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Insert a service with no container_id (never deployed).
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-nodeploy", "tenant-1", "web", "stopped", "nginx:latest", 8080, "", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-nodeploy/redeploy", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusConflict, rr.Code, "redeploy with no container should return 409")
+}
+
+// TestServiceDeployments_ReturnsLastDeployRecord verifies that GET /v1/services/{id}/deployments
+// returns a non-empty array with the current service state as the last deploy record.
+func TestServiceDeployments_ReturnsLastDeployRecord(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-hist", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-abc", 1000, 2000,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-hist/deployments", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unexpected body: %s", rr.Body.String())
+
+	var records []map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&records))
+	require.Len(t, records, 1, "expected exactly one deployment record")
+
+	rec := records[0]
+	assert.Equal(t, "svc-hist", rec["service_id"])
+	assert.Equal(t, "running", rec["status"])
+	assert.Equal(t, "nginx:latest", rec["image"])
+	assert.EqualValues(t, 2000, rec["started_at"])
+}
+
+// TestServiceDeployments_NotFound_Returns404 verifies 404 for an unknown service.
+func TestServiceDeployments_NotFound_Returns404(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/does-not-exist/deployments", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(
@@ -257,4 +397,3 @@ func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) st
 
 	return keyID + "." + secret
 }
-

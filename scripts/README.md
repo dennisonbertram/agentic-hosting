@@ -61,7 +61,7 @@ AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
 1. **Health API** -- `GET /v1/system/health` returns `{"status":"ok"}`
 2. **systemd service** -- `systemctl is-active ah` shows `active`
 3. **Infrastructure containers** -- `docker ps` contains `paas-traefik` and `paas-registry`
-4. **Disk usage** -- warns at 80%, fails at 90% (configurable)
+4. **Disk usage** -- checks both the ah state dir and Docker data dir, warns at 80%, fails at 90% (configurable)
 5. **Public HTTPS** -- base domain returns 2xx/3xx (if `AH_BASE_DOMAIN` is set)
 
 ### Environment variables
@@ -69,9 +69,11 @@ AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ALERT_WEBHOOK_URL` | Yes (unless `--dry-run`) | -- | POST endpoint for failure alerts |
-| `AH_API_PORT` | No | `9090` | Local health API port |
+| `AH_API_PORT` | No | `8080` | Local health API port |
 | `AH_SERVICE_NAME` | No | `ah` | systemd service name |
 | `AH_BASE_DOMAIN` | No | -- | Public domain to probe via HTTPS |
+| `AH_DATA_DIR` | No | `/var/lib/ah` | ah state data dir to monitor for disk usage |
+| `AH_DOCKER_DATA_DIR` | No | `/var/lib/docker` | Docker data dir to monitor for disk usage |
 | `AH_DISK_WARN_PCT` | No | `80` | Disk usage warning threshold (%) |
 | `AH_DISK_FAIL_PCT` | No | `90` | Disk usage failure threshold (%) |
 
@@ -86,7 +88,7 @@ Run every 5 minutes (adjust to taste):
 Or with all options:
 
 ```cron
-*/5 * * * * ALERT_WEBHOOK_URL="https://hooks.example.com/alert" AH_API_PORT=9090 AH_SERVICE_NAME=ah AH_BASE_DOMAIN="agentic.hosting" AH_DISK_WARN_PCT=80 AH_DISK_FAIL_PCT=90 /opt/agentic-hosting/scripts/health-check.sh >> /var/log/ah-health.log 2>&1
+*/5 * * * * ALERT_WEBHOOK_URL="https://hooks.example.com/alert" AH_API_PORT=8080 AH_SERVICE_NAME=ah AH_BASE_DOMAIN="agentic.hosting" AH_DATA_DIR="/var/lib/ah" AH_DOCKER_DATA_DIR="/var/lib/docker" AH_DISK_WARN_PCT=80 AH_DISK_FAIL_PCT=90 /opt/agentic-hosting/scripts/health-check.sh >> /var/log/ah-health.log 2>&1
 ```
 
 ### Dry-run mode

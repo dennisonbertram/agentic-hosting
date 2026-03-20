@@ -201,7 +201,9 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
 
 	var content string
 	if baseDomain != "" {
-		// Production mode: HTTPS with Let's Encrypt
+		// Production mode: explicit HTTP->HTTPS redirect on the service host plus
+		// the TLS router. Redirects live in the per-service dynamic config so
+		// localhost-mode HTTP routes can coexist without a global entrypoint redirect.
 		if dnsLabel == "" {
 			return nil
 		}
@@ -211,6 +213,13 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
 		host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
 		content = fmt.Sprintf(`http:
   routers:
+    svc-%s-http:
+      rule: "Host(`+"`%s`"+`)"
+      entryPoints:
+        - web
+      middlewares:
+        - svc-%s-redirect-https
+      service: svc-%s
     svc-%s:
       rule: "Host(`+"`%s`"+`)"
       entryPoints:
@@ -218,12 +227,17 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
       service: svc-%s
       tls:
         certResolver: letsencrypt
+  middlewares:
+    svc-%s-redirect-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
   services:
     svc-%s:
       loadBalancer:
         servers:
           - url: "http://%s:%s"
-`, serviceID, host, serviceID, serviceID, containerName, portStr)
+`, serviceID, host, serviceID, serviceID, serviceID, host, serviceID, serviceID, serviceID, containerName, portStr)
 	} else {
 		// Localhost mode: HTTP-only, {serviceID}.localhost
 		content = fmt.Sprintf(`http:
@@ -273,7 +287,7 @@ type Manager struct {
 	docker           docker.Client
 	masterKey        []byte
 	baseDomain       string
-	traefikConfigDir string       // Traefik file provider directory; empty disables file-based routing
+	traefikConfigDir string        // Traefik file provider directory; empty disables file-based routing
 	deploySem        chan struct{} // bounded deploy concurrency
 	deployQueue      chan struct{} // bounded queue for waiting deploys
 

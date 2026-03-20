@@ -217,7 +217,7 @@ The response will include a `url` field — that is the URL for your service.
 
 **URL modes:** The URL format depends on how the server was configured:
 - **Subdomain mode** (`--base-domain` set): `https://{dns-label}.apps.example.com` — publicly routable, TLS provided automatically by Traefik. The `dns_label` is derived from your service name (lowercased, non-alphanumeric characters replaced with hyphens).
-- **Localhost mode** (default, no `--base-domain`): `http://{service-id}.localhost` — not publicly routable, only accessible inside the server's Docker network. Manual Traefik config is needed to expose externally.
+- **Localhost mode** (default, no `--base-domain`): `http://{service-id}.localhost` — host-local dev routing via Traefik on port 80. It is convenient for testing on the server/loopback host, but it is not a public internet URL.
 
 To check which mode is active before creating a service:
 ```bash

@@ -75,6 +75,48 @@
       <!-- UNRELEASED -->
       <article class="mb-16">
         <div class="flex items-center gap-4 mb-8">
+          <h2 class="font-instrument-serif italic text-3xl text-stone-900">Unreleased</h2>
+          <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-amber-100 text-amber-700">In progress</span>
+        </div>
+
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(91,155,213,0.1); color: #3b82f6">Fixed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Localhost-mode Traefik routes now coexist with public-domain HTTPS redirects by moving HTTP&rarr;HTTPS redirect behavior into per-service dynamic routers</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Health check script now defaults to the shipped API port (<code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">8080</code>) and uses GNU <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">timeout</code> or Homebrew <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">gtimeout</code> when available</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Disk health monitoring now checks both the ah state dir and Docker data dir instead of only the root filesystem</span>
+            </li>
+          </ul>
+        </div>
+
+        <div>
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(212,165,74,0.1); color: #f59e0b">Changed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&rarr;</span>
+              <span>Runbook guidance for localhost mode now matches the host-local Traefik dev route instead of telling operators to add manual exposure config</span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <hr class="border-stone-200 mb-16">
+
+      <!-- v0.4.0 -->
+      <article class="mb-16">
+        <div class="flex items-center gap-4 mb-8">
           <h2 class="font-instrument-serif italic text-3xl text-stone-900">v0.4.0</h2>
           <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-green-100 text-green-700">March 20, 2026</span>
         </div>

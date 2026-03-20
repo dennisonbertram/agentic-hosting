@@ -10,9 +10,11 @@
 #
 # Environment variables:
 #   ALERT_WEBHOOK_URL  — POST webhook URL for failure alerts (required unless --dry-run)
-#   AH_API_PORT        — health API port (default: 9090)
+#   AH_API_PORT        — health API port (default: 8080)
 #   AH_SERVICE_NAME    — systemd service name (default: ah)
 #   AH_BASE_DOMAIN     — public domain to check via HTTPS (optional)
+#   AH_DATA_DIR        — state data dir for disk checks (default: /var/lib/ah)
+#   AH_DOCKER_DATA_DIR — Docker data root for disk checks (default: /var/lib/docker)
 #   AH_DISK_WARN_PCT   — disk warning threshold (default: 80)
 #   AH_DISK_FAIL_PCT   — disk failure threshold (default: 90)
 #
@@ -29,9 +31,11 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-API_PORT="${AH_API_PORT:-9090}"
+API_PORT="${AH_API_PORT:-8080}"
 SERVICE_NAME="${AH_SERVICE_NAME:-ah}"
 BASE_DOMAIN="${AH_BASE_DOMAIN:-}"
+DATA_DIR="${AH_DATA_DIR:-/var/lib/ah}"
+DOCKER_DATA_DIR="${AH_DOCKER_DATA_DIR:-/var/lib/docker}"
 DISK_WARN_PCT="${AH_DISK_WARN_PCT:-80}"
 DISK_FAIL_PCT="${AH_DISK_FAIL_PCT:-90}"
 WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
@@ -68,6 +72,20 @@ warn() {
 
 pass() {
   log "OK:   $1"
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  if command -v timeout &>/dev/null; then
+    timeout "$seconds" "$@"
+    return
+  fi
+  if command -v gtimeout &>/dev/null; then
+    gtimeout "$seconds" "$@"
+    return
+  fi
+  "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -127,11 +145,7 @@ check_containers() {
   fi
 
   local running
-  if command -v timeout &>/dev/null; then
-    running=$(timeout 10 docker ps --format '{{.Names}}' 2>/dev/null) || true
-  else
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null) || true
-  fi
+  running=$(run_with_timeout 10 docker ps --format '{{.Names}}' 2>/dev/null) || true
 
   if [[ -z "$running" ]]; then
     fail "docker ps returned no running containers (or Docker is unreachable)"
@@ -156,12 +170,20 @@ check_containers() {
 # ---------------------------------------------------------------------------
 # Check 4: Disk usage
 # ---------------------------------------------------------------------------
-check_disk() {
+check_disk_path() {
+  local label="$1"
+  local path="$2"
+
+  if [[ ! -e "$path" ]]; then
+    warn "${label} path ${path} does not exist — skipping disk check"
+    return
+  fi
+
   local disk_line
-  disk_line=$(df -P / 2>/dev/null | tail -1) || true
+  disk_line=$(df -P "$path" 2>/dev/null | tail -1) || true
 
   if [[ -z "$disk_line" ]]; then
-    fail "Could not read disk usage via df"
+    fail "Could not read disk usage via df for ${path}"
     return
   fi
 
@@ -170,23 +192,28 @@ check_disk() {
   used_pct=$(echo "$disk_line" | awk '{print $5}' | tr -d '%')
 
   if [[ -z "$used_pct" ]] || ! [[ "$used_pct" =~ ^[0-9]+$ ]]; then
-    fail "Could not parse disk usage percentage"
+    fail "Could not parse disk usage percentage for ${path}"
     return
   fi
 
   if [[ "$used_pct" -ge "$DISK_FAIL_PCT" ]]; then
-    fail "Disk usage at ${used_pct}% (threshold: ${DISK_FAIL_PCT}%)"
+    fail "${label} disk usage at ${used_pct}% for ${path} (threshold: ${DISK_FAIL_PCT}%)"
     return
   fi
 
   if [[ "$used_pct" -ge "$DISK_WARN_PCT" ]]; then
-    warn "Disk usage at ${used_pct}% (warning threshold: ${DISK_WARN_PCT}%)"
+    warn "${label} disk usage at ${used_pct}% for ${path} (warning threshold: ${DISK_WARN_PCT}%)"
     # Still pass — warnings don't cause non-zero exit
-    pass "Disk usage at ${used_pct}% (warning)"
+    pass "${label} disk usage at ${used_pct}% for ${path} (warning)"
     return
   fi
 
-  pass "Disk usage at ${used_pct}%"
+  pass "${label} disk usage at ${used_pct}% for ${path}"
+}
+
+check_disk() {
+  check_disk_path "State data" "$DATA_DIR"
+  check_disk_path "Docker data" "$DOCKER_DATA_DIR"
 }
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Localhost-mode Traefik routes now work alongside public-domain HTTPS redirects by moving HTTP→HTTPS redirects into per-service dynamic routers instead of a global `web` entrypoint redirect
+- Health check script now defaults to the shipped API port (`8080`) and supports both GNU `timeout` and Homebrew `gtimeout` when available
+- Health check disk monitoring now checks the ah state dir and Docker data dir instead of only `/`
+
+### Changed
+
+- Localhost-mode runbook guidance now describes host-local Traefik routing instead of manual exposure steps
+
 ## [0.4.0] - 2026-03-20
 
 ### Added

@@ -21,6 +21,7 @@ import (
 )
 
 const maxLogSize = 5 * 1024 * 1024 // 5MB max log per build
+const tailLines = 500              // lines to preserve when log is truncated
 
 // Build represents a build record.
 type Build struct {
@@ -56,6 +57,15 @@ type buildExecutor interface {
 	CancelBuild(buildID string) error
 }
 
+// logState tracks per-build log accumulation and tail buffer.
+type logState struct {
+	size      int        // current log size in bytes
+	truncated bool       // whether the log has been truncated
+	tail      []string   // ring buffer of last tailLines lines
+	tailIdx   int        // next write position in tail ring buffer
+	tailCount int        // total lines written to tail (for omission count)
+}
+
 // Manager coordinates build lifecycle.
 type Manager struct {
 	db         *sql.DB
@@ -64,7 +74,7 @@ type Manager struct {
 	logMu      sync.Mutex
 	buildQueue chan struct{}            // bounded queue for build goroutines
 	logSubs    map[string][]chan string // buildID -> subscribers
-	logSizes   map[string]int           // buildID -> current log size in bytes
+	logStates  map[string]*logState    // buildID -> log accumulation state
 }
 
 // NewManager creates a build manager.
@@ -75,7 +85,7 @@ func NewManager(db *sql.DB, b buildExecutor, deployFn DeployFunc) *Manager {
 		deployFn:   deployFn,
 		buildQueue: make(chan struct{}, 10), // max 10 queued builds
 		logSubs:    make(map[string][]chan string),
-		logSizes:   make(map[string]int),
+		logStates:  make(map[string]*logState),
 	}
 	// Mark any stale builds from previous process as failed
 	m.reconcileStaleBuilds()
@@ -222,9 +232,10 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	defer func() {
-		// Clean up log size tracking
+		// Flush tail buffer if truncation occurred, then clean up
+		m.flushTailBuffer(ctx, buildID)
 		m.logMu.Lock()
-		delete(m.logSizes, buildID)
+		delete(m.logStates, buildID)
 		m.logMu.Unlock()
 	}()
 
@@ -299,15 +310,35 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 }
 
 func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
-	// Enforce max log size
 	m.logMu.Lock()
-	currentSize := m.logSizes[buildID]
-	lineBytes := len(line) + 1 // +1 for newline
-	if currentSize+lineBytes > maxLogSize {
-		m.logMu.Unlock()
-		return // silently drop — log is full
+	ls := m.logStates[buildID]
+	if ls == nil {
+		ls = &logState{tail: make([]string, tailLines)}
+		m.logStates[buildID] = ls
 	}
-	m.logSizes[buildID] = currentSize + lineBytes
+
+	lineBytes := len(line) + 1 // +1 for newline
+
+	if ls.truncated {
+		// Log already exceeded cap — only buffer in the ring buffer
+		ls.tail[ls.tailIdx%tailLines] = line
+		ls.tailIdx++
+		ls.tailCount++
+		m.logMu.Unlock()
+		return
+	}
+
+	if ls.size+lineBytes > maxLogSize {
+		// First time exceeding the cap — switch to ring buffer mode
+		ls.truncated = true
+		ls.tail[ls.tailIdx%tailLines] = line
+		ls.tailIdx++
+		ls.tailCount++
+		m.logMu.Unlock()
+		return
+	}
+
+	ls.size += lineBytes
 	m.logMu.Unlock()
 
 	_, err := m.db.ExecContext(ctx,
@@ -317,6 +348,52 @@ func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
 	if err != nil {
 		log.Printf("builds: failed to append log for %s: %v", buildID, err)
 	}
+}
+
+// flushTailBuffer replaces the DB log with a truncation notice + tail lines
+// if the build log was truncated during accumulation.
+func (m *Manager) flushTailBuffer(ctx context.Context, buildID string) {
+	m.logMu.Lock()
+	ls := m.logStates[buildID]
+	if ls == nil || !ls.truncated {
+		m.logMu.Unlock()
+		return
+	}
+
+	// Collect tail lines in order
+	lines := collectTailLines(ls)
+	omitted := ls.tailCount
+	m.logMu.Unlock()
+
+	header := fmt.Sprintf("[truncated: %d lines omitted, 5MB limit reached]\n", omitted)
+	tail := strings.Join(lines, "\n") + "\n"
+
+	// Replace the entire log with: original prefix (up to cap) is discarded,
+	// replaced by truncation notice + last N lines.
+	_, err := m.db.ExecContext(ctx,
+		`UPDATE builds SET log = ? WHERE id = ?`,
+		header+tail, buildID,
+	)
+	if err != nil {
+		log.Printf("builds: failed to flush tail buffer for %s: %v", buildID, err)
+	}
+}
+
+// collectTailLines extracts the tail ring buffer contents in chronological order.
+func collectTailLines(ls *logState) []string {
+	count := ls.tailCount
+	if count > tailLines {
+		count = tailLines
+	}
+	lines := make([]string, 0, count)
+	start := ls.tailIdx - count
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < ls.tailIdx; i++ {
+		lines = append(lines, ls.tail[i%tailLines])
+	}
+	return lines
 }
 
 func (m *Manager) notifyLogSubs(buildID, line string) {

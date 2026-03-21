@@ -20,6 +20,8 @@ type Config struct {
 	DockerDataDir    string // Docker data root for disk checks (default: /var/lib/docker)
 	BaseDomain       string // base domain for public service URLs (default: "" = localhost fallback)
 	TraefikConfigDir string // Traefik file provider dynamic config directory (default: /etc/traefik/dynamic)
+	KanbanPortStart  int    // inclusive start of kanban port range (default: 7100)
+	KanbanPortEnd    int    // inclusive end of kanban port range (default: 9100)
 
 	// Snapshot retention
 	SnapshotMaxPerService int           // max snapshots kept per service (default: 10, 0 = unlimited)
@@ -27,6 +29,12 @@ type Config struct {
 }
 
 const defaultDataDir = "/var/lib/ah"
+
+// Default kanban port range constants.
+const (
+	DefaultKanbanPortStart = 7100
+	DefaultKanbanPortEnd   = 9100
+)
 
 // Snapshot retention defaults.
 const (
@@ -42,9 +50,11 @@ func Default() Config {
 		MeterDBPath:      filepath.Join(defaultDataDir, "meter.db"),
 		MasterKeyPath:    filepath.Join(defaultDataDir, "master.key"),
 		BuildDir:         filepath.Join(defaultDataDir, "builds"),
-		NixpacksPath:     "/usr/local/bin/nixpacks",
+		NixpacksPath:          "/usr/local/bin/nixpacks",
 		DockerDataDir:         "/var/lib/docker",
 		TraefikConfigDir:      "/etc/traefik/dynamic",
+		KanbanPortStart:       DefaultKanbanPortStart,
+		KanbanPortEnd:         DefaultKanbanPortEnd,
 		SnapshotMaxPerService: DefaultSnapshotMaxPerService,
 		SnapshotMaxAge:        DefaultSnapshotMaxAge,
 	}
@@ -66,6 +76,8 @@ func FromEnv() Config {
 		DockerDataDir:         envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
 		BaseDomain:            strings.TrimSpace(os.Getenv("AH_BASE_DOMAIN")),
 		TraefikConfigDir:      envOr("AH_TRAEFIK_CONFIG_DIR", "/etc/traefik/dynamic"),
+		KanbanPortStart:       envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart),
+		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),
 		SnapshotMaxPerService: envOrInt("AH_SNAPSHOT_MAX_PER_SERVICE", DefaultSnapshotMaxPerService),
 		SnapshotMaxAge:        envOrDuration("AH_SNAPSHOT_MAX_AGE", DefaultSnapshotMaxAge),
 	}

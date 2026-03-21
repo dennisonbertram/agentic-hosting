@@ -115,9 +115,18 @@ POST /v1/services/:serviceID/reset
 GET /v1/services/:serviceID/env?reveal=true
 # → {"KEY":"value",...}  (values masked by default, plaintext with reveal=true)
 
-# Env vars: set (merge — not replace)
+# Env vars: set/update (additive merge — does NOT replace all vars)
+# This endpoint uses upsert semantics: keys in the request body are added or
+# updated, but existing keys NOT mentioned in the request body are left
+# untouched. To remove a key, use DELETE. There is no PATCH endpoint —
+# POST is the only write method and it always merges.
+#
+# Example: if the service already has {"A":"1","B":"2"} and you POST {"B":"99","C":"3"},
+# the result is {"A":"1","B":"99","C":"3"} — A is preserved, B is updated, C is added.
 POST /v1/services/:serviceID/env
 Body: {"KEY":"value","OTHER":"value2"}
+# → {"status":"updated","note":"restart will recreate the container with the new env vars"}
+# Max 100 keys per request.
 
 # Env vars: delete one key
 DELETE /v1/services/:serviceID/env/:key
@@ -134,6 +143,24 @@ GET /v1/services/:serviceID/deployments
 # Stream runtime logs (basic — stdout/stderr not yet fully supported, see #11)
 GET /v1/services/:serviceID/logs
 ```
+
+### Environment Variable Rules
+
+**Key format**: Keys must match the pattern `^[a-zA-Z_][a-zA-Z0-9_]{0,127}$` — start with a letter or underscore, followed by up to 127 alphanumeric characters or underscores.
+
+**Value limits**: Values may be up to 32,768 bytes (32 KB). Null bytes (`\x00`) are not allowed.
+
+**Forbidden keys**: The following environment variable names are reserved by the platform and cannot be set by tenants:
+
+| Key | Reason |
+|-----|--------|
+| `PATH` | Overriding the system PATH could break container execution |
+| `LD_PRELOAD` | Security risk — could inject shared libraries into processes |
+| `LD_LIBRARY_PATH` | Security risk — could redirect shared library loading |
+
+**Case-insensitive matching**: Forbidden key checks are **case-insensitive**. All of the following will be rejected: `PATH`, `path`, `Path`, `LD_PRELOAD`, `ld_preload`, `Ld_Preload`. The error message will report the key name exactly as you sent it (e.g., `env var "path" is not allowed`).
+
+**Per-request limit**: A single POST request can set at most 100 keys. To set more, issue multiple requests (they merge additively).
 
 ---
 

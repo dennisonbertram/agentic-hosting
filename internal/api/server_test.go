@@ -15,6 +15,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
@@ -315,9 +316,9 @@ func TestServiceRedeploy_NoContainer_Returns409(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rr.Code, "redeploy with no container should return 409")
 }
 
-// TestServiceDeployments_ReturnsLastDeployRecord verifies that GET /v1/services/{id}/deployments
-// returns a non-empty array with the current service state as the last deploy record.
-func TestServiceDeployments_ReturnsLastDeployRecord(t *testing.T) {
+// TestServiceDeployments_ReturnsPaginatedHistory verifies that GET /v1/services/{id}/deployments
+// returns deployment records from the real deployments table with pagination.
+func TestServiceDeployments_ReturnsPaginatedHistory(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	token := seedAuthenticatedTenant(t, stateDB, masterKey)
@@ -329,11 +330,36 @@ func TestServiceDeployments_ReturnsLastDeployRecord(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	deployStore := deployments.NewStore(stateDB)
+
+	// Insert two deployment records.
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-1",
+		ServiceID: "svc-hist",
+		TenantID:  "tenant-1",
+		Image:     "nginx:1.0",
+		Status:    deployments.StatusFailed,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: 1000,
+		CreatedAt: 1000,
+	}))
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-2",
+		ServiceID: "svc-hist",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    deployments.StatusRunning,
+		Trigger:   deployments.TriggerRestart,
+		StartedAt: 2000,
+		CreatedAt: 2000,
+	}))
+
 	srv := NewServer(ServerConfig{
-		Store:     &db.Store{StateDB: stateDB},
-		MasterKey: masterKey,
-		DevMode:   true,
-		Docker:    &testutil.MockDockerClient{},
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-hist/deployments", nil)
@@ -346,13 +372,54 @@ func TestServiceDeployments_ReturnsLastDeployRecord(t *testing.T) {
 
 	var records []map[string]any
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&records))
-	require.Len(t, records, 1, "expected exactly one deployment record")
+	require.Len(t, records, 2, "expected two deployment records")
 
-	rec := records[0]
-	assert.Equal(t, "svc-hist", rec["service_id"])
-	assert.Equal(t, "running", rec["status"])
-	assert.Equal(t, "nginx:latest", rec["image"])
-	assert.EqualValues(t, 2000, rec["started_at"])
+	// Newest first.
+	assert.Equal(t, "deploy-2", records[0]["id"])
+	assert.Equal(t, "svc-hist", records[0]["service_id"])
+	assert.Equal(t, "running", records[0]["status"])
+	assert.Equal(t, "restart", records[0]["trigger"])
+	assert.Equal(t, "nginx:latest", records[0]["image"])
+
+	assert.Equal(t, "deploy-1", records[1]["id"])
+	assert.Equal(t, "failed", records[1]["status"])
+}
+
+// TestServiceDeployments_EmptyHistory verifies an empty array is returned when
+// a service has no deployment records yet.
+func TestServiceDeployments_EmptyHistory(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-empty", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-abc", 1000, 2000,
+	)
+	require.NoError(t, err)
+
+	deployStore := deployments.NewStore(stateDB)
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-empty/deployments", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unexpected body: %s", rr.Body.String())
+
+	var records []map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&records))
+	assert.Len(t, records, 0, "expected empty deployment records for service with no history")
 }
 
 // TestServiceDeployments_NotFound_Returns404 verifies 404 for an unknown service.
@@ -361,11 +428,14 @@ func TestServiceDeployments_NotFound_Returns404(t *testing.T) {
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	token := seedAuthenticatedTenant(t, stateDB, masterKey)
 
+	deployStore := deployments.NewStore(stateDB)
+
 	srv := NewServer(ServerConfig{
-		Store:     &db.Store{StateDB: stateDB},
-		MasterKey: masterKey,
-		DevMode:   true,
-		Docker:    &testutil.MockDockerClient{},
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/services/does-not-exist/deployments", nil)

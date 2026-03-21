@@ -19,6 +19,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/config"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
@@ -143,10 +144,13 @@ func main() {
 		log.Printf("WARNING: Nixpacks builder not available: %v", err)
 	}
 
+	// Create deployment store for tracking deployment history
+	deployStore := deployments.NewStore(store.StateDB)
+
 	var buildMgr *builds.Manager
 	if nixBuilder != nil {
 		// Create service manager early to get DeployImage function
-		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir)
+		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 
@@ -165,6 +169,7 @@ func main() {
 		OpenRegistration: *openRegistration,
 		Docker:           dockerClient,
 		BuildManager:     buildMgr,
+		DeploymentStore:  deployStore,
 		DatabaseManager:  dbMgr,
 		KanbanManager:    kanbanMgr,
 		BaseDomain:       *baseDomain,
@@ -207,7 +212,7 @@ func main() {
 	// Start reconciler (30s interval)
 	reconcilerCtx, reconcilerCancel := context.WithCancel(context.Background())
 	defer reconcilerCancel()
-	rec := reconciler.New(store.StateDB, dockerClient, 30*time.Second)
+	rec := reconciler.New(store.StateDB, dockerClient, 30*time.Second, deployStore)
 	go rec.Run(reconcilerCtx)
 
 	// Start garbage collector (5min interval)

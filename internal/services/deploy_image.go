@@ -3,17 +3,18 @@ package services
 import (
 	"context"
 	"fmt"
-
-	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"log"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // DeployImage deploys a pre-built image (from nixpacks build) for a service.
 // Similar to Deploy but skips image pull (image is already local or in registry).
-func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag string) error {
+// buildID links this deployment to the originating build record (may be empty).
+func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error {
 	if m.docker == nil {
 		return fmt.Errorf("docker client not configured")
 	}
@@ -48,6 +49,18 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
 
+	// Record deployment event.
+	deployNow := time.Now().Unix()
+	deployID := m.recordDeployment(ctx, &deployments.Deployment{
+		ServiceID: serviceID,
+		TenantID:  tenantID,
+		BuildID:   buildID,
+		Image:     imageTag,
+		Status:    deployments.StatusDeploying,
+		Trigger:   deployments.TriggerBuild,
+		StartedAt: deployNow,
+	})
+
 	// Stop and remove old container if exists
 	if svc.ContainerID != "" {
 		_ = m.docker.StopContainer(ctx, svc.ContainerID)
@@ -58,6 +71,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("network setup failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
@@ -67,12 +81,14 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		imageTag, time.Now().Unix(), serviceID, tenantID,
 	)
 	if err != nil {
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("update service image: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("update service image: %w", err)
 	}
 
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("env vars load failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
@@ -92,6 +108,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, traefikLabels(serviceID, svc.DNSLabel, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container start failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("run container: %w", err)
 	}
 
@@ -104,14 +121,18 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	if err != nil {
 		_ = m.docker.StopContainer(ctx, containerID)
 		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("db update failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("update service: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
 		_ = m.docker.StopContainer(ctx, containerID)
 		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("service deleted during deploy")
 	}
+
+	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
 
 	// Write Traefik file-provider route (non-fatal on error)
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {

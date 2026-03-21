@@ -13,6 +13,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
@@ -31,6 +32,7 @@ type ServerConfig struct {
 	OpenRegistration bool
 	Docker           docker.Client
 	BuildManager     *builds.Manager
+	DeploymentStore  *deployments.Store
 	DatabaseManager  databaseManager
 	KanbanManager    kanbanManager
 	BaseDomain       string
@@ -68,6 +70,7 @@ type Server struct {
 	svcManager        *services.Manager
 	snapshotManager   *snapshots.Manager
 	buildManager      *builds.Manager
+	deploymentStore   *deployments.Store
 	dbManager         databaseManager
 	kanbanManager     kanbanManager
 	authRateLimiter   *middleware.RateLimiter
@@ -89,7 +92,7 @@ func NewServer(cfg ServerConfig) *Server {
 	var svcMgr *services.Manager
 	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
-		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir)
+		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir, cfg.DeploymentStore)
 		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 
@@ -105,6 +108,7 @@ func NewServer(cfg ServerConfig) *Server {
 		svcManager:        svcMgr,
 		snapshotManager:   snapMgr,
 		buildManager:      cfg.BuildManager,
+		deploymentStore:   cfg.DeploymentStore,
 		dbManager:         cfg.DatabaseManager,
 		kanbanManager:     cfg.KanbanManager,
 		authRateLimiter:   rl,

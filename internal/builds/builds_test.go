@@ -38,7 +38,7 @@ func TestStartBuild_KeepsBuildRunningUntilDeployCompletes(t *testing.T) {
 
 	deployStarted := make(chan struct{})
 	releaseDeploy := make(chan struct{})
-	mgr := NewManager(stateDB, &stubBuilder{}, func(ctx context.Context, tenantID, serviceID, imageTag string) error {
+	mgr := NewManager(stateDB, &stubBuilder{}, func(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error {
 		close(deployStarted)
 		<-releaseDeploy
 		return nil
@@ -68,7 +68,7 @@ func TestStartBuild_MarksFailedWhenDeployFails(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	seedBuildTestData(t, stateDB)
 
-	mgr := NewManager(stateDB, &stubBuilder{}, func(ctx context.Context, tenantID, serviceID, imageTag string) error {
+	mgr := NewManager(stateDB, &stubBuilder{}, func(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error {
 		return errors.New("deploy boom")
 	})
 

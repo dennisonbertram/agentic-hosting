@@ -10,22 +10,36 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // Reconciler periodically checks DB state against Docker state.
 type Reconciler struct {
-	db       *sql.DB
-	docker   docker.Client
-	interval time.Duration
+	db          *sql.DB
+	docker      docker.Client
+	interval    time.Duration
+	deployStore *deployments.Store
 }
 
 // New creates a reconciler with the given interval.
-func New(db *sql.DB, dockerClient docker.Client, interval time.Duration) *Reconciler {
+func New(db *sql.DB, dockerClient docker.Client, interval time.Duration, deployStore *deployments.Store) *Reconciler {
 	return &Reconciler{
-		db:       db,
-		docker:   dockerClient,
-		interval: interval,
+		db:          db,
+		docker:      dockerClient,
+		interval:    interval,
+		deployStore: deployStore,
+	}
+}
+
+// recordDeployment creates a deployment record. Errors are logged but never propagated
+// because deployment tracking is observability, not critical path.
+func (r *Reconciler) recordDeployment(ctx context.Context, d *deployments.Deployment) {
+	if r.deployStore == nil {
+		return
+	}
+	if err := r.deployStore.Create(ctx, d); err != nil {
+		log.Printf("reconciler: failed to record deployment for service %s: %v", d.ServiceID, err)
 	}
 }
 
@@ -228,6 +242,20 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				_ = r.docker.RemoveContainer(ctx, s.containerID)
 			}
 			log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
+			// Record crash as deployment event. Need to look up the image for the record.
+			var crashImage string
+			r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, s.id).Scan(&crashImage)
+			crashNow := time.Now().Unix()
+			r.recordDeployment(ctx, &deployments.Deployment{
+				ServiceID:    s.id,
+				TenantID:     s.tenantID,
+				Image:        crashImage,
+				Status:       deployments.StatusCrashed,
+				Trigger:      deployments.TriggerReconciler,
+				ErrorMessage: crashReason,
+				StartedAt:    crashNow,
+				CompletedAt:  &crashNow,
+			})
 			fixed++
 		}
 	}
@@ -334,6 +362,19 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				log.Printf("reconciler: failed to reset circuit for service %s: %v", rec.id, err)
 			} else {
 				log.Printf("reconciler: service %s circuit reset to stopped — next tick will restart if applicable", rec.id)
+				// Record auto-recovery as deployment event.
+				var recoveryImage string
+				r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, rec.id).Scan(&recoveryImage)
+				recoveryNow := time.Now().Unix()
+				r.recordDeployment(ctx, &deployments.Deployment{
+					ServiceID:   rec.id,
+					TenantID:    rec.tenantID,
+					Image:       recoveryImage,
+					Status:      deployments.StatusStopped,
+					Trigger:     deployments.TriggerAutoRecovery,
+					StartedAt:   recoveryNow,
+					CompletedAt: &recoveryNow,
+				})
 				fixed++
 			}
 		}
@@ -341,6 +382,24 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 	// 2. Check services stuck in "deploying" for > 10min
 	tenMinAgo := time.Now().Add(-10 * time.Minute).Unix()
+
+	// Query affected services before the bulk update so we can create deployment records.
+	var staleServices []struct{ id, tenantID, image string }
+	if r.deployStore != nil {
+		staleRows, staleErr := r.db.QueryContext(ctx,
+			`SELECT id, tenant_id, image FROM services WHERE status = 'deploying' AND updated_at < ?`,
+			tenMinAgo)
+		if staleErr == nil {
+			for staleRows.Next() {
+				var s struct{ id, tenantID, image string }
+				if scanErr := staleRows.Scan(&s.id, &s.tenantID, &s.image); scanErr == nil {
+					staleServices = append(staleServices, s)
+				}
+			}
+			staleRows.Close()
+		}
+	}
+
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE services SET status = 'failed', last_error = 'deploy timed out (reconciler)',
 		 updated_at = ? WHERE status = 'deploying' AND updated_at < ?`,
@@ -349,6 +408,20 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		log.Printf("reconciler: failed to mark stale deploys: %v", err)
 	} else if n, _ := result.RowsAffected(); n > 0 {
 		log.Printf("reconciler: marked %d stale deploys as failed", n)
+		// Record deployment events for each timed-out service.
+		for _, s := range staleServices {
+			staleNow := time.Now().Unix()
+			r.recordDeployment(ctx, &deployments.Deployment{
+				ServiceID:    s.id,
+				TenantID:     s.tenantID,
+				Image:        s.image,
+				Status:       deployments.StatusFailed,
+				Trigger:      deployments.TriggerReconciler,
+				ErrorMessage: "deploy timed out (reconciler)",
+				StartedAt:    staleNow,
+				CompletedAt:  &staleNow,
+			})
+		}
 		fixed += int(n)
 	}
 

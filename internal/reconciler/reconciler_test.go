@@ -46,7 +46,7 @@ func TestReconciler_CircuitBreaker(t *testing.T) {
 		return &docker.ContainerInfo{Status: "exited", ExitCode: 1}, nil
 	}
 
-	r := reconciler.New(db, mock, time.Minute)
+	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
 	var circuitOpen int
@@ -91,7 +91,7 @@ func TestReconciler_AutoRecovery(t *testing.T) {
 		return nil, nil
 	}
 
-	r := reconciler.New(db, mock, time.Minute)
+	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
 	var circuitOpen, crashCount int
@@ -138,7 +138,7 @@ func TestReconciler_UnhealthyRestart(t *testing.T) {
 		return &docker.ContainerInfo{Status: "running", HealthStatus: "unhealthy"}, nil
 	}
 
-	r := reconciler.New(db, mock, time.Minute)
+	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
 	assert.Contains(t, mock.StopContainerCalls, "container-xyz",
@@ -185,7 +185,7 @@ func TestReconciler_CircuitBreakerBackoffEscalation(t *testing.T) {
 	}
 
 	before := time.Now()
-	r := reconciler.New(db, mock, time.Minute)
+	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
 	var circuitOpen, circuitOpenCount int
@@ -241,7 +241,7 @@ func TestReconciler_StaleDeployment(t *testing.T) {
 		return nil, nil
 	}
 
-	r := reconciler.New(db, mock, time.Minute)
+	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
 	var status, lastError string

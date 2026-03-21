@@ -376,6 +376,69 @@ func TestServiceDeployments_NotFound_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
+// --- parsePagination tests ---
+
+func TestParsePagination_DefaultValues(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
+	limit, offset, err := parsePagination(r)
+	require.NoError(t, err)
+	assert.Equal(t, 100, limit, "default limit should be 100")
+	assert.Equal(t, 0, offset, "default offset should be 0")
+}
+
+func TestParsePagination_ExplicitValues(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=50&offset=10", nil)
+	limit, offset, err := parsePagination(r)
+	require.NoError(t, err)
+	assert.Equal(t, 50, limit)
+	assert.Equal(t, 10, offset)
+}
+
+func TestParsePagination_LimitAt200(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=200", nil)
+	limit, _, err := parsePagination(r)
+	require.NoError(t, err)
+	assert.Equal(t, 200, limit, "limit=200 should be accepted as-is")
+}
+
+func TestParsePagination_LimitAbove200_CapsAt200(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=500", nil)
+	limit, _, err := parsePagination(r)
+	require.NoError(t, err)
+	assert.Equal(t, 200, limit, "limit > 200 should be capped at 200, not rejected or defaulted to 100")
+}
+
+func TestParsePagination_LimitAt1(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=1", nil)
+	limit, _, err := parsePagination(r)
+	require.NoError(t, err)
+	assert.Equal(t, 1, limit, "limit=1 should be accepted")
+}
+
+func TestParsePagination_LimitZero_ReturnsError(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=0", nil)
+	_, _, err := parsePagination(r)
+	assert.Error(t, err, "limit=0 should be rejected")
+}
+
+func TestParsePagination_NegativeLimit_ReturnsError(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=-5", nil)
+	_, _, err := parsePagination(r)
+	assert.Error(t, err, "negative limit should be rejected")
+}
+
+func TestParsePagination_InvalidLimit_ReturnsError(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?limit=abc", nil)
+	_, _, err := parsePagination(r)
+	assert.Error(t, err, "non-numeric limit should be rejected")
+}
+
+func TestParsePagination_NegativeOffset_ReturnsError(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test?offset=-1", nil)
+	_, _, err := parsePagination(r)
+	assert.Error(t, err, "negative offset should be rejected")
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(

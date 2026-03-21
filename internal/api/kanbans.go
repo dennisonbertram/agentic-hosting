@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -57,6 +58,9 @@ func (s *Server) handleKanbanAdminToken(w http.ResponseWriter, r *http.Request) 
 		apierr.WriteAPIError(w, err)
 		return
 	}
+
+	keyID := middleware.GetKeyID(r.Context())
+	log.Printf("AUDIT: action=kanban.admin_token_accessed tenant=%s api_key=%s", tenantID, keyID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"admin_token": token})
 }

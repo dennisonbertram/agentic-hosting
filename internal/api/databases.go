@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -91,6 +92,9 @@ func (s *Server) handleDatabaseConnectionString(w http.ResponseWriter, r *http.R
 		apierr.WriteAPIError(w, err)
 		return
 	}
+
+	keyID := middleware.GetKeyID(r.Context())
+	log.Printf("AUDIT: action=database.connection_string_accessed tenant=%s database=%s api_key=%s", tenantID, dbID, keyID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"connection_string": connStr})
 }

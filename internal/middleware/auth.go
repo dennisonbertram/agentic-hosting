@@ -15,6 +15,7 @@ import (
 type contextKey string
 
 const TenantIDKey contextKey = "tenant_id"
+const KeyIDKey contextKey = "key_id"
 
 const (
 	lastUsedInterval = 5 * time.Minute
@@ -212,6 +213,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 			tracker.maybeUpdate(keyID)
 
 			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
+			ctx = context.WithValue(ctx, KeyIDKey, keyID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -221,5 +223,12 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 
 func GetTenantID(ctx context.Context) string {
 	v, _ := ctx.Value(TenantIDKey).(string)
+	return v
+}
+
+// GetKeyID returns the API key ID from the request context.
+// Returns "" if no key ID is present (e.g. unauthenticated request).
+func GetKeyID(ctx context.Context) string {
+	v, _ := ctx.Value(KeyIDKey).(string)
 	return v
 }

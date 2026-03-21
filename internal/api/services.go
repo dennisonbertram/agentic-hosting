@@ -369,6 +369,12 @@ func (s *Server) handleServiceEnvGet(w http.ResponseWriter, r *http.Request) {
 		apierr.WriteAPIError(w, err)
 		return
 	}
+
+	if reveal {
+		keyID := middleware.GetKeyID(r.Context())
+		log.Printf("AUDIT: action=env.revealed tenant=%s service=%s api_key=%s", tenantID, serviceID, keyID)
+	}
+
 	writeJSON(w, http.StatusOK, vars)
 }
 

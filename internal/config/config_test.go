@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -17,6 +18,8 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, "/var/lib/ah/builds", cfg.BuildDir)
 	assert.Equal(t, "/usr/local/bin/nixpacks", cfg.NixpacksPath)
 	assert.Equal(t, "/var/lib/docker", cfg.DockerDataDir)
+	assert.Equal(t, 7100, cfg.KanbanPortStart)
+	assert.Equal(t, 9100, cfg.KanbanPortEnd)
 }
 
 func TestFromEnv_Defaults(t *testing.T) {
@@ -24,7 +27,7 @@ func TestFromEnv_Defaults(t *testing.T) {
 	for _, k := range []string{
 		"AH_DATA_DIR", "AH_DB_PATH", "AH_METER_DB_PATH",
 		"AH_MASTER_KEY_PATH", "AH_BUILD_DIR", "AH_NIXPACKS_PATH",
-		"AH_DOCKER_DATA_DIR",
+		"AH_DOCKER_DATA_DIR", "AH_KANBAN_PORT_START", "AH_KANBAN_PORT_END",
 	} {
 		t.Setenv(k, "")
 	}
@@ -95,4 +98,32 @@ func TestDiskCheckPaths(t *testing.T) {
 	cfg.DockerDataDir = "/mnt/docker"
 	paths = cfg.DiskCheckPaths()
 	assert.Equal(t, []string{"/opt/ah", "/mnt/docker"}, paths)
+}
+
+func TestFromEnv_KanbanPortRangeOverride(t *testing.T) {
+	t.Setenv("AH_KANBAN_PORT_START", "8000")
+	t.Setenv("AH_KANBAN_PORT_END", "8500")
+
+	cfg := FromEnv()
+	assert.Equal(t, 8000, cfg.KanbanPortStart)
+	assert.Equal(t, 8500, cfg.KanbanPortEnd)
+}
+
+func TestFromEnv_KanbanPortRangeInvalidFallsBack(t *testing.T) {
+	t.Setenv("AH_KANBAN_PORT_START", "not-a-number")
+	t.Setenv("AH_KANBAN_PORT_END", "also-bad")
+
+	cfg := FromEnv()
+	assert.Equal(t, DefaultKanbanPortStart, cfg.KanbanPortStart)
+	assert.Equal(t, DefaultKanbanPortEnd, cfg.KanbanPortEnd)
+}
+
+func TestFromEnv_KanbanPortRangePartialOverride(t *testing.T) {
+	// Override only start, end stays default
+	t.Setenv("AH_KANBAN_PORT_START", "8000")
+	os.Unsetenv("AH_KANBAN_PORT_END")
+
+	cfg := FromEnv()
+	assert.Equal(t, 8000, cfg.KanbanPortStart)
+	assert.Equal(t, DefaultKanbanPortEnd, cfg.KanbanPortEnd)
 }

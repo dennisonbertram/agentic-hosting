@@ -154,7 +154,8 @@ func main() {
 	dbMgr := databases.NewManager(store.StateDB, dockerClient, masterKey[:32])
 
 	// Create kanban manager
-	kanbanMgr := kanbans.NewManager(store.StateDB, dockerClient, masterKey[:32])
+	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
+	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{

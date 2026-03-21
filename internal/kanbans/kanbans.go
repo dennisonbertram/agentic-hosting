@@ -47,6 +47,12 @@ type KanbanCredentials struct {
 	SetupSuccess bool   `json:"setup_success"`
 }
 
+// Default port range for kanban containers.
+const (
+	DefaultPortStart = 7100
+	DefaultPortEnd   = 9100
+)
+
 // Manager manages kanban board lifecycle.
 type Manager struct {
 	db                 *sql.DB
@@ -55,12 +61,25 @@ type Manager struct {
 	mu                 sync.Mutex // protects port allocation
 	healthCheckTimeout time.Duration
 	baseURL            string // default "http://127.0.0.1"
+	portStart          int    // inclusive lower bound (default DefaultPortStart)
+	portEnd            int    // inclusive upper bound (default DefaultPortEnd)
 }
 
-// NewManager creates a kanban manager.
+// NewManager creates a kanban manager with the default port range.
 func NewManager(db *sql.DB, dockerClient docker.Client, masterKey []byte) *Manager {
+	return NewManagerWithPortRange(db, dockerClient, masterKey, DefaultPortStart, DefaultPortEnd)
+}
+
+// NewManagerWithPortRange creates a kanban manager with a custom port range.
+// portStart and portEnd are inclusive bounds. If portStart >= portEnd the
+// defaults are used.
+func NewManagerWithPortRange(db *sql.DB, dockerClient docker.Client, masterKey []byte, portStart, portEnd int) *Manager {
 	if dockerClient == nil {
 		panic("kanbans: NewManager requires non-nil docker client")
+	}
+	if portStart >= portEnd || portStart < 1 || portEnd > 65535 {
+		portStart = DefaultPortStart
+		portEnd = DefaultPortEnd
 	}
 	mgr := &Manager{
 		db:                 db,
@@ -68,6 +87,8 @@ func NewManager(db *sql.DB, dockerClient docker.Client, masterKey []byte) *Manag
 		masterKey:          masterKey,
 		healthCheckTimeout: 60 * time.Second,
 		baseURL:            "http://127.0.0.1",
+		portStart:          portStart,
+		portEnd:            portEnd,
 	}
 	mgr.ReconcileStale()
 	return mgr
@@ -468,11 +489,14 @@ func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {
 	return true
 }
 
+// PortRange returns the configured port range (inclusive).
+func (m *Manager) PortRange() (start, end int) {
+	return m.portStart, m.portEnd
+}
+
 func (m *Manager) findFreePort(ctx context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	const minPort, maxPort = 7100, 7500
 
 	// Check which ports are already allocated in DB
 	rows, err := m.db.QueryContext(ctx, `SELECT port FROM kanbans WHERE port IS NOT NULL AND status NOT IN ('failed')`)
@@ -494,7 +518,7 @@ func (m *Manager) findFreePort(ctx context.Context) (int, error) {
 	}
 
 	// Find first free port
-	for port := minPort; port <= maxPort; port++ {
+	for port := m.portStart; port <= m.portEnd; port++ {
 		if usedPorts[port] {
 			continue
 		}
@@ -506,7 +530,7 @@ func (m *Manager) findFreePort(ctx context.Context) (int, error) {
 		ln.Close()
 		return port, nil
 	}
-	return 0, fmt.Errorf("no free ports available in range %d-%d", minPort, maxPort)
+	return 0, fmt.Errorf("no free ports available in range %d-%d", m.portStart, m.portEnd)
 }
 
 func (m *Manager) waitForHTTP(ctx context.Context, port int, timeout time.Duration) bool {

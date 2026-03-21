@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -18,9 +19,17 @@ type Config struct {
 	DockerDataDir    string // Docker data root for disk checks (default: /var/lib/docker)
 	BaseDomain       string // base domain for public service URLs (default: "" = localhost fallback)
 	TraefikConfigDir string // Traefik file provider dynamic config directory (default: /etc/traefik/dynamic)
+	KanbanPortStart  int    // inclusive start of kanban port range (default: 7100)
+	KanbanPortEnd    int    // inclusive end of kanban port range (default: 9100)
 }
 
 const defaultDataDir = "/var/lib/ah"
+
+// Default kanban port range constants.
+const (
+	DefaultKanbanPortStart = 7100
+	DefaultKanbanPortEnd   = 9100
+)
 
 // Default returns a Config with all default values.
 func Default() Config {
@@ -33,6 +42,8 @@ func Default() Config {
 		NixpacksPath:     "/usr/local/bin/nixpacks",
 		DockerDataDir:    "/var/lib/docker",
 		TraefikConfigDir: "/etc/traefik/dynamic",
+		KanbanPortStart:  DefaultKanbanPortStart,
+		KanbanPortEnd:    DefaultKanbanPortEnd,
 	}
 }
 
@@ -52,6 +63,8 @@ func FromEnv() Config {
 		DockerDataDir:    envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
 		BaseDomain:       strings.TrimSpace(os.Getenv("AH_BASE_DOMAIN")),
 		TraefikConfigDir: envOr("AH_TRAEFIK_CONFIG_DIR", "/etc/traefik/dynamic"),
+		KanbanPortStart:  envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart),
+		KanbanPortEnd:    envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),
 	}
 }
 
@@ -63,6 +76,15 @@ func (c Config) DiskCheckPaths() []string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

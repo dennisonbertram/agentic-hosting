@@ -72,8 +72,24 @@ func newTestManager(t *testing.T, stateDB *sql.DB, dockerClient *testutil.MockDo
 		masterKey:          []byte("0123456789abcdef0123456789abcdef"),
 		healthCheckTimeout: 5 * time.Second,
 		baseURL:            "http://127.0.0.1",
+		portStart:          DefaultPortStart,
+		portEnd:            DefaultPortEnd,
 	}
 	// Don't call ReconcileStale in tests — no stale records to reconcile
+	return mgr
+}
+
+func newTestManagerWithPortRange(t *testing.T, stateDB *sql.DB, dockerClient *testutil.MockDockerClient, portStart, portEnd int) *Manager {
+	t.Helper()
+	mgr := &Manager{
+		db:                 stateDB,
+		docker:             dockerClient,
+		masterKey:          []byte("0123456789abcdef0123456789abcdef"),
+		healthCheckTimeout: 5 * time.Second,
+		baseURL:            "http://127.0.0.1",
+		portStart:          portStart,
+		portEnd:            portEnd,
+	}
 	return mgr
 }
 
@@ -104,7 +120,8 @@ func TestCreate_Success(t *testing.T) {
 	assert.NotEmpty(t, kb.Credentials.JWT)
 	assert.True(t, kb.Credentials.SetupSuccess)
 	assert.Equal(t, "tenant-1.kanban.agentic.hosting", kb.URL)
-	assert.True(t, kb.Port >= 7100 && kb.Port <= 7500)
+	assert.True(t, kb.Port >= DefaultPortStart && kb.Port <= DefaultPortEnd,
+		"port %d should be in range %d-%d", kb.Port, DefaultPortStart, DefaultPortEnd)
 
 	// Verify Docker calls
 	assert.Equal(t, 1, dockerClient.RunDatabaseCalls)
@@ -221,4 +238,95 @@ func TestDelete_NotFound(t *testing.T) {
 	err := mgr.Delete(context.Background(), "tenant-1")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "not found")
+}
+
+func TestCustomPortRange(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedKanbanTestData(t, stateDB)
+
+	dockerClient := &testutil.MockDockerClient{
+		RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			startFakeVikunja(t, cfg.HostPort)
+			return "container-" + cfg.Name, nil
+		},
+	}
+
+	// Use a narrow custom range
+	mgr := newTestManagerWithPortRange(t, stateDB, dockerClient, 9000, 9010)
+
+	kb, err := mgr.Create(context.Background(), "tenant-1")
+	require.NoError(t, err)
+	require.NotNil(t, kb)
+
+	assert.True(t, kb.Port >= 9000 && kb.Port <= 9010,
+		"port %d should be in custom range 9000-9010", kb.Port)
+}
+
+func TestPortRange_DefaultValues(t *testing.T) {
+	mgr := &Manager{
+		portStart: DefaultPortStart,
+		portEnd:   DefaultPortEnd,
+	}
+	start, end := mgr.PortRange()
+	assert.Equal(t, 7100, start)
+	assert.Equal(t, 9100, end)
+}
+
+func TestNewManagerWithPortRange_InvalidFallsBackToDefaults(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	dockerClient := &testutil.MockDockerClient{}
+
+	// portStart >= portEnd should fall back to defaults
+	mgr := &Manager{
+		db:                 stateDB,
+		docker:             dockerClient,
+		masterKey:          []byte("0123456789abcdef0123456789abcdef"),
+		healthCheckTimeout: 5 * time.Second,
+		baseURL:            "http://127.0.0.1",
+	}
+
+	// Simulate what NewManagerWithPortRange does for invalid range
+	portStart, portEnd := 8000, 7000 // invalid: start > end
+	if portStart >= portEnd || portStart < 1 || portEnd > 65535 {
+		portStart = DefaultPortStart
+		portEnd = DefaultPortEnd
+	}
+	mgr.portStart = portStart
+	mgr.portEnd = portEnd
+
+	start, end := mgr.PortRange()
+	assert.Equal(t, DefaultPortStart, start)
+	assert.Equal(t, DefaultPortEnd, end)
+}
+
+func TestFindFreePort_ExhaustedRange(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedKanbanTestData(t, stateDB)
+
+	dockerClient := &testutil.MockDockerClient{
+		RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			startFakeVikunja(t, cfg.HostPort)
+			return "container-" + cfg.Name, nil
+		},
+	}
+
+	// Use a range of exactly 1 port
+	mgr := newTestManagerWithPortRange(t, stateDB, dockerClient, 9050, 9050)
+
+	// First allocation should succeed
+	kb, err := mgr.Create(context.Background(), "tenant-1")
+	require.NoError(t, err)
+	assert.Equal(t, 9050, kb.Port)
+
+	// Insert a second tenant for the next create
+	_, err = stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+		"tenant-2", "Tenant2", "tenant2@example.com",
+	)
+	require.NoError(t, err)
+
+	// Second allocation should fail — range exhausted
+	_, err = mgr.Create(context.Background(), "tenant-2")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no free ports available in range 9050-9050")
 }

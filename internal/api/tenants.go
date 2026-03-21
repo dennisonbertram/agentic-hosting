@@ -395,6 +395,11 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		s.authInvalidator.InvalidateTenant(tenantID)
 	}
 
+	// Cancel all active builds for this tenant to free build slots
+	if s.buildManager != nil {
+		s.buildManager.CancelAllForTenant(r.Context(), tenantID)
+	}
+
 	// Stop and remove all running containers for this tenant
 	if s.svcManager != nil {
 		s.svcManager.StopAllForTenant(r.Context(), tenantID)

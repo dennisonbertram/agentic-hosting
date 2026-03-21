@@ -86,6 +86,88 @@ func TestStartBuild_MarksFailedWhenDeployFails(t *testing.T) {
 	assert.Contains(t, logs, "Deploy failed: deploy boom")
 }
 
+func TestCancelAllForTenant_CancelsPendingAndRunningBuilds(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedBuildTestData(t, stateDB)
+
+	var cancelledIDs []string
+	sb := &stubBuilder{
+		cancelFn: func(buildID string) error {
+			cancelledIDs = append(cancelledIDs, buildID)
+			return nil
+		},
+	}
+
+	// Create manager first so reconcileStaleBuilds runs on an empty builds table
+	mgr := NewManager(stateDB, sb, nil)
+
+	now := time.Now().Unix()
+	// Insert builds in various states AFTER manager creation to avoid reconcileStaleBuilds
+	_, err := stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at)
+		 VALUES (?, ?, ?, 'pending', 'git', 'https://github.com/example/repo', 'main', 'img:1', ?)`,
+		"b-pending", "svc-1", "tenant-1", now,
+	)
+	require.NoError(t, err)
+
+	_, err = stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at, started_at)
+		 VALUES (?, ?, ?, 'running', 'git', 'https://github.com/example/repo', 'main', 'img:2', ?, ?)`,
+		"b-running", "svc-1", "tenant-1", now, now,
+	)
+	require.NoError(t, err)
+
+	_, err = stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at, started_at, finished_at)
+		 VALUES (?, ?, ?, 'succeeded', 'git', 'https://github.com/example/repo', 'main', 'img:3', ?, ?, ?)`,
+		"b-done", "svc-1", "tenant-1", now-100, now-100, now-50,
+	)
+	require.NoError(t, err)
+
+	err = mgr.CancelAllForTenant(context.Background(), "tenant-1")
+	require.NoError(t, err)
+
+	// Pending and running builds should be cancelled
+	assert.Equal(t, "cancelled", getBuildStatus(t, stateDB, "b-pending"))
+	assert.Equal(t, "cancelled", getBuildStatus(t, stateDB, "b-running"))
+
+	// Succeeded build should be unaffected
+	assert.Equal(t, "succeeded", getBuildStatus(t, stateDB, "b-done"))
+
+	// Builder.CancelBuild should have been called for both active builds
+	assert.Len(t, cancelledIDs, 2)
+	assert.Contains(t, cancelledIDs, "b-pending")
+	assert.Contains(t, cancelledIDs, "b-running")
+
+	// Cancelled builds should have suspension log entry
+	var logText string
+	err = stateDB.QueryRow(`SELECT log FROM builds WHERE id = ?`, "b-pending").Scan(&logText)
+	require.NoError(t, err)
+	assert.Contains(t, logText, "tenant suspended")
+}
+
+func TestCancelAllForTenant_NoActiveBuilds_Succeeds(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedBuildTestData(t, stateDB)
+
+	now := time.Now().Unix()
+	// Only a completed build exists
+	_, err := stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at, started_at, finished_at)
+		 VALUES (?, ?, ?, 'succeeded', 'git', 'https://github.com/example/repo', 'main', 'img:1', ?, ?, ?)`,
+		"b-done", "svc-1", "tenant-1", now-100, now-100, now-50,
+	)
+	require.NoError(t, err)
+
+	mgr := NewManager(stateDB, &stubBuilder{}, nil)
+
+	err = mgr.CancelAllForTenant(context.Background(), "tenant-1")
+	require.NoError(t, err)
+
+	// Completed build should be unaffected
+	assert.Equal(t, "succeeded", getBuildStatus(t, stateDB, "b-done"))
+}
+
 func seedBuildTestData(t *testing.T, stateDB *sql.DB) {
 	t.Helper()
 	if _, err := stateDB.Exec(

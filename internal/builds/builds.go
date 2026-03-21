@@ -502,6 +502,49 @@ func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) err
 	return nil
 }
 
+// CancelAllForTenant cancels all pending and running builds for a tenant.
+// Used during tenant suspension to free build slots and prevent orphaned builds.
+func (m *Manager) CancelAllForTenant(ctx context.Context, tenantID string) error {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id FROM builds WHERE tenant_id = ? AND status IN ('pending', 'running')`,
+		tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("query active builds for tenant %s: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	var buildIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan build id: %w", err)
+		}
+		buildIDs = append(buildIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate active builds: %w", err)
+	}
+
+	now := time.Now().Unix()
+	for _, buildID := range buildIDs {
+		if err := m.builder.CancelBuild(buildID); err != nil {
+			log.Printf("builds: cancel build %s during tenant suspension: %v", buildID, err)
+		}
+		m.db.ExecContext(ctx,
+			`UPDATE builds SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('pending', 'running')`,
+			now, buildID,
+		)
+		m.appendLog(ctx, buildID, "[ah] Build cancelled: tenant suspended")
+		m.closeLogSubs(buildID)
+	}
+
+	if len(buildIDs) > 0 {
+		log.Printf("builds: cancelled %d active builds for suspended tenant %s", len(buildIDs), tenantID)
+	}
+	return nil
+}
+
 // allowedGitHosts is the set of trusted git hosting providers.
 // This prevents DNS rebinding attacks by only allowing known-good hostnames.
 var allowedGitHosts = map[string]bool{

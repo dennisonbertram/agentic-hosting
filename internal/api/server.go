@@ -152,6 +152,9 @@ func (s *Server) setupRoutes() {
 		// Recovery endpoint: authenticated by bootstrap token, not an API key.
 		// Allows tenants who have lost all their keys to obtain a new one.
 		r.Post("/v1/auth/recover", s.handleKeyRecover)
+		// Reactivation endpoint: authenticated by bootstrap token, not an API key.
+		// Allows operator to reactivate a suspended tenant and generate a new API key.
+		r.Post("/v1/tenants/{tenantID}/reactivate", s.handleTenantReactivate)
 	})
 
 	// Authenticated short-lived routes keep the standard request timeout.

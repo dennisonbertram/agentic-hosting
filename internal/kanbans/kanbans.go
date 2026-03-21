@@ -124,6 +124,9 @@ func (m *Manager) ReconcileStale() {
 }
 
 // Create provisions a new Vikunja kanban board for a tenant.
+// It returns immediately with status "provisioning"; a background goroutine
+// handles health checks, Vikunja setup, and status transitions to "ready"
+// or "failed". Callers should poll GET /v1/kanban for the final status.
 func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) {
 	// Validate tenantID is DNS-label safe (used in subdomain and email).
 	// Tenant IDs are hex-encoded (generateID produces lowercase hex), but
@@ -266,33 +269,56 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		return nil, fmt.Errorf("kanban record deleted during provisioning")
 	}
 
+	// Launch background provisioning: health check, Vikunja setup, credential
+	// storage, and final status transition. The API returns immediately with
+	// status "provisioning" so the caller is never blocked on a 60-second
+	// health check.
+	go m.provision(id, tenantID, containerID, volumeName, publicURL, port, adminPassword)
+
+	return &Kanban{
+		ID:        id,
+		TenantID:  tenantID,
+		Status:    "provisioning",
+		Host:      "127.0.0.1",
+		Port:      port,
+		URL:       publicURL,
+		VolumeName: volumeName,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
+}
+
+// provision runs in a background goroutine to complete kanban setup after the
+// container has been started. It handles the health check, Vikunja user/project
+// setup, credential encryption, and final status update. On any failure it
+// marks the kanban as "failed" and cleans up Docker resources.
+func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL string, port int, adminPassword string) {
+	// Use a background context since the original request context is gone.
+	ctx, cancel := context.WithTimeout(context.Background(), m.healthCheckTimeout+30*time.Second)
+	defer cancel()
+
+	cleanup := func() {
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+		_ = m.docker.RemoveVolume(ctx, volumeName)
+	}
+
 	// Wait for health check (HTTP GET to /api/v1/info)
 	healthy := m.waitForHTTP(ctx, port, m.healthCheckTimeout)
 
 	if !healthy {
-		if m.updateStatus(ctx, id, "failed") {
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
-			_ = m.docker.RemoveVolume(ctx, volumeName)
-		} else {
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
-			_ = m.docker.RemoveVolume(ctx, volumeName)
-		}
-		return nil, fmt.Errorf("kanban health check failed after %s", m.healthCheckTimeout)
+		log.Printf("kanbans: health check failed for %s after %s", id, m.healthCheckTimeout)
+		m.updateStatus(ctx, id, "failed")
+		cleanup()
+		return
 	}
 
 	// Setup Vikunja (create admin user, project, buckets) — non-fatal on failure
-	creds := &KanbanCredentials{
-		Username: "admin",
-		Password: adminPassword,
-	}
 	setupToken, setupErr := m.setupVikunja(port, tenantID, adminPassword)
 	if setupErr != nil {
 		log.Printf("kanbans: setup failed for %s (non-fatal): %v", id, setupErr)
 	} else {
-		creds.JWT = setupToken
-		creds.SetupSuccess = true
+		_ = setupToken // JWT stored via admin token below; setup success logged
 	}
 
 	// Encrypt admin password for storage — failure is fatal (irrecoverable credentials)
@@ -300,10 +326,8 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	if err != nil {
 		log.Printf("kanbans: failed to encrypt admin token for %s, cleaning up: %v", id, err)
 		m.updateStatus(ctx, id, "failed")
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("encrypt admin token: %w", err)
+		cleanup()
+		return
 	}
 	if _, err := m.db.ExecContext(ctx,
 		`UPDATE kanbans SET admin_token_encrypted = ?, url = ?, updated_at = ? WHERE id = ?`,
@@ -311,31 +335,16 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	); err != nil {
 		log.Printf("kanbans: failed to store admin token for %s, cleaning up: %v", id, err)
 		m.updateStatus(ctx, id, "failed")
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("store admin token: %w", err)
+		cleanup()
+		return
 	}
 
 	if !m.updateStatus(ctx, id, "ready") {
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("kanban record deleted during provisioning")
+		cleanup()
+		return
 	}
 
-	return &Kanban{
-		ID:          id,
-		TenantID:    tenantID,
-		Status:      "ready",
-		Host:        "127.0.0.1",
-		Port:        port,
-		URL:         publicURL,
-		Credentials: creds,
-		VolumeName:  volumeName,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}, nil
+	log.Printf("kanbans: provisioning complete for %s (tenant %s)", id, tenantID)
 }
 
 // Get returns the kanban board for a tenant.

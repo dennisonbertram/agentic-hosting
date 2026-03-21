@@ -311,6 +311,169 @@ func (m *Manager) RestoreEnvVars(ctx context.Context, tenantID, snapshotID strin
 	return plaintext, nil
 }
 
+// CleanExpired removes snapshots that exceed per-service count or age limits.
+// It deletes the oldest snapshots first when over the count limit and removes
+// any snapshot older than maxAge. Returns the number of snapshots removed.
+func (m *Manager) CleanExpired(ctx context.Context, maxPerService int, maxAge time.Duration) (int, error) {
+	var removed int
+
+	// 1. Enforce per-service count limit (delete oldest when over limit).
+	if maxPerService > 0 {
+		n, err := m.cleanByCount(ctx, maxPerService)
+		if err != nil {
+			return removed, fmt.Errorf("clean by count: %w", err)
+		}
+		removed += n
+	}
+
+	// 2. Enforce age limit (delete snapshots older than maxAge).
+	if maxAge > 0 {
+		n, err := m.cleanByAge(ctx, maxAge)
+		if err != nil {
+			return removed, fmt.Errorf("clean by age: %w", err)
+		}
+		removed += n
+	}
+
+	return removed, nil
+}
+
+// cleanByCount finds services with more than maxPerService snapshots and
+// deletes the oldest ones exceeding the limit.
+func (m *Manager) cleanByCount(ctx context.Context, maxPerService int) (int, error) {
+	// Find services that exceed the snapshot count limit.
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT service_id, COUNT(*) as cnt FROM snapshots GROUP BY service_id HAVING cnt > ?`,
+		maxPerService,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("query over-limit services: %w", err)
+	}
+	defer rows.Close()
+
+	type overLimit struct {
+		serviceID string
+		count     int
+	}
+	var services []overLimit
+	for rows.Next() {
+		var ol overLimit
+		if err := rows.Scan(&ol.serviceID, &ol.count); err != nil {
+			return 0, fmt.Errorf("scan over-limit row: %w", err)
+		}
+		services = append(services, ol)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate over-limit rows: %w", err)
+	}
+
+	var removed int
+	for _, svc := range services {
+		excess := svc.count - maxPerService
+		// Select the oldest snapshots beyond the limit.
+		snapRows, err := m.db.QueryContext(ctx,
+			`SELECT id, tenant_id, image_ref FROM snapshots
+			 WHERE service_id = ?
+			 ORDER BY created_at ASC
+			 LIMIT ?`,
+			svc.serviceID, excess,
+		)
+		if err != nil {
+			log.Printf("gc/snapshots: failed to query excess snapshots for service %s: %v", svc.serviceID, err)
+			continue
+		}
+
+		type snapInfo struct {
+			id       string
+			tenantID string
+			imageRef string
+		}
+		var toDelete []snapInfo
+		for snapRows.Next() {
+			var s snapInfo
+			if err := snapRows.Scan(&s.id, &s.tenantID, &s.imageRef); err != nil {
+				log.Printf("gc/snapshots: failed to scan snapshot row: %v", err)
+				continue
+			}
+			toDelete = append(toDelete, s)
+		}
+		snapRows.Close()
+
+		for _, s := range toDelete {
+			if err := m.deleteSnapshot(ctx, s.id, s.tenantID, s.imageRef); err != nil {
+				log.Printf("gc/snapshots: failed to delete snapshot %s: %v", s.id, err)
+				continue
+			}
+			removed++
+		}
+	}
+
+	return removed, nil
+}
+
+// cleanByAge deletes all snapshots older than maxAge.
+func (m *Manager) cleanByAge(ctx context.Context, maxAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-maxAge).Unix()
+
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, tenant_id, image_ref FROM snapshots WHERE created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("query expired snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	type snapInfo struct {
+		id       string
+		tenantID string
+		imageRef string
+	}
+	var toDelete []snapInfo
+	for rows.Next() {
+		var s snapInfo
+		if err := rows.Scan(&s.id, &s.tenantID, &s.imageRef); err != nil {
+			log.Printf("gc/snapshots: failed to scan expired snapshot: %v", err)
+			continue
+		}
+		toDelete = append(toDelete, s)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate expired rows: %w", err)
+	}
+
+	var removed int
+	for _, s := range toDelete {
+		if err := m.deleteSnapshot(ctx, s.id, s.tenantID, s.imageRef); err != nil {
+			log.Printf("gc/snapshots: failed to delete expired snapshot %s: %v", s.id, err)
+			continue
+		}
+		removed++
+	}
+
+	return removed, nil
+}
+
+// deleteSnapshot removes a snapshot's Docker image and DB row.
+func (m *Manager) deleteSnapshot(ctx context.Context, id, tenantID, imageRef string) error {
+	// Best-effort image removal.
+	if imageRef != "" {
+		if err := m.docker.RemoveImage(ctx, imageRef); err != nil {
+			log.Printf("gc/snapshots: WARNING: failed to remove image %s: %v", imageRef, err)
+		}
+	}
+
+	_, err := m.db.ExecContext(ctx,
+		`DELETE FROM snapshots WHERE id = ? AND tenant_id = ?`,
+		id, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete snapshot row %s: %w", id, err)
+	}
+
+	return nil
+}
+
 func generateID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := cryptoRand.Read(b); err != nil {

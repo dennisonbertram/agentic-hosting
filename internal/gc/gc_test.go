@@ -161,6 +161,52 @@ func TestCollectOnce_PrunesDanglingImages(t *testing.T) {
 	assert.Equal(t, 1, mock.PruneDanglingImagesCalls)
 }
 
+// mockSnapshotCleaner implements SnapshotCleaner for testing.
+type mockSnapshotCleaner struct {
+	called          bool
+	maxPerService   int
+	maxAge          time.Duration
+	returnRemoved   int
+	returnErr       error
+}
+
+func (m *mockSnapshotCleaner) CleanExpired(ctx context.Context, maxPerService int, maxAge time.Duration) (int, error) {
+	m.called = true
+	m.maxPerService = maxPerService
+	m.maxAge = maxAge
+	return m.returnRemoved, m.returnErr
+}
+
+func TestCollectOnce_CallsSnapshotCleaner(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{}
+
+	cleaner := &mockSnapshotCleaner{returnRemoved: 5}
+	maxAge := 30 * 24 * time.Hour
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	g.SetSnapshotCleaner(cleaner, 10, maxAge)
+
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, cleaner.called, "snapshot cleaner should have been called")
+	assert.Equal(t, 10, cleaner.maxPerService)
+	assert.Equal(t, maxAge, cleaner.maxAge)
+}
+
+func TestCollectOnce_SkipsSnapshotCleanerWhenNil(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	// Don't set any snapshot cleaner
+
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+	// Should not panic or fail — just skip snapshot cleanup
+}
+
 func seedService(t *testing.T, stateDB *sql.DB, svcID, tenantID, containerID string) {
 	t.Helper()
 	_, err := stateDB.Exec(

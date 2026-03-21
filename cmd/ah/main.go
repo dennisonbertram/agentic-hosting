@@ -25,6 +25,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
+	"github.com/dennisonbertram/agentic-hosting/internal/snapshots"
 )
 
 func main() {
@@ -219,6 +220,11 @@ func main() {
 	gcCtx, gcCancel := context.WithCancel(context.Background())
 	defer gcCancel()
 	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute, cfg.BuildDir)
+
+	// Wire snapshot retention into GC
+	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])
+	garbageCollector.SetSnapshotCleaner(snapMgr, cfg.SnapshotMaxPerService, cfg.SnapshotMaxAge)
+
 	go garbageCollector.Run(gcCtx)
 
 	<-done

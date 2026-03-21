@@ -87,6 +87,16 @@ var regLimiter = &registrationLimiter{
 	// globalWindowAt zero-value: first request starts the window
 }
 
+// resetForTest resets the rate limiter state. Exported only for tests within
+// the api package (unexported, same-package access only).
+func (rl *registrationLimiter) resetForTest() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.globalCount = 0
+	rl.globalWindowAt = time.Time{}
+	rl.entries = cache.New[string, *regEntry](regMaxEntries)
+}
+
 func init() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
@@ -152,17 +162,17 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bootstrap token gate — open registration (--dev --open-registration) is
-	// the only path that skips this. Without that explicit flag, bootstrapToken
+	// the only path that skips this. Without that explicit flag, bootstrapTokens
 	// is always required (main.go fatals if unset outside dev+open-registration).
 	if !s.openRegistration {
-		// Fail closed: reject if bootstrap token is not configured
-		if s.bootstrapToken == "" {
+		// Fail closed: reject if no bootstrap tokens are configured
+		if len(s.bootstrapTokens) == 0 {
 			writeError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 			return
 		}
 		provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
-		// HMAC-compare to prevent length-leak from ConstantTimeCompare
-		if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
+		// HMAC-compare against all configured tokens to support graceful rotation.
+		if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
 			writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
 			return
 		}
@@ -555,4 +565,22 @@ func hmacEqual(a, b string, key []byte) bool {
 	macB := hmac.New(sha256.New, key)
 	macB.Write([]byte(b))
 	return hmac.Equal(macA.Sum(nil), macB.Sum(nil))
+}
+
+// validateBootstrapToken checks whether the provided token matches any of the
+// configured bootstrap tokens. All comparisons use HMAC-compare to prevent
+// timing side-channels. This supports graceful token rotation: operators can
+// set AH_BOOTSTRAP_TOKEN=new,old, deploy, then remove the old token.
+//
+// Important: this function always iterates over ALL tokens regardless of whether
+// an early match is found. This prevents leaking which position in the list
+// matched (or whether a match occurred at all) via timing analysis.
+func validateBootstrapToken(provided string, tokens []string, masterKey []byte) bool {
+	matched := false
+	for _, tok := range tokens {
+		if hmacEqual(provided, tok, masterKey) {
+			matched = true
+		}
+	}
+	return matched
 }

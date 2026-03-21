@@ -70,9 +70,13 @@ func main() {
 		}
 	}
 
-	// Bootstrap token is always required unless --dev + --open-registration
-	bootstrapToken := strings.TrimSpace(os.Getenv("AH_BOOTSTRAP_TOKEN"))
-	if bootstrapToken == "" {
+	// Bootstrap token is always required unless --dev + --open-registration.
+	// Supports comma-separated list for graceful rotation:
+	//   AH_BOOTSTRAP_TOKEN=new_token,old_token
+	// All listed tokens are valid for registration and recovery.
+	bootstrapTokenRaw := strings.TrimSpace(os.Getenv("AH_BOOTSTRAP_TOKEN"))
+	var bootstrapTokens []string
+	if bootstrapTokenRaw == "" {
 		if !*devMode {
 			log.Fatalf("AH_BOOTSTRAP_TOKEN must be set (or use --dev --open-registration)")
 		}
@@ -80,8 +84,23 @@ func main() {
 			log.Fatalf("AH_BOOTSTRAP_TOKEN must be set. Use --open-registration with --dev to allow open registration.")
 		}
 		log.Printf("WARNING: open registration enabled — anyone can create tenants")
-	} else if len(bootstrapToken) < 32 {
-		log.Fatalf("AH_BOOTSTRAP_TOKEN must be at least 32 characters for brute-force resistance (got %d)", len(bootstrapToken))
+	} else {
+		for _, tok := range strings.Split(bootstrapTokenRaw, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			if len(tok) < 32 {
+				log.Fatalf("each bootstrap token must be at least 32 characters for brute-force resistance (got %d for token starting with %.8s...)", len(tok), tok)
+			}
+			bootstrapTokens = append(bootstrapTokens, tok)
+		}
+		if len(bootstrapTokens) == 0 {
+			log.Fatalf("AH_BOOTSTRAP_TOKEN is set but contains no valid tokens")
+		}
+		if len(bootstrapTokens) > 1 {
+			log.Printf("bootstrap token rotation: %d tokens configured (all are valid for registration and recovery)", len(bootstrapTokens))
+		}
 	}
 
 	if *openRegistration && !*devMode {
@@ -170,7 +189,7 @@ func main() {
 		Store:            store,
 		MasterKey:        masterKey[:32],
 		DevMode:          *devMode,
-		BootstrapToken:   bootstrapToken,
+		BootstrapTokens:  bootstrapTokens,
 		OpenRegistration: *openRegistration,
 		Docker:           dockerClient,
 		BuildManager:     buildMgr,

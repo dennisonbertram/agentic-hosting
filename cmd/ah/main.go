@@ -39,6 +39,9 @@ func main() {
 			}
 			runBackup(dbPath)
 			return
+		case "rotate-key":
+			runRotateKey(os.Args[2:])
+			return
 		case "serve":
 			// Remove "serve" from args so flag.Parse works
 			os.Args = append(os.Args[:1], os.Args[2:]...)

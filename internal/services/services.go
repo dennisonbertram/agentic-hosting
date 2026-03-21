@@ -18,6 +18,7 @@ import (
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
@@ -287,9 +288,10 @@ type Manager struct {
 	docker           docker.Client
 	masterKey        []byte
 	baseDomain       string
-	traefikConfigDir string        // Traefik file provider directory; empty disables file-based routing
-	deploySem        chan struct{} // bounded deploy concurrency
-	deployQueue      chan struct{} // bounded queue for waiting deploys
+	traefikConfigDir string              // Traefik file provider directory; empty disables file-based routing
+	deploySem        chan struct{}        // bounded deploy concurrency
+	deployQueue      chan struct{}        // bounded queue for waiting deploys
+	deployStore      *deployments.Store   // deployment history tracking (nil-safe: failures are logged, not propagated)
 
 	// svcLocks is a 256-slot striped mutex array that serialises per-service destructive
 	// lifecycle operations (Deploy, Restart, ResetCircuitBreaker). Using a fixed-size array
@@ -299,7 +301,7 @@ type Manager struct {
 }
 
 // NewManager creates a service manager.
-func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain, traefikConfigDir string) *Manager {
+func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain, traefikConfigDir string, deployStore *deployments.Store) *Manager {
 	if docker == nil {
 		panic("ah: NewManager requires a non-nil Docker client")
 	}
@@ -311,6 +313,31 @@ func NewManager(db *sql.DB, docker docker.Client, masterKey []byte, baseDomain, 
 		traefikConfigDir: traefikConfigDir,
 		deploySem:        make(chan struct{}, maxConcurrentDeploys),
 		deployQueue:      make(chan struct{}, maxQueuedDeploys),
+		deployStore:      deployStore,
+	}
+}
+
+// recordDeployment creates a deployment record. Errors are logged but never returned
+// because deployment tracking is observability, not critical path.
+func (m *Manager) recordDeployment(ctx context.Context, d *deployments.Deployment) string {
+	if m.deployStore == nil {
+		return ""
+	}
+	if err := m.deployStore.Create(ctx, d); err != nil {
+		log.Printf("services: failed to record deployment for service %s: %v", d.ServiceID, err)
+		return ""
+	}
+	return d.ID
+}
+
+// updateDeploymentStatus updates a deployment record's status. Errors are logged but never
+// returned because deployment tracking is observability, not critical path.
+func (m *Manager) updateDeploymentStatus(ctx context.Context, deployID, status string, opts ...deployments.UpdateOption) {
+	if m.deployStore == nil || deployID == "" {
+		return
+	}
+	if err := m.deployStore.UpdateStatus(ctx, deployID, status, opts...); err != nil {
+		log.Printf("services: failed to update deployment %s to %s: %v", deployID, status, err)
 	}
 }
 
@@ -576,15 +603,28 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
 
+	// Record deployment event.
+	now := time.Now().Unix()
+	deployID := m.recordDeployment(ctx, &deployments.Deployment{
+		ServiceID: serviceID,
+		TenantID:  tenantID,
+		Image:     svc.Image,
+		Status:    deployments.StatusDeploying,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: now,
+	})
+
 	// Ensure per-tenant network exists for isolation
 	_, err = m.docker.EnsureNetwork(ctx, docker.TenantNetworkName(tenantID))
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("network setup failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
 	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("image pull failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("pull image: %w", err)
 	}
 
@@ -625,6 +665,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	envVars, err := m.getEnvVars(ctx, serviceID)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("env vars load failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
@@ -645,28 +686,35 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, svc.Image, port, envVars, traefikLabels(serviceID, svc.DNSLabel, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container start failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("run container: %w", err)
 	}
 
-	now := time.Now().Unix()
-	url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
-	res, err := m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
-		containerID, url, now, serviceID, tenantID,
-	)
-	if err != nil {
-		// Container is running but DB update failed; try to clean up
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		return fmt.Errorf("update service: %w", err)
+	{
+		now := time.Now().Unix()
+		url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
+		res, err := m.db.ExecContext(ctx,
+			`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+			containerID, url, now, serviceID, tenantID,
+		)
+		if err != nil {
+			// Container is running but DB update failed; try to clean up
+			_ = m.docker.StopContainer(ctx, containerID)
+			_ = m.docker.RemoveContainer(ctx, containerID)
+			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("db update failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
+			return fmt.Errorf("update service: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			// Service was deleted while we were deploying; clean up the container
+			log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
+			_ = m.docker.StopContainer(ctx, containerID)
+			_ = m.docker.RemoveContainer(ctx, containerID)
+			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
+			return fmt.Errorf("service deleted during deploy")
+		}
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		// Service was deleted while we were deploying; clean up the container
-		log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		return fmt.Errorf("service deleted during deploy")
-	}
+
+	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
 
 	// Write Traefik file-provider route (non-fatal on error)
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
@@ -726,16 +774,46 @@ func (m *Manager) Stop(ctx context.Context, tenantID, serviceID string) error {
 				`UPDATE services SET container_id = '', status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND container_id = ?`,
 				time.Now().Unix(), serviceID, tenantID, svc.ContainerID,
 			)
+			now := time.Now().Unix()
+			m.recordDeployment(ctx, &deployments.Deployment{
+				ServiceID:   serviceID,
+				TenantID:    tenantID,
+				Image:       svc.Image,
+				Status:      deployments.StatusStopped,
+				Trigger:     deployments.TriggerManual,
+				StartedAt:   now,
+				CompletedAt: &now,
+			})
 			return nil
 		}
 		if isAlreadyStoppedError(err) {
 			// Container is already stopped — treat as success.
 			m.updateStatus(ctx, serviceID, "stopped")
+			now := time.Now().Unix()
+			m.recordDeployment(ctx, &deployments.Deployment{
+				ServiceID:   serviceID,
+				TenantID:    tenantID,
+				Image:       svc.Image,
+				Status:      deployments.StatusStopped,
+				Trigger:     deployments.TriggerManual,
+				StartedAt:   now,
+				CompletedAt: &now,
+			})
 			return nil
 		}
 		return fmt.Errorf("stop container: %w", err)
 	}
 	m.updateStatus(ctx, serviceID, "stopped")
+	now := time.Now().Unix()
+	m.recordDeployment(ctx, &deployments.Deployment{
+		ServiceID:   serviceID,
+		TenantID:    tenantID,
+		Image:       svc.Image,
+		Status:      deployments.StatusStopped,
+		Trigger:     deployments.TriggerManual,
+		StartedAt:   now,
+		CompletedAt: &now,
+	})
 	return nil
 }
 
@@ -782,6 +860,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
 		return fmt.Errorf("start container: %w", err)
 	}
 	m.updateStatus(ctx, serviceID, "running")
+	now := time.Now().Unix()
+	m.recordDeployment(ctx, &deployments.Deployment{
+		ServiceID:   serviceID,
+		TenantID:    tenantID,
+		Image:       svc.Image,
+		Status:      deployments.StatusRunning,
+		Trigger:     deployments.TriggerManual,
+		StartedAt:   now,
+		CompletedAt: &now,
+	})
 	return nil
 }
 
@@ -837,6 +925,17 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 	if svc.ContainerID == "" {
 		return apierr.Conflict("service has no container — deploy the service first")
 	}
+
+	// Record deployment event.
+	restartNow := time.Now().Unix()
+	deployID := m.recordDeployment(ctx, &deployments.Deployment{
+		ServiceID: serviceID,
+		TenantID:  tenantID,
+		Image:     svc.Image,
+		Status:    deployments.StatusDeploying,
+		Trigger:   deployments.TriggerRestart,
+		StartedAt: restartNow,
+	})
 
 	// Use a detached context for destructive operations so client disconnects do not
 	// interrupt critical cleanup and DB state transitions mid-way.
@@ -909,6 +1008,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 	// an admin could have suspended the tenant since we started.
 	if err := m.checkTenantActive(opCtx, tenantID); err != nil {
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", "tenant suspended during restart")
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError("tenant suspended during restart"), deployments.WithCompletedAt(time.Now().Unix()))
 		return err
 	}
 
@@ -916,6 +1016,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 	envVars, err := m.getEnvVars(opCtx, serviceID)
 	if err != nil {
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("env vars load failed: %v", err))
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("env vars load failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
@@ -934,6 +1035,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 	// back to default networking and break tenant isolation).
 	if _, err := m.docker.EnsureNetwork(opCtx, docker.TenantNetworkName(tenantID)); err != nil {
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("network setup failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
@@ -945,6 +1047,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 	containerID, err := m.docker.RunContainer(opCtx, tenantID, serviceID, svc.Image, port, envVars, traefikLabels(serviceID, svc.DNSLabel, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("container restart failed: %v", err))
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container restart failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		// Remove Traefik route since the old container is gone and new one failed to start.
 		if traefikErr := m.deleteTraefikRoute(serviceID); traefikErr != nil {
 			log.Printf("WARNING: failed to delete traefik route for service %s after restart failure: %v", serviceID, traefikErr)
@@ -961,14 +1064,18 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) error
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("DB update failed after restart: %v", dbUpdErr))
 		_ = m.docker.StopContainer(opCtx, containerID)
 		_ = m.docker.RemoveContainer(opCtx, containerID)
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("DB update failed after restart: %v", dbUpdErr)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("update service after restart: %w", dbUpdErr)
 	}
 	if n, _ := dbUpdRes.RowsAffected(); n == 0 {
 		log.Printf("WARNING: service %s was deleted during restart; removing orphan container %s", serviceID, containerID)
 		_ = m.docker.StopContainer(opCtx, containerID)
 		_ = m.docker.RemoveContainer(opCtx, containerID)
+		m.updateDeploymentStatus(opCtx, deployID, deployments.StatusFailed, deployments.WithError("service deleted during restart"), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("service deleted during restart")
 	}
+
+	m.updateDeploymentStatus(opCtx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
 
 	// Re-write Traefik route (non-fatal; port may have changed via PORT env var).
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {

@@ -426,47 +426,35 @@ func (s *Server) handleServiceRedeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, svc)
 }
 
-// DeploymentRecord is a lightweight summary of a single deploy event for a service.
-// A "deploy" is any time a container was started — whether from the initial
-// POST /services, a POST /restart, or a POST /redeploy.
-// The system does not yet persist a dedicated deployments table, so this endpoint
-// derives the last known deploy from the service record itself.
-type DeploymentRecord struct {
-	ID          string `json:"id"`
-	ServiceID   string `json:"service_id"`
-	Status      string `json:"status"`
-	Image       string `json:"image"`
-	StartedAt   int64  `json:"started_at"`
-	ContainerID string `json:"container_id,omitempty"`
-}
-
-// handleServiceDeployments returns the deploy history for a service.
-// Currently this is derived from the service record (last known running state)
-// because there is no dedicated deployments table yet. Once a deployments table
-// is added (issue #6), this handler will be updated to return full history.
+// handleServiceDeployments returns the paginated deployment history for a service
+// from the dedicated deployments table.
 func (s *Server) handleServiceDeployments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSvcManager(w) {
+		return
+	}
+	if s.deploymentStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "deployment history is not available")
 		return
 	}
 	tenantID := middleware.GetTenantID(r.Context())
 	serviceID := chi.URLParam(r, "serviceID")
 
-	svc, err := s.svcManager.Get(r.Context(), tenantID, serviceID)
-	if err != nil {
+	// Verify the service exists and belongs to the tenant.
+	if _, err := s.svcManager.Get(r.Context(), tenantID, serviceID); err != nil {
 		apierr.WriteAPIError(w, err)
 		return
 	}
 
-	records := make([]DeploymentRecord, 0, 1)
-	if svc.UpdatedAt > 0 {
-		records = append(records, DeploymentRecord{
-			ID:          "deploy-" + svc.ID + "-" + strconv.FormatInt(svc.UpdatedAt, 10),
-			ServiceID:   svc.ID,
-			Status:      svc.Status,
-			Image:       svc.Image,
-			StartedAt:   svc.UpdatedAt,
-			ContainerID: svc.ContainerID,
-		})
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	records, err := s.deploymentStore.ListByService(r.Context(), tenantID, serviceID, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list deployments")
+		return
 	}
 	writeJSON(w, http.StatusOK, records)
 }

@@ -48,7 +48,8 @@ type StartBuildRequest struct {
 }
 
 // DeployFunc is called when a build succeeds to deploy the resulting image.
-type DeployFunc func(ctx context.Context, tenantID, serviceID, imageTag string) error
+// The buildID parameter links the deployment to the originating build record.
+type DeployFunc func(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error
 
 type buildExecutor interface {
 	Build(ctx context.Context, req builder.BuildRequest, logCb func(string)) error
@@ -271,7 +272,7 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if m.deployFn != nil {
 		logCb("[ah] Deploying built image...")
 		deployCtx, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag); deployErr != nil {
+		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag, buildID); deployErr != nil {
 			log.Printf("build %s deploy failed: %v", buildID, deployErr)
 			logCb("[ah] Deploy failed: " + deployErr.Error())
 			if _, dbErr := m.db.ExecContext(finalCtx,

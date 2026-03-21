@@ -47,7 +47,7 @@ func TestCreate_Success(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -66,7 +66,7 @@ func TestCreate_DefaultPort(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -81,7 +81,7 @@ func TestCreate_QuotaExceeded(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 
 	// Create first service
 	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
@@ -105,7 +105,7 @@ func TestCreate_InvalidImage(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "evil.example.com/malware:latest",
@@ -120,7 +120,7 @@ func TestGet_NotFound(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 	_, err := mgr.Get(context.Background(), "tenant-1", "nonexistent")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, apierr.ErrNotFound))
@@ -132,7 +132,7 @@ func TestListPaginated(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 
 	// Create 3 services
 	for i := 0; i < 3; i++ {
@@ -160,7 +160,7 @@ func TestDelete_Success(t *testing.T) {
 	mock := &testutil.MockDockerClient{}
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-	mgr := NewManager(stateDB, mock, masterKey, "", "")
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 		Name:  "my-service",
 		Image: "nginx:latest",
@@ -285,7 +285,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 		dir := t.TempDir()
 
-		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir)
+		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir, nil)
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "example.com", 8080)
 		require.NoError(t, err)
 
@@ -309,7 +309,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 		dir := t.TempDir()
 
-		mgr := NewManager(stateDB, mock, masterKey, "", dir)
+		mgr := NewManager(stateDB, mock, masterKey, "", dir, nil)
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "", 8080)
 		require.NoError(t, err)
 
@@ -331,7 +331,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		mock := &testutil.MockDockerClient{}
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-		mgr := NewManager(stateDB, mock, masterKey, "example.com", "")
+		mgr := NewManager(stateDB, mock, masterKey, "example.com", "", nil)
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "example.com", 8080)
 		require.NoError(t, err)
 	})
@@ -342,7 +342,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		mock := &testutil.MockDockerClient{}
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-		mgr := NewManager(stateDB, mock, masterKey, "", "")
+		mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "", "", 8080)
 		require.NoError(t, err)
 	})
@@ -354,7 +354,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 		dir := t.TempDir()
 
-		mgr := NewManager(stateDB, mock, masterKey, "", dir)
+		mgr := NewManager(stateDB, mock, masterKey, "", dir, nil)
 		// dnsLabel is empty in localhost mode (no baseDomain during Create)
 		err := mgr.writeTraefikRoute("svc-abc-123", "tenant1", "", "", 3000)
 		require.NoError(t, err)
@@ -376,7 +376,7 @@ func TestDeleteTraefikRoute(t *testing.T) {
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 		dir := t.TempDir()
 
-		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir)
+		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir, nil)
 		// Write first
 		err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "example.com", 8080)
 		require.NoError(t, err)
@@ -396,7 +396,7 @@ func TestDeleteTraefikRoute(t *testing.T) {
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 		dir := t.TempDir()
 
-		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir)
+		mgr := NewManager(stateDB, mock, masterKey, "example.com", dir, nil)
 		err := mgr.deleteTraefikRoute("nonexistent")
 		require.NoError(t, err)
 	})
@@ -409,7 +409,7 @@ func TestCreateSetsDNSLabel(t *testing.T) {
 		mock := &testutil.MockDockerClient{}
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-		mgr := NewManager(stateDB, mock, masterKey, "example.com", "")
+		mgr := NewManager(stateDB, mock, masterKey, "example.com", "", nil)
 		svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 			Name:  "my-service",
 			Image: "nginx:latest",
@@ -425,7 +425,7 @@ func TestCreateSetsDNSLabel(t *testing.T) {
 		mock := &testutil.MockDockerClient{}
 		masterKey := []byte("0123456789abcdef0123456789abcdef")
 
-		mgr := NewManager(stateDB, mock, masterKey, "", "")
+		mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
 		svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
 			Name:  "my-service",
 			Image: "nginx:latest",

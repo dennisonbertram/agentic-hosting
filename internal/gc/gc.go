@@ -14,12 +14,23 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
+// SnapshotCleaner is the interface used by GC to clean expired snapshots.
+// The snapshots.Manager satisfies this interface.
+type SnapshotCleaner interface {
+	CleanExpired(ctx context.Context, maxPerService int, maxAge time.Duration) (int, error)
+}
+
 // GC cleans up orphaned containers, volumes, images, and build dirs.
 type GC struct {
 	db       *sql.DB
 	docker   docker.Client
 	interval time.Duration
 	buildDir string
+
+	// Snapshot retention (optional — nil disables cleanup).
+	snapCleaner       SnapshotCleaner
+	snapMaxPerService int
+	snapMaxAge        time.Duration
 }
 
 // minResourceAge is the minimum time a resource must exist before GC considers
@@ -34,6 +45,15 @@ func New(db *sql.DB, dockerClient docker.Client, interval time.Duration, buildDi
 		interval: interval,
 		buildDir: buildDir,
 	}
+}
+
+// SetSnapshotCleaner configures snapshot retention cleanup. When set, the GC
+// loop will periodically remove snapshots exceeding the per-service count or
+// age limits.
+func (g *GC) SetSnapshotCleaner(cleaner SnapshotCleaner, maxPerService int, maxAge time.Duration) {
+	g.snapCleaner = cleaner
+	g.snapMaxPerService = maxPerService
+	g.snapMaxAge = maxAge
 }
 
 // Run starts the GC loop. Blocks until ctx is cancelled.
@@ -123,6 +143,17 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	} else if pruned > 0 {
 		log.Printf("gc: pruned %d dangling images", pruned)
 		removed += pruned
+	}
+
+	// 5. Snapshot retention — clean expired snapshots by count and age.
+	if g.snapCleaner != nil {
+		snapRemoved, snapErr := g.snapCleaner.CleanExpired(ctx, g.snapMaxPerService, g.snapMaxAge)
+		if snapErr != nil {
+			log.Printf("gc: snapshot retention cleanup failed: %v", snapErr)
+		} else if snapRemoved > 0 {
+			log.Printf("gc: removed %d expired snapshots", snapRemoved)
+			removed += snapRemoved
+		}
 	}
 
 	if removed > 0 {

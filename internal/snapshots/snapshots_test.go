@@ -393,3 +393,195 @@ func TestSnapshotRestoreEnvVars_Empty(t *testing.T) {
 	assert.NotNil(t, restored)
 	assert.Empty(t, restored)
 }
+
+// --- Snapshot retention tests ---
+
+// insertSnapshotWithAge directly inserts a snapshot with a specific created_at time
+// to avoid slow time.Sleep calls in tests.
+func insertSnapshotWithAge(t *testing.T, db *sql.DB, id, tenantID, serviceID string, createdAt int64) {
+	t.Helper()
+	imageRef := "127.0.0.1:5000/snapshots/" + tenantID + ":" + id
+	_, err := db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		id, tenantID, serviceID, "snap-"+id, imageRef, createdAt,
+	)
+	require.NoError(t, err)
+}
+
+func TestCleanExpired_CountLimit_DeletesOldest(t *testing.T) {
+	mgr, mock, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	// Insert 5 snapshots with sequential timestamps (oldest first).
+	insertSnapshotWithAge(t, db, "snap-1", tenantID, serviceID, now-500)
+	insertSnapshotWithAge(t, db, "snap-2", tenantID, serviceID, now-400)
+	insertSnapshotWithAge(t, db, "snap-3", tenantID, serviceID, now-300)
+	insertSnapshotWithAge(t, db, "snap-4", tenantID, serviceID, now-200)
+	insertSnapshotWithAge(t, db, "snap-5", tenantID, serviceID, now-100)
+
+	// Set max 3 per service, no age limit.
+	removed, err := mgr.CleanExpired(ctx, 3, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, removed, "should delete 2 oldest snapshots")
+
+	// Verify the 2 oldest are gone and the 3 newest remain.
+	_, err = mgr.Get(ctx, tenantID, "snap-1")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound), "snap-1 should be deleted")
+	_, err = mgr.Get(ctx, tenantID, "snap-2")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound), "snap-2 should be deleted")
+
+	// The 3 newest should still exist.
+	_, err = mgr.Get(ctx, tenantID, "snap-3")
+	assert.NoError(t, err, "snap-3 should remain")
+	_, err = mgr.Get(ctx, tenantID, "snap-4")
+	assert.NoError(t, err, "snap-4 should remain")
+	_, err = mgr.Get(ctx, tenantID, "snap-5")
+	assert.NoError(t, err, "snap-5 should remain")
+
+	// Verify Docker images were cleaned up for the deleted snapshots.
+	assert.Len(t, mock.RemoveImageCalls, 2)
+}
+
+func TestCleanExpired_AgeLimit_DeletesExpired(t *testing.T) {
+	mgr, mock, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	oneDay := int64(24 * 60 * 60)
+
+	// Insert 3 snapshots: 2 old (40 days ago, 35 days ago) and 1 recent (5 days ago).
+	insertSnapshotWithAge(t, db, "old-1", tenantID, serviceID, now-40*oneDay)
+	insertSnapshotWithAge(t, db, "old-2", tenantID, serviceID, now-35*oneDay)
+	insertSnapshotWithAge(t, db, "recent-1", tenantID, serviceID, now-5*oneDay)
+
+	// Set max age to 30 days, no count limit.
+	maxAge := 30 * 24 * time.Hour
+	removed, err := mgr.CleanExpired(ctx, 0, maxAge)
+	require.NoError(t, err)
+	assert.Equal(t, 2, removed, "should delete 2 expired snapshots")
+
+	// Old snapshots should be gone.
+	_, err = mgr.Get(ctx, tenantID, "old-1")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound), "old-1 should be deleted")
+	_, err = mgr.Get(ctx, tenantID, "old-2")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound), "old-2 should be deleted")
+
+	// Recent snapshot should remain.
+	_, err = mgr.Get(ctx, tenantID, "recent-1")
+	assert.NoError(t, err, "recent-1 should remain")
+
+	// Verify Docker images were cleaned up.
+	assert.Len(t, mock.RemoveImageCalls, 2)
+}
+
+func TestCleanExpired_WithinBothLimits_NothingDeleted(t *testing.T) {
+	mgr, mock, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	oneDay := int64(24 * 60 * 60)
+
+	// Insert 3 snapshots, all within limits (recent, under count).
+	insertSnapshotWithAge(t, db, "ok-1", tenantID, serviceID, now-2*oneDay)
+	insertSnapshotWithAge(t, db, "ok-2", tenantID, serviceID, now-1*oneDay)
+	insertSnapshotWithAge(t, db, "ok-3", tenantID, serviceID, now)
+
+	// Max 10 per service, max age 30 days — all should be safe.
+	removed, err := mgr.CleanExpired(ctx, 10, 30*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, 0, removed, "nothing should be deleted")
+
+	// All snapshots should still exist.
+	_, err = mgr.Get(ctx, tenantID, "ok-1")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "ok-2")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "ok-3")
+	assert.NoError(t, err)
+
+	// No image removal calls.
+	assert.Empty(t, mock.RemoveImageCalls)
+}
+
+func TestCleanExpired_MultipleServices(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	// Create a second service.
+	svc2ID := "svc-2"
+	_, err := db.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at) VALUES (?, ?, ?, 'running', 'nginx:latest', 8080, ?, ?)`,
+		svc2ID, tenantID, "test-svc-2", time.Now().Unix(), time.Now().Unix(),
+	)
+	require.NoError(t, err)
+
+	now := time.Now().Unix()
+	// Service 1: 4 snapshots (over limit of 2).
+	insertSnapshotWithAge(t, db, "s1-snap-1", tenantID, serviceID, now-400)
+	insertSnapshotWithAge(t, db, "s1-snap-2", tenantID, serviceID, now-300)
+	insertSnapshotWithAge(t, db, "s1-snap-3", tenantID, serviceID, now-200)
+	insertSnapshotWithAge(t, db, "s1-snap-4", tenantID, serviceID, now-100)
+
+	// Service 2: 2 snapshots (at limit of 2).
+	insertSnapshotWithAge(t, db, "s2-snap-1", tenantID, svc2ID, now-200)
+	insertSnapshotWithAge(t, db, "s2-snap-2", tenantID, svc2ID, now-100)
+
+	// Max 2 per service — should only trim service 1.
+	removed, err := mgr.CleanExpired(ctx, 2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, removed, "should delete 2 oldest from service 1")
+
+	// Service 1: oldest 2 gone, newest 2 remain.
+	_, err = mgr.Get(ctx, tenantID, "s1-snap-1")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+	_, err = mgr.Get(ctx, tenantID, "s1-snap-2")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+	_, err = mgr.Get(ctx, tenantID, "s1-snap-3")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "s1-snap-4")
+	assert.NoError(t, err)
+
+	// Service 2: both remain.
+	_, err = mgr.Get(ctx, tenantID, "s2-snap-1")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "s2-snap-2")
+	assert.NoError(t, err)
+}
+
+func TestCleanExpired_BothLimitsApplied(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	oneDay := int64(24 * 60 * 60)
+
+	// Insert 5 snapshots: 2 old (beyond age limit), 3 recent but over count.
+	insertSnapshotWithAge(t, db, "ancient-1", tenantID, serviceID, now-60*oneDay)
+	insertSnapshotWithAge(t, db, "ancient-2", tenantID, serviceID, now-45*oneDay)
+	insertSnapshotWithAge(t, db, "recent-1", tenantID, serviceID, now-3*oneDay)
+	insertSnapshotWithAge(t, db, "recent-2", tenantID, serviceID, now-2*oneDay)
+	insertSnapshotWithAge(t, db, "recent-3", tenantID, serviceID, now-1*oneDay)
+
+	// Max 3 per service AND max 30 days.
+	// Count pass runs first: 5 snapshots > 3, deletes 2 oldest (ancient-1, ancient-2).
+	// Age pass runs second: remaining 3 are all within 30 days, nothing more to delete.
+	removed, err := mgr.CleanExpired(ctx, 3, 30*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, 2, removed)
+
+	// Ancient ones are gone.
+	_, err = mgr.Get(ctx, tenantID, "ancient-1")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+	_, err = mgr.Get(ctx, tenantID, "ancient-2")
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+
+	// Recent ones remain.
+	_, err = mgr.Get(ctx, tenantID, "recent-1")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "recent-2")
+	assert.NoError(t, err)
+	_, err = mgr.Get(ctx, tenantID, "recent-3")
+	assert.NoError(t, err)
+}

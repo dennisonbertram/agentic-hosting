@@ -148,7 +148,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 	if count >= maxDatabases {
 		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("database quota exceeded (max %d)", maxDatabases))
+		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d databases reached", maxDatabases))
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit quota check: %w", err)

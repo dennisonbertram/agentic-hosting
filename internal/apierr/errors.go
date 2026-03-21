@@ -50,9 +50,10 @@ func Validation(msg string) *APIError {
 	return &APIError{Code: http.StatusBadRequest, Message: msg, Err: ErrValidation}
 }
 
-// QuotaExceeded returns a 403 error.
+// QuotaExceeded returns a 409 Conflict error for resource quota limits.
+// 409 is used (not 429) because quota exceeded is a resource conflict, not a rate limit.
 func QuotaExceeded(msg string) *APIError {
-	return &APIError{Code: http.StatusForbidden, Message: msg, Err: ErrQuotaExceeded}
+	return &APIError{Code: http.StatusConflict, Message: msg, Err: ErrQuotaExceeded}
 }
 
 // Forbidden returns a 403 error.

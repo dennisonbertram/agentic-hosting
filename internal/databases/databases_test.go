@@ -250,7 +250,7 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	second, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "db-2", Type: "postgres"})
 	require.Error(t, err)
 	assert.Nil(t, second)
-	assert.ErrorContains(t, err, "database quota exceeded (max 1)")
+	assert.ErrorContains(t, err, "quota exceeded: maximum 1 databases reached")
 }
 
 // TestDelete_WipesVolumeBeforeRemoval verifies that WipeVolume is called before

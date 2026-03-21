@@ -199,7 +199,7 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tenantCount >= maxTenants {
-		writeError(w, http.StatusForbidden, "maximum tenants reached")
+		writeError(w, http.StatusConflict, "quota exceeded: maximum tenants reached")
 		return
 	}
 

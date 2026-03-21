@@ -439,7 +439,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("count services: %w", err)
 	}
 	if currentCount >= maxServices {
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("service limit reached (max %d)", maxServices))
+		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d services reached", maxServices))
 	}
 
 	id, err := generateID()

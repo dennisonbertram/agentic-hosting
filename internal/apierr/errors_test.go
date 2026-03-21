@@ -53,7 +53,7 @@ func TestAllConstructors(t *testing.T) {
 		{NotFound, ErrNotFound, 404},
 		{Conflict, ErrConflict, 409},
 		{Validation, ErrValidation, 400},
-		{QuotaExceeded, ErrQuotaExceeded, 403},
+		{QuotaExceeded, ErrQuotaExceeded, 409},
 		{Forbidden, ErrForbidden, 403},
 	}
 	for _, tt := range tests {

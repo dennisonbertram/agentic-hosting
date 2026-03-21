@@ -70,7 +70,7 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if keyCount >= maxKeysPerTenant {
-		writeError(w, http.StatusForbidden, "maximum API keys reached, revoke unused keys first")
+		writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached, revoke unused keys first")
 		return
 	}
 

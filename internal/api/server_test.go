@@ -531,6 +531,80 @@ func TestCreateService_PortValidation(t *testing.T) {
 	})
 }
 
+// TestKeyCreate_QuotaExceeded_Returns409 verifies that creating an API key
+// when the tenant has reached maxKeysPerTenant returns 409 Conflict (not 403).
+// This is part of the fix for issue #100: standardize quota exceeded errors.
+func TestKeyCreate_QuotaExceeded_Returns409(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Fill up all key slots (seedAuthenticatedTenant already created 1 key)
+	for i := 1; i < maxKeysPerTenant; i++ {
+		_, err := stateDB.Exec(
+			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+			 VALUES (?, ?, ?, ?, ?, 1)`,
+			"fill-key-"+strconv.Itoa(i), "tenant-1", "fill", "fill"+strconv.Itoa(i)+"xx", "hash",
+		)
+		require.NoError(t, err)
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+	})
+
+	body := []byte(`{"name":"one-too-many"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/keys", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusConflict, rr.Code, "API key quota exceeded should return 409 Conflict")
+	assert.Contains(t, rr.Body.String(), "quota exceeded")
+}
+
+// TestTenantRegister_MaxTenants_Returns409 verifies that registering a new tenant
+// when the maximum is reached returns 409 Conflict (not 403).
+func TestTenantRegister_MaxTenants_Returns409(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// Insert maxTenants active tenants to fill the cap
+	for i := 0; i < maxTenants; i++ {
+		id := "tenant-fill-" + strconv.Itoa(i)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			id, "T"+strconv.Itoa(i), "t"+strconv.Itoa(i)+"@example.com",
+		)
+		require.NoError(t, err)
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:            &db.Store{StateDB: stateDB},
+		MasterKey:        masterKey,
+		DevMode:          true,
+		OpenRegistration: true, // skip bootstrap token for test simplicity
+	})
+
+	body := []byte(`{"name":"New Tenant","email":"new@example.com"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/tenants/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Use a unique IP to avoid rate limiter collisions with other tests
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Real-Ip", "10.99.99.1")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusConflict, rr.Code, "max tenants reached should return 409 Conflict")
+	assert.Contains(t, rr.Body.String(), "quota exceeded")
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(

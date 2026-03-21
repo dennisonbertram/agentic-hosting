@@ -54,9 +54,12 @@ func (s *Server) handleBuildListAll(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 200 {
+		if err != nil || value < 1 {
 			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
 			return
+		}
+		if value > 200 {
+			value = 200
 		}
 		limit = value
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
@@ -236,6 +237,73 @@ func TestTenantDelete_CleansUpAllManagers(t *testing.T) {
 		"database manager StopAllForTenant should be called with the tenant ID on deletion")
 	assert.Equal(t, []string{"tenant-1"}, kanbanMgr.stopForTenantCalls,
 		"kanban manager StopForTenant should be called with the tenant ID on deletion")
+}
+
+// TestTenantDelete_CancelsActiveBuilds verifies that DELETE /v1/tenant cancels
+// all pending and running builds for the tenant, while leaving completed builds
+// unaffected. This is the fix for GitHub issue #88.
+func TestTenantDelete_CancelsActiveBuilds(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Insert a service first
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at)
+		 VALUES ('svc-1', 'tenant-1', 'web', 'running', 'nginx:latest', 8080, 10, 20)`,
+	)
+	require.NoError(t, err)
+
+	// Create build manager before inserting builds to avoid reconcileStaleBuilds
+	// marking pending/running builds as failed on startup
+	buildMgr := builds.NewManager(stateDB, apiStubBuilder{}, nil)
+
+	srv := NewServer(ServerConfig{
+		Store:        &db.Store{StateDB: stateDB},
+		MasterKey:    masterKey,
+		DevMode:      true,
+		BuildManager: buildMgr,
+	})
+
+	// Insert builds in various states AFTER manager creation
+	_, err = stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at)
+		 VALUES ('b-pending', 'svc-1', 'tenant-1', 'pending', 'git', 'https://github.com/example/repo', 'main', 'img:1', 10)`,
+	)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at, started_at)
+		 VALUES ('b-running', 'svc-1', 'tenant-1', 'running', 'git', 'https://github.com/example/repo', 'main', 'img:2', 10, 11)`,
+	)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at, started_at, finished_at)
+		 VALUES ('b-done', 'svc-1', 'tenant-1', 'succeeded', 'git', 'https://github.com/example/repo', 'main', 'img:3', 5, 6, 9)`,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/tenant", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Active builds should be cancelled
+	var status string
+	err = stateDB.QueryRow(`SELECT status FROM builds WHERE id = 'b-pending'`).Scan(&status)
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", status, "pending build should be cancelled on tenant suspension")
+
+	err = stateDB.QueryRow(`SELECT status FROM builds WHERE id = 'b-running'`).Scan(&status)
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", status, "running build should be cancelled on tenant suspension")
+
+	// Completed build should be unaffected
+	err = stateDB.QueryRow(`SELECT status FROM builds WHERE id = 'b-done'`).Scan(&status)
+	require.NoError(t, err)
+	assert.Equal(t, "succeeded", status, "completed build should not be affected by tenant suspension")
 }
 
 // TestServiceRedeploy_CallsRestartAndReturnsService verifies that POST /v1/services/{id}/redeploy

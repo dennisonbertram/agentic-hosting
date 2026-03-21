@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"math"
 	"net/http"
 	"os/exec"
@@ -18,10 +19,12 @@ type HealthResponse struct {
 }
 
 type DetailedHealthResponse struct {
-	Status string     `json:"status"`
-	Docker DockerInfo `json:"docker"`
-	GVisor GVisorInfo `json:"gvisor"`
-	Disk   DiskInfo   `json:"disk"`
+	Status        string             `json:"status"`
+	Docker        DockerInfo         `json:"docker"`
+	GVisor        GVisorInfo         `json:"gvisor"`
+	Disk          DiskInfo           `json:"disk"`
+	DockerDisk    DiskInfo           `json:"docker_disk"`
+	DockerStorage *DockerStorageInfo `json:"docker_storage,omitempty"`
 }
 
 type DockerInfo struct {
@@ -38,6 +41,15 @@ type DiskInfo struct {
 	TotalGB     float64 `json:"total_gb"`
 	FreeGB      float64 `json:"free_gb"`
 	UsedPercent float64 `json:"used_percent"`
+}
+
+// DockerStorageInfo holds Docker object storage sizes from the Docker system df API.
+type DockerStorageInfo struct {
+	ImagesSizeBytes     int64   `json:"images_size_bytes"`
+	ContainersSizeBytes int64   `json:"containers_size_bytes"`
+	VolumesSizeBytes    int64   `json:"volumes_size_bytes"`
+	BuildCacheSizeBytes int64   `json:"build_cache_size_bytes"`
+	TotalSizeGB         float64 `json:"total_size_gb"`
 }
 
 var (
@@ -111,31 +123,65 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 		resp.GVisor = GVisorInfo{Available: version != "", Version: version}
 	}
 
-	// Check disk (no exec, safe syscall)
+	// Check disk for /var/lib/ah (no exec, safe syscall)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs("/var/lib/ah", &stat); err == nil {
-		totalBytes := stat.Blocks * uint64(stat.Bsize)
-		freeBytes := stat.Bavail * uint64(stat.Bsize)
-		totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
-		freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
-		usedPercent := 0.0
-		if totalGB > 0 {
-			usedPercent = ((totalGB - freeGB) / totalGB) * 100
-		}
-		resp.Disk = DiskInfo{
-			TotalGB:     round2(totalGB),
-			FreeGB:      round2(freeGB),
-			UsedPercent: round2(usedPercent),
+		resp.Disk = statfsToDiskInfo(stat)
+	}
+
+	// Check disk for /var/lib/docker (separate partition may fill independently)
+	var dockerStat syscall.Statfs_t
+	if err := syscall.Statfs("/var/lib/docker", &dockerStat); err == nil {
+		resp.DockerDisk = statfsToDiskInfo(dockerStat)
+	}
+
+	// Fetch Docker object-level storage usage via the Docker API
+	if s.dockerClient != nil {
+		ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel3()
+		if du, err := s.dockerClient.DiskUsage(ctx3); err == nil {
+			totalBytes := du.ImagesSize + du.ContainersSize + du.VolumesSize + du.BuildCacheSize
+			resp.DockerStorage = &DockerStorageInfo{
+				ImagesSizeBytes:     du.ImagesSize,
+				ContainersSizeBytes: du.ContainersSize,
+				VolumesSizeBytes:    du.VolumesSize,
+				BuildCacheSizeBytes: du.BuildCacheSize,
+				TotalSizeGB:         round2(float64(totalBytes) / (1024 * 1024 * 1024)),
+			}
+		} else {
+			log.Printf("WARNING: failed to fetch Docker disk usage: %v", err)
 		}
 	}
 
+	// Degrade status if database is unreachable
 	if s.store == nil || s.store.StateDB == nil {
 		resp.Status = "degraded"
 	} else if err := s.store.StateDB.Ping(); err != nil {
 		resp.Status = "degraded"
 	}
 
+	// Degrade status if either disk path is critically full (>90% used)
+	if resp.Disk.UsedPercent > 90 || resp.DockerDisk.UsedPercent > 90 {
+		resp.Status = "degraded"
+	}
+
 	return resp
+}
+
+func statfsToDiskInfo(stat syscall.Statfs_t) DiskInfo {
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
+	freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
+	usedPercent := 0.0
+	if totalGB > 0 {
+		usedPercent = ((totalGB - freeGB) / totalGB) * 100
+	}
+	return DiskInfo{
+		TotalGB:     round2(totalGB),
+		FreeGB:      round2(freeGB),
+		UsedPercent: round2(usedPercent),
+	}
 }
 
 func round2(f float64) float64 {

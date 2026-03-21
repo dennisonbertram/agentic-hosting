@@ -215,6 +215,45 @@ func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, svc)
 }
 
+func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if len(body.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be at most 128 characters")
+		return
+	}
+	// Validate name characters: alphanumeric, hyphens, underscores, spaces, dots.
+	for _, c := range body.Name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ' ' || c == '.') {
+			writeError(w, http.StatusBadRequest, "name contains invalid characters; allowed: alphanumeric, hyphens, underscores, spaces, dots")
+			return
+		}
+	}
+
+	svc, err := s.svcManager.UpdateName(r.Context(), tenantID, serviceID, body.Name)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, svc)
+}
+
 func (s *Server) handleServiceDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSvcManager(w) {
 		return

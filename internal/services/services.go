@@ -1159,6 +1159,63 @@ func (m *Manager) Get(ctx context.Context, tenantID, serviceID string) (*Service
 	return svc, nil
 }
 
+// UpdateName renames a service, updates its DNS label and Traefik route,
+// and returns the updated service record. The name must be 1-128 characters
+// and produce a valid DNS label when baseDomain is configured.
+func (m *Manager) UpdateName(ctx context.Context, tenantID, serviceID, name string) (*Service, error) {
+	svc, err := m.getOwned(ctx, tenantID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate DNS-safe name when baseDomain is configured.
+	if m.baseDomain != "" {
+		if err := ValidateDNSName(name); err != nil {
+			return nil, err
+		}
+	}
+
+	now := time.Now().Unix()
+
+	// Derive new DNS label (only when baseDomain is configured).
+	var dnsLabel string
+	if m.baseDomain != "" {
+		dnsLabel = toDNSLabel(name)
+		if !isDNSLabelSafe(dnsLabel) {
+			dnsLabel = "" // fallback to UUID-based URL
+		}
+		if reservedDNSLabels[dnsLabel] {
+			return nil, apierr.Validation(fmt.Sprintf("service name %q is reserved and cannot be used as a subdomain", dnsLabel))
+		}
+	}
+
+	url := publicURL(svc.ID, dnsLabel, m.baseDomain)
+
+	_, err = m.db.ExecContext(ctx,
+		`UPDATE services SET name = ?, dns_label = ?, url = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		name, dnsLabel, url, now, serviceID, tenantID,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "dns_label") {
+			return nil, apierr.Conflict("subdomain already taken: " + dnsLabel + " — choose a different service name")
+		}
+		return nil, fmt.Errorf("update service name: %w", err)
+	}
+
+	// Update Traefik route with the new DNS label.
+	if err := m.writeTraefikRoute(serviceID, tenantID, dnsLabel, m.baseDomain, svc.Port); err != nil {
+		log.Printf("WARNING: failed to update traefik route for service %s after rename: %v", serviceID, err)
+	}
+
+	log.Printf("AUDIT: tenant=%s renamed service=%s to %q (dns_label=%s)", tenantID, serviceID, name, dnsLabel)
+
+	svc.Name = name
+	svc.DNSLabel = dnsLabel
+	svc.URL = url
+	svc.UpdatedAt = now
+	return svc, nil
+}
+
 // SetEnv sets or updates environment variables for a service.
 func (m *Manager) SetEnv(ctx context.Context, tenantID, serviceID string, vars map[string]string) error {
 	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {

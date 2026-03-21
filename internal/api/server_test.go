@@ -376,6 +376,159 @@ func TestServiceDeployments_NotFound_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
+// TestPatchService_UpdatesName verifies that PATCH /v1/services/{id} renames a service
+// and returns the updated service object with the new name.
+func TestPatchService_UpdatesName(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-rename", "tenant-1", "old-name", "", "running", "nginx:latest", 8080, "ctr-1", "", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	body := bytes.NewBufferString(`{"name":"new-name"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/services/svc-rename", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unexpected body: %s", rr.Body.String())
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+	assert.Equal(t, "svc-rename", result["id"])
+	assert.Equal(t, "new-name", result["name"])
+
+	// Verify the name was persisted in the database.
+	var dbName string
+	err = stateDB.QueryRow(`SELECT name FROM services WHERE id = ?`, "svc-rename").Scan(&dbName)
+	require.NoError(t, err)
+	assert.Equal(t, "new-name", dbName)
+}
+
+// TestPatchService_InvalidName_Returns400 verifies that invalid names return 400.
+func TestPatchService_InvalidName_Returns400(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-val", "tenant-1", "web", "", "running", "nginx:latest", 8080, "", "", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	tests := []struct {
+		name string
+		body string
+		desc string
+	}{
+		{"empty name", `{"name":""}`, "empty name should be rejected"},
+		{"too long", `{"name":"` + strings.Repeat("a", 129) + `"}`, "name over 128 chars should be rejected"},
+		{"invalid chars", `{"name":"bad!@#name"}`, "name with special characters should be rejected"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, "/v1/services/svc-val", bytes.NewBufferString(tc.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusBadRequest, rr.Code, "%s: %s", tc.desc, rr.Body.String())
+		})
+	}
+}
+
+// TestPatchService_NotFound_Returns404 verifies that patching a nonexistent service returns 404.
+func TestPatchService_NotFound_Returns404(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	body := bytes.NewBufferString(`{"name":"new-name"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/services/does-not-exist", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// TestPatchService_EmptyBody_Returns400 verifies that an empty or missing body returns 400.
+func TestPatchService_EmptyBody_Returns400(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-empty", "tenant-1", "web", "", "running", "nginx:latest", 8080, "", "", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty json object", `{}`},
+		{"name field missing", `{"other":"field"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, "/v1/services/svc-empty", bytes.NewBufferString(tc.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusBadRequest, rr.Code, "body %q should return 400: %s", tc.body, rr.Body.String())
+		})
+	}
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(

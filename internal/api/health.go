@@ -55,17 +55,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealthDetailed returns full system info (authenticated only).
+// Pass ?fresh=true to bypass the 30s cache and force a live check.
+// This is useful during incident response when operators need real-time status.
+// The fresh result still updates the cache so subsequent requests benefit.
 func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
 
-	detailedHealthCacheMu.RLock()
-	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
-		resp := detailedHealthCache // copy by value under lock
+	fresh := r.URL.Query().Get("fresh") == "true"
+
+	if !fresh {
+		detailedHealthCacheMu.RLock()
+		if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
+			resp := detailedHealthCache // copy by value under lock
+			detailedHealthCacheMu.RUnlock()
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		detailedHealthCacheMu.RUnlock()
-		writeJSON(w, http.StatusOK, resp)
-		return
 	}
-	detailedHealthCacheMu.RUnlock()
 
 	resp := s.buildDetailedHealth()
 
@@ -136,6 +143,16 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 	}
 
 	return resp
+}
+
+// resetDetailedHealthCache clears the detailed health cache.
+// Exported for testing only (same package).
+func resetDetailedHealthCache() {
+	detailedHealthCacheMu.Lock()
+	detailedHealthCacheValid = false
+	detailedHealthCache = DetailedHealthResponse{}
+	detailedHealthCacheTime = time.Time{}
+	detailedHealthCacheMu.Unlock()
 }
 
 func round2(f float64) float64 {

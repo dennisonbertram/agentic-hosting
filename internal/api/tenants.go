@@ -19,6 +19,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/go-chi/chi/v5"
 )
 
 type RegisterRequest struct {
@@ -411,6 +412,133 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ReactivateResponse is the response body for POST /v1/tenants/{tenantID}/reactivate.
+// It returns the new API key so the operator can hand it to the tenant.
+type ReactivateResponse struct {
+	TenantID string `json:"tenant_id"`
+	APIKey   string `json:"api_key"`
+	Status   string `json:"status"`
+}
+
+// handleTenantReactivate handles POST /v1/tenants/{tenantID}/reactivate.
+//
+// Security model:
+//   - Rate-limited by the same per-IP / global limiter used for tenant
+//     registration (5/IP/hour, 20/global/hour).
+//   - Requires bootstrap token via X-Bootstrap-Token header.
+//   - Only suspended tenants can be reactivated; already-active returns 409.
+//   - A new API key is generated and returned (one-time display).
+func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) {
+	// Apply the same rate limiter as tenant registration to prevent
+	// brute-force of the bootstrap token via this endpoint.
+	ip := trustedRealIP(r)
+	if ok, wait := regLimiter.allow(ip); !ok {
+		secs := int(math.Ceil(wait.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+		return
+	}
+
+	// Fail closed: reject if bootstrap token is not configured.
+	if s.bootstrapToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "reactivation temporarily unavailable")
+		return
+	}
+
+	// Verify bootstrap token via HMAC-compare (no length leak).
+	provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
+	if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
+		writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+		return
+	}
+
+	tenantID := chi.URLParam(r, "tenantID")
+	if tenantID == "" {
+		writeError(w, http.StatusBadRequest, "tenant ID is required")
+		return
+	}
+
+	// Look up the tenant and check its current status.
+	var currentStatus string
+	err := s.store.StateDB.QueryRow(
+		`SELECT status FROM tenants WHERE id = ?`, tenantID,
+	).Scan(&currentStatus)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if currentStatus == "active" {
+		writeError(w, http.StatusConflict, "tenant is already active")
+		return
+	}
+
+	now := time.Now().Unix()
+
+	tx, err := s.store.StateDB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	defer tx.Rollback()
+
+	// Set tenant status back to active.
+	_, err = tx.Exec(
+		`UPDATE tenants SET status = 'active', updated_at = ? WHERE id = ?`,
+		now, tenantID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reactivate tenant")
+		return
+	}
+
+	// Generate a new API key for the reactivated tenant since all keys
+	// were revoked on suspension.
+	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
+	if len(keyID) < 8 {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	prefix := keyID[:8]
+
+	_, err = tx.Exec(
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+		 VALUES (?, ?, 'reactivation', ?, ?, ?)`,
+		keyID, tenantID, prefix, keyHash, now,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create reactivation key")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Return token in format "keyID.secret" for O(1) lookup.
+	token := keyID + "." + apiKey
+
+	writeJSON(w, http.StatusOK, ReactivateResponse{
+		TenantID: tenantID,
+		APIKey:   token,
+		Status:   "active",
+	})
 }
 
 // hmacEqual compares two strings in constant time regardless of length.

@@ -102,6 +102,10 @@ type MockDockerClient struct {
 	// ListVolumes
 	ListVolumesFn    func(ctx context.Context, prefix string) ([]string, error)
 	ListVolumesCalls []string // prefixes queried
+
+	// DiskUsage
+	DiskUsageFn    func(ctx context.Context) (*docker.StorageUsage, error)
+	DiskUsageCalls int
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -289,4 +293,12 @@ func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]st
 		return m.ListVolumesFn(ctx, prefix)
 	}
 	return nil, nil
+}
+
+func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage, error) {
+	m.DiskUsageCalls++
+	if m.DiskUsageFn != nil {
+		return m.DiskUsageFn(ctx)
+	}
+	return &docker.StorageUsage{}, nil
 }

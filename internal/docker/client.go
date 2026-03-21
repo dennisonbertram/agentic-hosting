@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -45,6 +46,15 @@ type Client interface {
 	StopAndRemoveByName(ctx context.Context, name string) error
 	PruneDanglingImages(ctx context.Context) (int, error)
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
+	DiskUsage(ctx context.Context) (*StorageUsage, error)
+}
+
+// StorageUsage holds aggregate Docker storage consumption broken down by type.
+type StorageUsage struct {
+	ImagesSize     int64 `json:"images_size_bytes"`
+	ContainersSize int64 `json:"containers_size_bytes"`
+	VolumesSize    int64 `json:"volumes_size_bytes"`
+	BuildCacheSize int64 `json:"build_cache_size_bytes"`
 }
 
 // Compile-time check: DockerClient must satisfy Client.
@@ -575,6 +585,40 @@ func (c *DockerClient) PruneDanglingImages(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("prune images: %w", err)
 	}
 	return len(report.ImagesDeleted), nil
+}
+
+// DiskUsage returns aggregate Docker storage consumption by category.
+// Calls the Docker Engine /system/df API.
+func (c *DockerClient) DiskUsage(ctx context.Context) (*StorageUsage, error) {
+	du, err := c.cli.DiskUsage(ctx, types.DiskUsageOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("docker disk usage: %w", err)
+	}
+
+	usage := &StorageUsage{}
+
+	for _, img := range du.Images {
+		if img != nil {
+			usage.ImagesSize += img.Size
+		}
+	}
+	for _, ctr := range du.Containers {
+		if ctr != nil {
+			usage.ContainersSize += ctr.SizeRw
+		}
+	}
+	for _, vol := range du.Volumes {
+		if vol != nil && vol.UsageData != nil {
+			usage.VolumesSize += vol.UsageData.Size
+		}
+	}
+	for _, bc := range du.BuildCache {
+		if bc != nil {
+			usage.BuildCacheSize += bc.Size
+		}
+	}
+
+	return usage, nil
 }
 
 // ListVolumes returns volume names matching the given prefix.

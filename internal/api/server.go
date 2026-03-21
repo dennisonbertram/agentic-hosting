@@ -73,6 +73,7 @@ type Server struct {
 	deploymentStore   *deployments.Store
 	dbManager         databaseManager
 	kanbanManager     kanbanManager
+	dockerClient      docker.Client
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
@@ -111,6 +112,7 @@ func NewServer(cfg ServerConfig) *Server {
 		deploymentStore:   cfg.DeploymentStore,
 		dbManager:         cfg.DatabaseManager,
 		kanbanManager:     cfg.KanbanManager,
+		dockerClient:      cfg.Docker,
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,

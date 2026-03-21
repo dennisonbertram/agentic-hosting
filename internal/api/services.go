@@ -58,6 +58,12 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate port: 0 means "use default", but explicit invalid values are rejected.
+	if req.Port != 0 && (req.Port < 1 || req.Port > 65535) {
+		writeError(w, http.StatusBadRequest, "port must be between 1 and 65535")
+		return
+	}
+
 	// Validate env vars if provided inline
 	if len(req.Env) > 0 {
 		if err := services.ValidateEnvVars(req.Env); err != nil {

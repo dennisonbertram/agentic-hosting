@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -374,6 +375,97 @@ func TestServiceDeployments_NotFound_Returns404(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// TestCreateService_PortValidation verifies port validation on service creation:
+// - Invalid ports (negative, >65535) return 400
+// - Valid ports (1-65535) are accepted
+// - Omitted port (zero value) defaults to 8000
+func TestCreateService_PortValidation(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	// --- Invalid ports: should return 400 ---
+	invalidCases := []struct {
+		name string
+		port int
+	}{
+		{"negative port", -1},
+		{"large negative port", -100},
+		{"port above max", 70000},
+		{"port way above max", 99999},
+		{"port 65536", 65536},
+	}
+
+	for _, tc := range invalidCases {
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			body := []byte(`{"name":"web","image":"nginx:latest","port":` + strconv.Itoa(tc.port) + `}`)
+			req := httptest.NewRequest(http.MethodPost, "/v1/services", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusBadRequest, rr.Code, "port %d should be rejected", tc.port)
+			assert.Contains(t, rr.Body.String(), "port must be between 1 and 65535")
+		})
+	}
+
+	// --- Valid ports: should return 201 ---
+	validCases := []struct {
+		name    string
+		svcName string
+		port    int
+	}{
+		{"port 3000", "web-p3000", 3000},
+		{"port 8080", "web-p8080", 8080},
+		{"port 65535", "web-p65535", 65535},
+		{"port 1", "web-p1", 1},
+	}
+
+	for _, tc := range validCases {
+		t.Run("valid/"+tc.name, func(t *testing.T) {
+			body := []byte(`{"name":"` + tc.svcName + `","image":"nginx:latest","port":` + strconv.Itoa(tc.port) + `}`)
+			req := httptest.NewRequest(http.MethodPost, "/v1/services", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusCreated, rr.Code, "port %d should be accepted, got body: %s", tc.port, rr.Body.String())
+
+			var resp map[string]any
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+			assert.Equal(t, float64(tc.port), resp["port"], "response should reflect the requested port")
+		})
+	}
+
+	// --- Omitted port: should default to 8000 ---
+	t.Run("default/omitted port defaults to 8000", func(t *testing.T) {
+		body := []byte(`{"name":"web-default","image":"nginx:latest"}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/services", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "omitted port should be accepted, got body: %s", rr.Body.String())
+
+		var resp map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, float64(8000), resp["port"], "omitted port should default to 8000")
+	})
 }
 
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {

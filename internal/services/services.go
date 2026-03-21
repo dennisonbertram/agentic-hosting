@@ -448,8 +448,8 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 	now := time.Now().Unix()
 	port := req.Port
-	if port <= 0 {
-		port = 8000
+	if port == 0 {
+		port = 8000 // default when omitted
 	}
 	if port < 1 || port > 65535 {
 		return nil, apierr.Validation("port must be between 1 and 65535")

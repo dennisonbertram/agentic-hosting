@@ -44,7 +44,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		req := reactivateRequest("10.1.0.1", "tenant-react", bootstrapToken)
@@ -82,7 +82,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		req := reactivateRequest("10.1.0.2", "tenant-active", bootstrapToken)
@@ -99,7 +99,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		req := reactivateRequest("10.1.0.3", "does-not-exist", bootstrapToken)
@@ -122,7 +122,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		req := reactivateRequest("10.1.0.4", "tenant-notoken", "wrong-token")
@@ -139,7 +139,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/v1/tenants/some-tenant/reactivate", nil)
@@ -184,7 +184,7 @@ func TestHandleTenantReactivate(t *testing.T) {
 			Store:          &db.Store{StateDB: stateDB},
 			MasterKey:      masterKey,
 			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		// Step 1: reactivate the tenant.

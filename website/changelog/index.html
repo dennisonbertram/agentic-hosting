@@ -79,6 +79,68 @@
           <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-amber-100 text-amber-700">In progress</span>
         </div>
 
+        <!-- Added -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(77,184,144,0.1); color: #10b981">Added</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Deployment tracking &mdash; persistent <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">deployments</code> table records every deploy with status, timing, build ID, and source metadata <a href="https://github.com/dennisonbertram/agentic-hosting/issues/79" class="text-blue-600 hover:text-blue-800">#79</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span><code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">PATCH /v1/services/{id}</code> &mdash; rename services without redeploying <a href="https://github.com/dennisonbertram/agentic-hosting/issues/83" class="text-blue-600 hover:text-blue-800">#83</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Health endpoint cache bypass &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">?fresh=true</code> query parameter skips the 30-second cache <a href="https://github.com/dennisonbertram/agentic-hosting/issues/99" class="text-blue-600 hover:text-blue-800">#99</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Docker storage info in <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">GET /v1/system/health/detailed</code> &mdash; disk usage and storage driver details <a href="https://github.com/dennisonbertram/agentic-hosting/issues/105" class="text-blue-600 hover:text-blue-800">#105</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Audit logging &mdash; AUDIT-level log entries when env vars are revealed, connection strings accessed, or kanban admin tokens retrieved <a href="https://github.com/dennisonbertram/agentic-hosting/issues/101" class="text-blue-600 hover:text-blue-800">#101</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Activity feed filtering &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">resource_type</code>, <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">action</code>, <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">service_id</code>, <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">since</code>, and <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">offset</code> query parameters on <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">GET /v1/activity</code> <a href="https://github.com/dennisonbertram/agentic-hosting/issues/89" class="text-blue-600 hover:text-blue-800">#89</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Build log tail preservation &mdash; ring buffer retains the last N log lines when builds exceed max log size <a href="https://github.com/dennisonbertram/agentic-hosting/issues/106" class="text-blue-600 hover:text-blue-800">#106</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Tenant reactivation &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">POST /v1/tenant/reactivate</code> restores a suspended tenant using the bootstrap token <a href="https://github.com/dennisonbertram/agentic-hosting/issues/107" class="text-blue-600 hover:text-blue-800">#107</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Snapshot retention policy &mdash; configurable <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">snapshot-max-per-service</code> and <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">snapshot-max-age</code> with automatic GC cleanup <a href="https://github.com/dennisonbertram/agentic-hosting/issues/103" class="text-blue-600 hover:text-blue-800">#103</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Async kanban provisioning &mdash; kanban board creation is now non-blocking with configurable port range <a href="https://github.com/dennisonbertram/agentic-hosting/issues/102" class="text-blue-600 hover:text-blue-800">#102</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Configurable kanban port range &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">--kanban-port-start</code> and <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">--kanban-port-end</code> CLI flags <a href="https://github.com/dennisonbertram/agentic-hosting/issues/109" class="text-blue-600 hover:text-blue-800">#109</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Master key rotation &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">ah rotate-key</code> CLI subcommand re-encrypts all secrets with a new AES-256-GCM key <a href="https://github.com/dennisonbertram/agentic-hosting/issues/84" class="text-blue-600 hover:text-blue-800">#84</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-green-500 mt-0.5 flex-shrink-0">+</span>
+              <span>Bootstrap token rotation &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">POST /v1/auth/bootstrap/validate</code> endpoint and multi-token support via comma-separated <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">AH_BOOTSTRAP_TOKEN</code> <a href="https://github.com/dennisonbertram/agentic-hosting/issues/85" class="text-blue-600 hover:text-blue-800">#85</a></span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Fixed -->
         <div class="mb-8">
           <div class="flex items-center gap-2 mb-4">
             <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(91,155,213,0.1); color: #3b82f6">Fixed</span>
@@ -96,9 +158,30 @@
               <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
               <span>Disk health monitoring now checks both the ah state dir and Docker data dir instead of only the root filesystem</span>
             </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Port validation rejects <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">port &lt;= 0</code> on service creation with a clear 400 error <a href="https://github.com/dennisonbertram/agentic-hosting/issues/87" class="text-blue-600 hover:text-blue-800">#87</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Build cancellation on tenant suspend &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">CancelAllForTenant</code> stops queued and running builds <a href="https://github.com/dennisonbertram/agentic-hosting/issues/88" class="text-blue-600 hover:text-blue-800">#88</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Pagination limit cap on list endpoints prevents unbounded queries <a href="https://github.com/dennisonbertram/agentic-hosting/issues/93" class="text-blue-600 hover:text-blue-800">#93</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Database name validation enforces DNS-safe names via regex <a href="https://github.com/dennisonbertram/agentic-hosting/issues/104" class="text-blue-600 hover:text-blue-800">#104</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-blue-500 mt-0.5 flex-shrink-0">~</span>
+              <span>Quota error codes &mdash; <code class="text-xs bg-stone-200 px-1.5 py-0.5 rounded">QuotaExceeded</code> now returns 409 Conflict instead of 403 Forbidden <a href="https://github.com/dennisonbertram/agentic-hosting/issues/100" class="text-blue-600 hover:text-blue-800">#100</a></span>
+            </li>
           </ul>
         </div>
 
+        <!-- Changed -->
         <div>
           <div class="flex items-center gap-2 mb-4">
             <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(212,165,74,0.1); color: #f59e0b">Changed</span>
@@ -107,6 +190,14 @@
             <li class="flex items-start gap-3">
               <span class="text-amber-500 mt-0.5 flex-shrink-0">&rarr;</span>
               <span>Runbook guidance for localhost mode now matches the host-local Traefik dev route instead of telling operators to add manual exposure config</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&rarr;</span>
+              <span>Environment variable documentation &mdash; documented forbidden keys and semantics in API reference <a href="https://github.com/dennisonbertram/agentic-hosting/issues/90" class="text-blue-600 hover:text-blue-800">#90</a>, <a href="https://github.com/dennisonbertram/agentic-hosting/issues/111" class="text-blue-600 hover:text-blue-800">#111</a></span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-500 mt-0.5 flex-shrink-0">&rarr;</span>
+              <span>Comprehensive rate limit test suite for per-tenant and global rate limiters <a href="https://github.com/dennisonbertram/agentic-hosting/issues/80" class="text-blue-600 hover:text-blue-800">#80</a></span>
             </li>
           </ul>
         </div>

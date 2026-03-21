@@ -459,15 +459,15 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Fail closed: reject if bootstrap token is not configured.
-	if s.bootstrapToken == "" {
+	// Fail closed: reject if no bootstrap tokens are configured.
+	if len(s.bootstrapTokens) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "reactivation temporarily unavailable")
 		return
 	}
 
 	// Verify bootstrap token via HMAC-compare (no length leak).
 	provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
-	if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
+	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
 		writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
 		return
 	}

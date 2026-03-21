@@ -6,15 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Deployment tracking — persistent `deployments` table records every deploy with status, timing, build ID, and source metadata (#79)
+- `PATCH /v1/services/{id}` — rename services without redeploying (#83)
+- Health endpoint cache bypass — `?fresh=true` query parameter skips the 30-second cache (#99)
+- Docker storage info in `GET /v1/system/health/detailed` — disk usage and storage driver details (#105)
+- Audit logging — AUDIT-level log entries when env vars are revealed, connection strings accessed, or kanban admin tokens retrieved (#101)
+- Activity feed filtering — `resource_type`, `action`, `service_id`, `since`, and `offset` query parameters on `GET /v1/activity` (#89)
+- Build log tail preservation — ring buffer retains the last N log lines when builds exceed max log size (#106)
+- Tenant reactivation — `POST /v1/tenant/reactivate` restores a suspended tenant using the bootstrap token (#107)
+- Snapshot retention policy — configurable `snapshot-max-per-service` and `snapshot-max-age` with automatic GC cleanup (#103)
+- Async kanban provisioning — kanban board creation is now non-blocking with configurable port range (#102)
+- Configurable kanban port range — `--kanban-port-start` and `--kanban-port-end` CLI flags (#109)
+- Master key rotation — `ah rotate-key` CLI subcommand re-encrypts all secrets with a new AES-256-GCM key (#84)
+- Bootstrap token rotation — `POST /v1/auth/bootstrap/validate` endpoint and multi-token support via comma-separated `AH_BOOTSTRAP_TOKEN` (#85)
+
 ### Fixed
 
 - Localhost-mode Traefik routes now work alongside public-domain HTTPS redirects by moving HTTP→HTTPS redirects into per-service dynamic routers instead of a global `web` entrypoint redirect
 - Health check script now defaults to the shipped API port (`8080`) and supports both GNU `timeout` and Homebrew `gtimeout` when available
 - Health check disk monitoring now checks the ah state dir and Docker data dir instead of only `/`
+- Port validation rejects `port <= 0` on service creation with a clear 400 error (#87)
+- Build cancellation on tenant suspend — `CancelAllForTenant` stops queued and running builds (#88)
+- Pagination limit cap on list endpoints prevents unbounded queries (#93)
+- Database name validation enforces DNS-safe names via regex (#104)
+- Quota error codes — `QuotaExceeded` now returns 409 Conflict instead of 403 Forbidden (#100)
 
 ### Changed
 
 - Localhost-mode runbook guidance now describes host-local Traefik routing instead of manual exposure steps
+- Environment variable documentation — documented forbidden keys and semantics in API reference (#90, #111)
+- Comprehensive rate limit test suite for per-tenant and global rate limiters (#80)
 
 ## [0.4.0] - 2026-03-20
 

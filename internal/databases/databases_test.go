@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,6 +330,56 @@ func TestDelete_WipesVolumeBeforeRemoval(t *testing.T) {
 		"WipeVolume must be called before RemoveVolume")
 	assert.Equal(t, expectedVolume, wipeVolume,
 		"WipeVolume must receive the database's volume name")
+}
+
+// ---------------------------------------------------------------------------
+// Name validation tests
+// ---------------------------------------------------------------------------
+
+func TestValidateName_ValidNames(t *testing.T) {
+	valid := []string{
+		"mydb",
+		"my-db-1",
+		"postgres_main",
+		"a",              // single letter
+		"A",              // single uppercase letter
+		"db1",            // letter then digits
+		"my_db",          // underscores
+		"My-Mixed_Case1", // mixed case with hyphens and underscores
+		strings.Repeat("a", 63), // max length
+	}
+	for _, name := range valid {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateName(name)
+			assert.NoError(t, err, "expected name %q to be valid", name)
+		})
+	}
+}
+
+func TestValidateName_InvalidNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		display string // test sub-name for readability
+	}{
+		{"", "empty"},
+		{"1starts-with-number", "starts_with_number"},
+		{"has spaces", "has_spaces"},
+		{strings.Repeat("a", 64), "too_long_64_chars"},
+		{"special!chars", "special_chars"},
+		{"-starts-with-hyphen", "starts_with_hyphen"},
+		{"_starts-with-underscore", "starts_with_underscore"},
+		{"ends-with-hyphen-", "ends_with_hyphen"},
+		{"name.with.dots", "has_dots"},
+		{"name@domain", "has_at_sign"},
+		{"name with\ttab", "has_tab"},
+		{"1", "single_digit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.display, func(t *testing.T) {
+			err := ValidateName(tt.name)
+			assert.Error(t, err, "expected name %q to be invalid", tt.name)
+		})
+	}
 }
 
 func seedDatabaseTestData(t *testing.T, stateDB *sql.DB, maxDatabases int) {

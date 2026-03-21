@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,34 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
+
+// namePattern matches valid database names: starts with a letter, contains
+// only alphanumeric characters, hyphens, and underscores, and does not end
+// with a hyphen. Length is enforced separately for a clearer error message.
+var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*[a-zA-Z0-9_]$`)
+
+// ValidateName checks that a database name is safe for use as a Docker
+// container/volume suffix: 1-63 characters, starts with a letter, only
+// alphanumeric plus hyphens/underscores, cannot end with a hyphen.
+func ValidateName(name string) error {
+	if name == "" {
+		return apierr.Validation("database name is required")
+	}
+	if len(name) > 63 {
+		return apierr.Validation("database name must be 63 characters or fewer")
+	}
+	// Single-character names are valid as long as they are a letter.
+	if len(name) == 1 {
+		if name[0] >= 'a' && name[0] <= 'z' || name[0] >= 'A' && name[0] <= 'Z' {
+			return nil
+		}
+		return apierr.Validation("database name must start with a letter and contain only alphanumeric characters, hyphens, and underscores")
+	}
+	if !namePattern.MatchString(name) {
+		return apierr.Validation("database name must start with a letter, contain only alphanumeric characters, hyphens, and underscores, and cannot end with a hyphen")
+	}
+	return nil
+}
 
 // Database represents a provisioned database.
 type Database struct {
@@ -110,8 +139,8 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	if req.Type != "postgres" && req.Type != "redis" {
 		return nil, apierr.Validation(fmt.Sprintf("invalid database type %q; must be \"postgres\" or \"redis\"", req.Type))
 	}
-	if req.Name == "" || len(req.Name) > 128 {
-		return nil, apierr.Validation("name is required (max 128 chars)")
+	if err := ValidateName(req.Name); err != nil {
+		return nil, err
 	}
 
 	// Check disk space before provisioning

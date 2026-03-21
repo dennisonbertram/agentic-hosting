@@ -29,6 +29,7 @@ func recoverRequest(ip string, body []byte) *http.Request {
 }
 
 func TestHandleKeyRecover(t *testing.T) {
+	regLimiter.resetForTest()
 	const bootstrapToken = "test-bootstrap-token-for-recovery"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
@@ -47,10 +48,10 @@ func TestHandleKeyRecover(t *testing.T) {
 		require.NoError(t, err)
 
 		return NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 	}
 
@@ -132,10 +133,10 @@ func TestHandleKeyRecover(t *testing.T) {
 		require.NoError(t, err)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
-			BootstrapToken: bootstrapToken,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
 		})
 
 		body, _ := json.Marshal(KeyRecoverRequest{

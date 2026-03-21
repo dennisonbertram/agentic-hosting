@@ -53,8 +53,8 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail closed: reject if bootstrap token is not configured.
-	if s.bootstrapToken == "" {
+	// Fail closed: reject if no bootstrap tokens are configured.
+	if len(s.bootstrapTokens) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "recovery temporarily unavailable")
 		return
 	}
@@ -65,9 +65,9 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// HMAC-compare the provided token to prevent length-leak attacks.
+	// HMAC-compare against all configured tokens to support graceful rotation.
 	provided := strings.TrimSpace(req.BootstrapToken)
-	if !hmacEqual(provided, s.bootstrapToken, s.masterKey) {
+	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
 		writeError(w, http.StatusUnauthorized, "invalid bootstrap token or email")
 		return
 	}

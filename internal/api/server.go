@@ -27,7 +27,7 @@ type ServerConfig struct {
 	Store            *db.Store
 	MasterKey        []byte
 	DevMode          bool
-	BootstrapToken   string
+	BootstrapTokens  []string
 	OpenRegistration bool
 	Docker           docker.Client
 	BuildManager     *builds.Manager
@@ -59,7 +59,7 @@ type Server struct {
 	store             *db.Store
 	masterKey         []byte
 	devMode           bool
-	bootstrapToken    string
+	bootstrapTokens   []string
 	openRegistration  bool
 	baseDomain        string
 	router            chi.Router
@@ -97,7 +97,7 @@ func NewServer(cfg ServerConfig) *Server {
 		store:             cfg.Store,
 		masterKey:         cfg.MasterKey,
 		devMode:           cfg.DevMode,
-		bootstrapToken:    cfg.BootstrapToken,
+		bootstrapTokens:   cfg.BootstrapTokens,
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
 		authInvalidator:   authInvalidator,
@@ -146,6 +146,9 @@ func (s *Server) setupRoutes() {
 		// Recovery endpoint: authenticated by bootstrap token, not an API key.
 		// Allows tenants who have lost all their keys to obtain a new one.
 		r.Post("/v1/auth/recover", s.handleKeyRecover)
+		// Validate endpoint: checks if a bootstrap token is valid.
+		// Useful during token rotation to verify both old and new tokens.
+		r.Post("/v1/system/bootstrap-token/validate", s.handleBootstrapTokenValidate)
 	})
 
 	// Authenticated short-lived routes keep the standard request timeout.

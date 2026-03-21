@@ -21,13 +21,25 @@ type ActivityEvent struct {
 	Status       string `json:"status,omitempty"`
 	Message      string `json:"message"`
 	CreatedAt    int64  `json:"created_at"`
+	ServiceID    string `json:"service_id,omitempty"`
+}
+
+// activityFilter holds optional query parameters for filtering activity events.
+// All fields are AND-combined. Zero values mean "no filter".
+type activityFilter struct {
+	ResourceType string // e.g. "service", "build", "database", "api_key", "tenant"
+	Action       string // e.g. "service.created", "build.failed"
+	ServiceID    string // filter to events for a specific service
+	Since        int64  // only events with created_at >= Since
+	Offset       int    // skip this many events (after sort) for pagination
 }
 
 func (s *Server) handleActivityList(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
+	q := r.URL.Query()
 
 	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
+	if raw := q.Get("limit"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value < 1 || value > 200 {
 			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
@@ -36,7 +48,30 @@ func (s *Server) handleActivityList(w http.ResponseWriter, r *http.Request) {
 		limit = value
 	}
 
-	events, err := s.listActivityEvents(r.Context(), tenantID, limit)
+	var filter activityFilter
+	filter.ResourceType = q.Get("resource_type")
+	filter.Action = q.Get("action")
+	filter.ServiceID = q.Get("service_id")
+
+	if raw := q.Get("since"); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 0 {
+			writeError(w, http.StatusBadRequest, "since must be a non-negative unix timestamp")
+			return
+		}
+		filter.Since = value
+	}
+
+	if raw := q.Get("offset"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		filter.Offset = value
+	}
+
+	events, err := s.listActivityEvents(r.Context(), tenantID, limit, filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list activity")
 		return
@@ -44,23 +79,60 @@ func (s *Server) handleActivityList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, events)
 }
 
-func (s *Server) listActivityEvents(ctx context.Context, tenantID string, limit int) ([]ActivityEvent, error) {
+func (s *Server) listActivityEvents(ctx context.Context, tenantID string, limit int, filter activityFilter) ([]ActivityEvent, error) {
 	events := make([]ActivityEvent, 0, limit)
 
-	if err := s.appendTenantEvents(ctx, tenantID, &events); err != nil {
-		return nil, err
+	// When resource_type is set, only query the relevant table(s).
+	// service_id implies resource_type is either "service" or "build" (builds belong to services).
+	wantType := func(rt string) bool {
+		if filter.ResourceType == "" && filter.ServiceID == "" {
+			return true
+		}
+		if filter.ResourceType != "" && filter.ResourceType != rt {
+			return false
+		}
+		// If service_id is set but no resource_type, only service and build are relevant.
+		if filter.ServiceID != "" && filter.ResourceType == "" {
+			return rt == "service" || rt == "build"
+		}
+		return true
 	}
-	if err := s.appendServiceEvents(ctx, tenantID, &events); err != nil {
-		return nil, err
+
+	if wantType("tenant") {
+		if err := s.appendTenantEvents(ctx, tenantID, &events, filter); err != nil {
+			return nil, err
+		}
 	}
-	if err := s.appendBuildEvents(ctx, tenantID, &events); err != nil {
-		return nil, err
+	if wantType("service") {
+		if err := s.appendServiceEvents(ctx, tenantID, &events, filter); err != nil {
+			return nil, err
+		}
 	}
-	if err := s.appendDatabaseEvents(ctx, tenantID, &events); err != nil {
-		return nil, err
+	if wantType("build") {
+		if err := s.appendBuildEvents(ctx, tenantID, &events, filter); err != nil {
+			return nil, err
+		}
 	}
-	if err := s.appendAPIKeyEvents(ctx, tenantID, &events); err != nil {
-		return nil, err
+	if wantType("database") {
+		if err := s.appendDatabaseEvents(ctx, tenantID, &events, filter); err != nil {
+			return nil, err
+		}
+	}
+	if wantType("api_key") {
+		if err := s.appendAPIKeyEvents(ctx, tenantID, &events, filter); err != nil {
+			return nil, err
+		}
+	}
+
+	// Post-filter by action if specified (actions are computed in Go, not SQL).
+	if filter.Action != "" {
+		filtered := events[:0]
+		for _, e := range events {
+			if e.Action == filter.Action {
+				filtered = append(filtered, e)
+			}
+		}
+		events = filtered
 	}
 
 	sort.Slice(events, func(i, j int) bool {
@@ -69,13 +141,27 @@ func (s *Server) listActivityEvents(ctx context.Context, tenantID string, limit 
 		}
 		return events[i].CreatedAt > events[j].CreatedAt
 	})
+
+	// Apply offset for pagination.
+	if filter.Offset > 0 {
+		if filter.Offset >= len(events) {
+			return []ActivityEvent{}, nil
+		}
+		events = events[filter.Offset:]
+	}
+
 	if len(events) > limit {
 		events = events[:limit]
 	}
 	return events, nil
 }
 
-func (s *Server) appendTenantEvents(ctx context.Context, tenantID string, events *[]ActivityEvent) error {
+func (s *Server) appendTenantEvents(ctx context.Context, tenantID string, events *[]ActivityEvent, filter activityFilter) error {
+	// service_id filter does not apply to tenant events; skip them.
+	if filter.ServiceID != "" {
+		return nil
+	}
+
 	var id, name, status string
 	var createdAt, updatedAt int64
 	err := s.store.StateDB.QueryRowContext(ctx,
@@ -89,17 +175,19 @@ func (s *Server) appendTenantEvents(ctx context.Context, tenantID string, events
 		return fmt.Errorf("tenant activity: %w", err)
 	}
 
-	*events = append(*events, ActivityEvent{
-		ID:           fmt.Sprintf("tenant-created-%s-%d", id, createdAt),
-		ResourceType: "tenant",
-		ResourceID:   id,
-		ResourceName: name,
-		Action:       "tenant.created",
-		Status:       status,
-		Message:      fmt.Sprintf("Tenant %s was created", name),
-		CreatedAt:    createdAt,
-	})
-	if updatedAt > createdAt {
+	if filter.Since == 0 || createdAt >= filter.Since {
+		*events = append(*events, ActivityEvent{
+			ID:           fmt.Sprintf("tenant-created-%s-%d", id, createdAt),
+			ResourceType: "tenant",
+			ResourceID:   id,
+			ResourceName: name,
+			Action:       "tenant.created",
+			Status:       status,
+			Message:      fmt.Sprintf("Tenant %s was created", name),
+			CreatedAt:    createdAt,
+		})
+	}
+	if updatedAt > createdAt && (filter.Since == 0 || updatedAt >= filter.Since) {
 		action := "tenant.updated"
 		message := fmt.Sprintf("Tenant %s was updated", name)
 		if status != "active" {
@@ -120,13 +208,18 @@ func (s *Server) appendTenantEvents(ctx context.Context, tenantID string, events
 	return nil
 }
 
-func (s *Server) appendServiceEvents(ctx context.Context, tenantID string, events *[]ActivityEvent) error {
-	rows, err := s.store.StateDB.QueryContext(ctx,
-		`SELECT id, name, status, COALESCE(last_error, ''), circuit_open, created_at, updated_at
+func (s *Server) appendServiceEvents(ctx context.Context, tenantID string, events *[]ActivityEvent, filter activityFilter) error {
+	query := `SELECT id, name, status, COALESCE(last_error, ''), circuit_open, created_at, updated_at
 		 FROM services
-		 WHERE tenant_id = ?`,
-		tenantID,
-	)
+		 WHERE tenant_id = ?`
+	args := []any{tenantID}
+
+	if filter.ServiceID != "" {
+		query += ` AND id = ?`
+		args = append(args, filter.ServiceID)
+	}
+
+	rows, err := s.store.StateDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("service activity: %w", err)
 	}
@@ -140,18 +233,21 @@ func (s *Server) appendServiceEvents(ctx context.Context, tenantID string, event
 			return fmt.Errorf("scan service activity: %w", err)
 		}
 
-		*events = append(*events, ActivityEvent{
-			ID:           fmt.Sprintf("service-created-%s-%d", id, createdAt),
-			ResourceType: "service",
-			ResourceID:   id,
-			ResourceName: name,
-			Action:       "service.created",
-			Status:       status,
-			Message:      fmt.Sprintf("Service %s was created", name),
-			CreatedAt:    createdAt,
-		})
+		if filter.Since == 0 || createdAt >= filter.Since {
+			*events = append(*events, ActivityEvent{
+				ID:           fmt.Sprintf("service-created-%s-%d", id, createdAt),
+				ResourceType: "service",
+				ResourceID:   id,
+				ResourceName: name,
+				Action:       "service.created",
+				Status:       status,
+				Message:      fmt.Sprintf("Service %s was created", name),
+				CreatedAt:    createdAt,
+				ServiceID:    id,
+			})
+		}
 
-		if updatedAt > createdAt {
+		if updatedAt > createdAt && (filter.Since == 0 || updatedAt >= filter.Since) {
 			action := "service.updated"
 			message := fmt.Sprintf("Service %s changed state to %s", name, status)
 			switch {
@@ -180,21 +276,27 @@ func (s *Server) appendServiceEvents(ctx context.Context, tenantID string, event
 				Status:       status,
 				Message:      message,
 				CreatedAt:    updatedAt,
+				ServiceID:    id,
 			})
 		}
 	}
 	return rows.Err()
 }
 
-func (s *Server) appendBuildEvents(ctx context.Context, tenantID string, events *[]ActivityEvent) error {
-	rows, err := s.store.StateDB.QueryContext(ctx,
-		`SELECT b.id, b.service_id, COALESCE(s.name, ''), b.status, COALESCE(b.source_ref, ''), COALESCE(b.source_url, ''),
+func (s *Server) appendBuildEvents(ctx context.Context, tenantID string, events *[]ActivityEvent, filter activityFilter) error {
+	query := `SELECT b.id, b.service_id, COALESCE(s.name, ''), b.status, COALESCE(b.source_ref, ''), COALESCE(b.source_url, ''),
 		        b.created_at, b.started_at, b.finished_at
 		 FROM builds b
 		 LEFT JOIN services s ON s.id = b.service_id
-		 WHERE b.tenant_id = ?`,
-		tenantID,
-	)
+		 WHERE b.tenant_id = ?`
+	args := []any{tenantID}
+
+	if filter.ServiceID != "" {
+		query += ` AND b.service_id = ?`
+		args = append(args, filter.ServiceID)
+	}
+
+	rows, err := s.store.StateDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("build activity: %w", err)
 	}
@@ -213,18 +315,21 @@ func (s *Server) appendBuildEvents(ctx context.Context, tenantID string, events 
 			refSuffix = fmt.Sprintf(" from %s", sourceRef)
 		}
 
-		*events = append(*events, ActivityEvent{
-			ID:           fmt.Sprintf("build-created-%s-%d", id, createdAt),
-			ResourceType: "build",
-			ResourceID:   id,
-			ResourceName: serviceName,
-			Action:       "build.queued",
-			Status:       status,
-			Message:      fmt.Sprintf("Build queued for %s%s", defaultName(serviceName, serviceID), refSuffix),
-			CreatedAt:    createdAt,
-		})
+		if filter.Since == 0 || createdAt >= filter.Since {
+			*events = append(*events, ActivityEvent{
+				ID:           fmt.Sprintf("build-created-%s-%d", id, createdAt),
+				ResourceType: "build",
+				ResourceID:   id,
+				ResourceName: serviceName,
+				Action:       "build.queued",
+				Status:       status,
+				Message:      fmt.Sprintf("Build queued for %s%s", defaultName(serviceName, serviceID), refSuffix),
+				CreatedAt:    createdAt,
+				ServiceID:    serviceID,
+			})
+		}
 
-		if startedAt.Valid {
+		if startedAt.Valid && (filter.Since == 0 || startedAt.Int64 >= filter.Since) {
 			*events = append(*events, ActivityEvent{
 				ID:           fmt.Sprintf("build-started-%s-%d", id, startedAt.Int64),
 				ResourceType: "build",
@@ -234,10 +339,11 @@ func (s *Server) appendBuildEvents(ctx context.Context, tenantID string, events 
 				Status:       status,
 				Message:      fmt.Sprintf("Build started for %s", defaultName(serviceName, serviceID)),
 				CreatedAt:    startedAt.Int64,
+				ServiceID:    serviceID,
 			})
 		}
 
-		if finishedAt.Valid {
+		if finishedAt.Valid && (filter.Since == 0 || finishedAt.Int64 >= filter.Since) {
 			action := "build.finished"
 			message := fmt.Sprintf("Build finished for %s", defaultName(serviceName, serviceID))
 			if status == "succeeded" {
@@ -259,13 +365,19 @@ func (s *Server) appendBuildEvents(ctx context.Context, tenantID string, events 
 				Status:       status,
 				Message:      message,
 				CreatedAt:    finishedAt.Int64,
+				ServiceID:    serviceID,
 			})
 		}
 	}
 	return rows.Err()
 }
 
-func (s *Server) appendDatabaseEvents(ctx context.Context, tenantID string, events *[]ActivityEvent) error {
+func (s *Server) appendDatabaseEvents(ctx context.Context, tenantID string, events *[]ActivityEvent, filter activityFilter) error {
+	// service_id filter does not apply to database events; skip them.
+	if filter.ServiceID != "" {
+		return nil
+	}
+
 	rows, err := s.store.StateDB.QueryContext(ctx,
 		`SELECT id, name, type, status, created_at, updated_at
 		 FROM databases
@@ -284,18 +396,20 @@ func (s *Server) appendDatabaseEvents(ctx context.Context, tenantID string, even
 			return fmt.Errorf("scan database activity: %w", err)
 		}
 
-		*events = append(*events, ActivityEvent{
-			ID:           fmt.Sprintf("database-created-%s-%d", id, createdAt),
-			ResourceType: "database",
-			ResourceID:   id,
-			ResourceName: name,
-			Action:       "database.created",
-			Status:       status,
-			Message:      fmt.Sprintf("%s database %s provisioning started", titleCase(dbType), name),
-			CreatedAt:    createdAt,
-		})
+		if filter.Since == 0 || createdAt >= filter.Since {
+			*events = append(*events, ActivityEvent{
+				ID:           fmt.Sprintf("database-created-%s-%d", id, createdAt),
+				ResourceType: "database",
+				ResourceID:   id,
+				ResourceName: name,
+				Action:       "database.created",
+				Status:       status,
+				Message:      fmt.Sprintf("%s database %s provisioning started", titleCase(dbType), name),
+				CreatedAt:    createdAt,
+			})
+		}
 
-		if updatedAt > createdAt {
+		if updatedAt > createdAt && (filter.Since == 0 || updatedAt >= filter.Since) {
 			action := "database.updated"
 			message := fmt.Sprintf("Database %s changed state to %s", name, status)
 			if status == "ready" {
@@ -320,7 +434,12 @@ func (s *Server) appendDatabaseEvents(ctx context.Context, tenantID string, even
 	return rows.Err()
 }
 
-func (s *Server) appendAPIKeyEvents(ctx context.Context, tenantID string, events *[]ActivityEvent) error {
+func (s *Server) appendAPIKeyEvents(ctx context.Context, tenantID string, events *[]ActivityEvent, filter activityFilter) error {
+	// service_id filter does not apply to API key events; skip them.
+	if filter.ServiceID != "" {
+		return nil
+	}
+
 	rows, err := s.store.StateDB.QueryContext(ctx,
 		`SELECT id, name, created_at, revoked_at
 		 FROM api_keys
@@ -340,16 +459,18 @@ func (s *Server) appendAPIKeyEvents(ctx context.Context, tenantID string, events
 			return fmt.Errorf("scan api key activity: %w", err)
 		}
 
-		*events = append(*events, ActivityEvent{
-			ID:           fmt.Sprintf("api-key-created-%s-%d", id, createdAt),
-			ResourceType: "api_key",
-			ResourceID:   id,
-			ResourceName: name,
-			Action:       "api_key.created",
-			Message:      fmt.Sprintf("API key %s was created", name),
-			CreatedAt:    createdAt,
-		})
-		if revokedAt.Valid {
+		if filter.Since == 0 || createdAt >= filter.Since {
+			*events = append(*events, ActivityEvent{
+				ID:           fmt.Sprintf("api-key-created-%s-%d", id, createdAt),
+				ResourceType: "api_key",
+				ResourceID:   id,
+				ResourceName: name,
+				Action:       "api_key.created",
+				Message:      fmt.Sprintf("API key %s was created", name),
+				CreatedAt:    createdAt,
+			})
+		}
+		if revokedAt.Valid && (filter.Since == 0 || revokedAt.Int64 >= filter.Since) {
 			*events = append(*events, ActivityEvent{
 				ID:           fmt.Sprintf("api-key-revoked-%s-%d", id, revokedAt.Int64),
 				ResourceType: "api_key",

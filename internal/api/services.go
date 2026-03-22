@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -189,7 +190,23 @@ func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svcs, err := s.svcManager.ListPaginated(r.Context(), tenantID, limit, offset)
+	// Parse optional status filter (comma-separated, e.g. ?status=running,stopped).
+	var statusFilter []string
+	if raw := r.URL.Query().Get("status"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if !services.ValidStatuses[s] {
+				writeError(w, http.StatusBadRequest, "invalid status value: "+s)
+				return
+			}
+			statusFilter = append(statusFilter, s)
+		}
+	}
+
+	svcs, err := s.svcManager.ListPaginated(r.Context(), tenantID, limit, offset, statusFilter...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list services")
 		return

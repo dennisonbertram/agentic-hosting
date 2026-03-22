@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -23,11 +24,15 @@ type KeyRecoverRequest struct {
 
 // KeyRecoverResponse mirrors CreateKeyResponse so callers can treat both
 // responses the same way.  The raw key is shown exactly once.
+// When a key slot was auto-revoked to make room, Warning and RevokedKeyID
+// are populated so the caller knows what happened.
 type KeyRecoverResponse struct {
-	ID        string `json:"id"`
-	Key       string `json:"key"`
-	Name      string `json:"name"`
-	CreatedAt int64  `json:"created_at"`
+	ID           string `json:"id"`
+	Key          string `json:"key"`
+	Name         string `json:"name"`
+	CreatedAt    int64  `json:"created_at"`
+	Warning      string `json:"warning,omitempty"`
+	RevokedKeyID string `json:"revoked_key_id,omitempty"`
 }
 
 // handleKeyRecover handles POST /v1/auth/recover.
@@ -98,7 +103,7 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce the same per-tenant key cap that handleKeyCreate enforces.
+	// Check how many non-revoked keys the tenant has.
 	var keyCount int
 	if err := s.store.StateDB.QueryRow(
 		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
@@ -107,9 +112,38 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	// If the keyring is full, auto-revoke the oldest key to make room.
+	// Recovery is a last-resort operation — it should always succeed for a
+	// legitimate tenant, even if they have filled all key slots.
+	var revokedKeyID string
 	if keyCount >= maxKeysPerTenant {
-		writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached; revoke unused keys first")
-		return
+		// Prefer revoking an expired key first (least disruptive).
+		revokedID, err := s.store.RevokeOldestExpired(tenantID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if revokedID == "" {
+			// No expired keys — revoke the oldest key by created_at.
+			revokedID, err = s.store.RevokeOldest(tenantID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+		if revokedID == "" {
+			// Should be unreachable: keyCount >= 20 but nothing to revoke.
+			writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached; revoke unused keys first")
+			return
+		}
+		revokedKeyID = revokedID
+		log.Printf("AUDIT: action=recovery.key_auto_revoked tenant=%s revoked_key=%s reason=keyring_full", tenantID, revokedKeyID)
+
+		// Evict the revoked key from the auth cache so it stops working immediately.
+		if s.authInvalidator != nil {
+			s.authInvalidator.InvalidateKey(revokedKeyID)
+		}
 	}
 
 	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
@@ -142,10 +176,16 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 	// This is the only time the raw key is shown.
 	token := keyID + "." + apiKey
 
-	writeJSON(w, http.StatusCreated, KeyRecoverResponse{
+	resp := KeyRecoverResponse{
 		ID:        keyID,
 		Key:       token,
 		Name:      keyName,
 		CreatedAt: now,
-	})
+	}
+	if revokedKeyID != "" {
+		resp.Warning = "key slot was full; revoked oldest key"
+		resp.RevokedKeyID = revokedKeyID
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }

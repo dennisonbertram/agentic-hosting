@@ -3,9 +3,11 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
@@ -194,5 +196,183 @@ func TestHandleKeyRecover(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, tenantRR.Code,
 			"recovered key should authenticate successfully: %s", tenantRR.Body.String())
+	})
+}
+
+// TestHandleKeyRecover_FullKeyring tests the auto-revocation behavior when the
+// tenant's keyring is full (issue #138).
+func TestHandleKeyRecover_FullKeyring(t *testing.T) {
+	regLimiter.resetForTest()
+	const bootstrapToken = "test-bootstrap-token-for-full-keyring"
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// fillKeyring inserts exactly maxKeysPerTenant keys for the given tenant.
+	// If expiredIdx >= 0, that key index will have an expires_at in the past
+	// (expired but not yet revoked), making it a candidate for preferential
+	// revocation.  Returns the ID of the oldest key.
+	fillKeyring := func(t *testing.T, stateDB *db.Store, tenantID string, expiredIdx int) string {
+		t.Helper()
+		now := time.Now().Unix()
+		var oldestID string
+		for i := 0; i < maxKeysPerTenant; i++ {
+			keyID := fmt.Sprintf("key-%s-%03d", tenantID, i)
+			createdAt := now - int64(maxKeysPerTenant-i) // oldest first
+			var expiresAt *int64
+			if i == expiredIdx {
+				past := now - 3600 // expired 1 hour ago
+				expiresAt = &past
+			}
+			_, err := stateDB.StateDB.Exec(
+				`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				keyID, tenantID, fmt.Sprintf("key-%d", i), keyID[:8], "hash", createdAt, expiresAt,
+			)
+			require.NoError(t, err)
+			if i == 0 {
+				oldestID = keyID
+			}
+		}
+		return oldestID
+	}
+
+	// newServerWithStore creates a server with the given store.
+	newServerWithStore := func(t *testing.T, store *db.Store) *Server {
+		t.Helper()
+		return NewServer(ServerConfig{
+			Store:           store,
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
+		})
+	}
+
+	t.Run("full keyring auto-revokes expired key", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-full-exp", "Full Expired", "full-exp@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-full-exp")
+		require.NoError(t, err)
+
+		store := &db.Store{StateDB: stateDB}
+		// Fill keyring with key index 5 as expired.
+		fillKeyring(t, store, "tenant-full-exp", 5)
+		expiredKeyID := "key-tenant-full-exp-005"
+
+		logBuf := captureLog(t)
+		srv := newServerWithStore(t, store)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "full-exp@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.2.1", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "should succeed: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.ID)
+		assert.NotEmpty(t, resp.Key)
+		assert.Equal(t, "key slot was full; revoked oldest key", resp.Warning)
+		assert.Equal(t, expiredKeyID, resp.RevokedKeyID,
+			"should preferentially revoke the expired key")
+
+		// Verify AUDIT log
+		logOutput := logBuf.String()
+		assert.Contains(t, logOutput, "AUDIT:")
+		assert.Contains(t, logOutput, "action=recovery.key_auto_revoked")
+		assert.Contains(t, logOutput, "tenant=tenant-full-exp")
+		assert.Contains(t, logOutput, "revoked_key="+expiredKeyID)
+	})
+
+	t.Run("full keyring with no expired keys auto-revokes oldest", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-full-old", "Full Oldest", "full-old@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-full-old")
+		require.NoError(t, err)
+
+		store := &db.Store{StateDB: stateDB}
+		// Fill keyring with no expired keys (expiredIdx = -1).
+		oldestKeyID := fillKeyring(t, store, "tenant-full-old", -1)
+
+		logBuf := captureLog(t)
+		srv := newServerWithStore(t, store)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "full-old@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.2.2", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "should succeed: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.ID)
+		assert.NotEmpty(t, resp.Key)
+		assert.Equal(t, "key slot was full; revoked oldest key", resp.Warning)
+		assert.Equal(t, oldestKeyID, resp.RevokedKeyID,
+			"should revoke the oldest key when no expired keys exist")
+
+		// Verify AUDIT log
+		logOutput := logBuf.String()
+		assert.Contains(t, logOutput, "AUDIT:")
+		assert.Contains(t, logOutput, "action=recovery.key_auto_revoked")
+		assert.Contains(t, logOutput, "revoked_key="+oldestKeyID)
+	})
+
+	t.Run("normal recovery with space has no warning", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-space", "Has Space", "has-space@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-space")
+		require.NoError(t, err)
+
+		store := &db.Store{StateDB: stateDB}
+		// Insert only 5 keys — well under the limit.
+		for i := 0; i < 5; i++ {
+			_, err := stateDB.Exec(
+				`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				fmt.Sprintf("key-space-%d", i), "tenant-space", "key", "prefix"+fmt.Sprintf("%02d", i), "hash", 1,
+			)
+			require.NoError(t, err)
+		}
+
+		srv := newServerWithStore(t, store)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "has-space@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.0.2.3", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "should succeed: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.ID)
+		assert.NotEmpty(t, resp.Key)
+		assert.Empty(t, resp.Warning, "no warning when keyring has space")
+		assert.Empty(t, resp.RevokedKeyID, "no revoked key when keyring has space")
 	})
 }

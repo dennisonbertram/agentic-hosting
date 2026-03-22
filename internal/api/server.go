@@ -158,6 +158,9 @@ func (s *Server) setupRoutes() {
 		// Validate endpoint: checks if a bootstrap token is valid.
 		// Useful during token rotation to verify both old and new tokens.
 		r.Post("/v1/system/bootstrap-token/validate", s.handleBootstrapTokenValidate)
+		// Quota update endpoint: authenticated by bootstrap token, not an API key.
+		// Allows operator to update tenant resource limits.
+		r.Patch("/v1/tenants/{tenantID}/quotas", s.handleQuotaUpdate)
 	})
 
 	// Authenticated short-lived routes keep the standard request timeout.

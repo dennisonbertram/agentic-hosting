@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/go-chi/chi/v5"
@@ -526,3 +528,68 @@ func (s *Server) handleServiceDeployments(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, records)
 }
+
+// handleDeploymentCancel cancels a queued or in-progress deployment.
+// For in-progress deployments that have an associated build, the build is also cancelled.
+func (s *Server) handleDeploymentCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSvcManager(w) {
+		return
+	}
+	if s.deploymentStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "deployment management is not available")
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	serviceID := chi.URLParam(r, "serviceID")
+	deploymentID := chi.URLParam(r, "deploymentID")
+
+	// Verify the service exists and belongs to the tenant.
+	if _, err := s.svcManager.Get(r.Context(), tenantID, serviceID); err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	// Verify the deployment belongs to this service before cancelling.
+	dep, err := s.deploymentStore.Get(r.Context(), tenantID, deploymentID)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+	if dep.ServiceID != serviceID {
+		apierr.WriteAPIError(w, apierr.NotFound("deployment not found"))
+		return
+	}
+
+	// Cancel the deployment (store enforces status guard).
+	updated, err := s.deploymentStore.Cancel(r.Context(), tenantID, deploymentID)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	// If the deployment has an associated build, cancel it too.
+	if updated.BuildID != "" && s.buildManager != nil {
+		if cancelErr := s.buildManager.CancelBuild(r.Context(), tenantID, updated.BuildID); cancelErr != nil {
+			// Log but don't fail — the deployment is already cancelled.
+			// The build cancellation is best-effort.
+			var apiErr *apierr.APIError
+			if !errors.As(cancelErr, &apiErr) || apiErr.Code != http.StatusConflict {
+				log.Printf("deployment cancel: failed to cancel associated build %s: %v", updated.BuildID, cancelErr)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// requireDeploymentStore is a guard that returns false if deploymentStore is nil.
+func (s *Server) requireDeploymentStore(w http.ResponseWriter) bool {
+	if s.deploymentStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "deployment management is not available")
+		return false
+	}
+	return true
+}
+
+// cancelledDeploymentResponse wraps a cancelled deployment for JSON response.
+type cancelledDeploymentResponse = deployments.Deployment

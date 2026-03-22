@@ -19,6 +19,7 @@ const (
 	StatusFailed    = "failed"
 	StatusCrashed   = "crashed"
 	StatusStopped   = "stopped"
+	StatusCancelled = "cancelled"
 )
 
 // Trigger constants for deployment attribution.
@@ -43,6 +44,7 @@ type Deployment struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 	StartedAt    int64  `json:"started_at"`
 	CompletedAt  *int64 `json:"completed_at,omitempty"`
+	CancelledAt  *int64 `json:"cancelled_at,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 }
 
@@ -70,10 +72,10 @@ func (s *Store) Create(ctx context.Context, d *Deployment) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO deployments (id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO deployments (id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID, d.ServiceID, d.TenantID, nullString(d.BuildID), d.Image, d.Status, d.Trigger,
-		d.ContainerID, d.ErrorMessage, d.StartedAt, d.CompletedAt, d.CreatedAt,
+		d.ContainerID, d.ErrorMessage, d.StartedAt, d.CompletedAt, d.CancelledAt, d.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert deployment: %w", err)
@@ -150,16 +152,45 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 	return nil
 }
 
+// Cancel transitions a deployment to cancelled status. Only deployments with
+// status "pending" or "deploying" can be cancelled. Returns a Conflict error
+// if the deployment is already in a terminal state (running, failed, crashed,
+// stopped, or cancelled).
+func (s *Store) Cancel(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
+	d, err := s.Get(ctx, tenantID, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if d.Status != StatusPending && d.Status != StatusDeploying {
+		return nil, apierr.Conflict(fmt.Sprintf("deployment cannot be cancelled (status: %s)", d.Status))
+	}
+
+	now := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ?`,
+		StatusCancelled, now, now, deploymentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cancel deployment: %w", err)
+	}
+
+	d.Status = StatusCancelled
+	d.CancelledAt = &now
+	d.CompletedAt = &now
+	return d, nil
+}
+
 // Get retrieves a single deployment by ID, scoped to tenant.
 func (s *Store) Get(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
 	d := &Deployment{}
 	var buildID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, created_at
+		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
 		 FROM deployments WHERE id = ? AND tenant_id = ?`,
 		deploymentID, tenantID,
 	).Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CreatedAt)
+		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("deployment not found")
 	}
@@ -182,7 +213,7 @@ func (s *Store) ListByService(ctx context.Context, tenantID, serviceID string, l
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, created_at
+		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
 		 FROM deployments
 		 WHERE tenant_id = ? AND service_id = ?
 		 ORDER BY created_at DESC
@@ -207,7 +238,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenantID string, limit, offset
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, created_at
+		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
 		 FROM deployments
 		 WHERE tenant_id = ?
 		 ORDER BY created_at DESC
@@ -227,14 +258,14 @@ func (s *Store) LatestForService(ctx context.Context, serviceID string) (*Deploy
 	d := &Deployment{}
 	var buildID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, created_at
+		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
 		 FROM deployments
 		 WHERE service_id = ?
 		 ORDER BY created_at DESC
 		 LIMIT 1`,
 		serviceID,
 	).Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CreatedAt)
+		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("no deployments found for service")
 	}
@@ -254,7 +285,7 @@ func scanDeployments(rows *sql.Rows) ([]*Deployment, error) {
 		d := &Deployment{}
 		var buildID sql.NullString
 		if err := rows.Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-			&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CreatedAt); err != nil {
+			&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan deployment: %w", err)
 		}
 		if buildID.Valid {

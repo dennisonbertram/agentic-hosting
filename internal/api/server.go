@@ -201,6 +201,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/services/{serviceID}/redeploy", s.handleServiceRedeploy)
 		r.Post("/v1/services/{serviceID}/reset", s.handleServiceReset)
 		r.Get("/v1/services/{serviceID}/deployments", s.handleServiceDeployments)
+		r.Post("/v1/services/{serviceID}/deployments/{deploymentID}/cancel", s.handleDeploymentCancel)
 		r.Get("/v1/services/{serviceID}/env", s.handleServiceEnvGet)
 		r.Post("/v1/services/{serviceID}/env", s.handleServiceEnvSet)
 		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)

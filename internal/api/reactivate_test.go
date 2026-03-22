@@ -25,6 +25,11 @@ func reactivateRequest(ip, tenantID, bootstrapToken string) *http.Request {
 }
 
 func TestHandleTenantReactivate(t *testing.T) {
+	// Reset the global rate limiter so earlier tests in the same process
+	// (e.g. TestRegistrationEndpoint_RateLimitReturns429) don't exhaust
+	// the budget and cause every request here to get 429.
+	regLimiter.resetForTest()
+
 	const bootstrapToken = "test-bootstrap-token-for-reactivation"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 

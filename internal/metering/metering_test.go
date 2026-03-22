@@ -214,3 +214,180 @@ func TestQueryServiceMetrics_TenantIsolation(t *testing.T) {
 	require.Len(t, metrics, 1)
 	assert.InDelta(t, 5.0, metrics[0].CPUSeconds, 0.01)
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestMeteringStore_Regression
+// ---------------------------------------------------------------------------
+
+// Regression: QueryTenantMetrics with no data must return an empty non-nil
+// slice so that JSON serialization produces "[]" instead of "null".
+func TestMeteringStore_Regression_EmptySliceNotNil(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	now := time.Now().UTC()
+	metrics, err := store.QueryTenantMetrics("nonexistent-tenant", "daily", now.Add(-24*time.Hour), now, "")
+	require.NoError(t, err)
+	require.NotNil(t, metrics, "must return non-nil slice for JSON []")
+	assert.Len(t, metrics, 0)
+}
+
+// Regression: hourly period groups events within the same clock hour together,
+// even when they fall at different minutes within that hour.
+func TestMeteringStore_Regression_HourlyGrouping(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	// Three events across two hours: minute 0, minute 30, and next hour minute 15.
+	h1a := time.Date(2026, 3, 20, 14, 0, 0, 0, time.UTC).Unix()
+	h1b := time.Date(2026, 3, 20, 14, 30, 0, 0, time.UTC).Unix()
+	h2a := time.Date(2026, 3, 20, 15, 15, 0, 0, time.UTC).Unix()
+
+	insertEvent(t, sqlDB, "r1", "t-reg", "svc-a", 1.0, 10.0, 100, 200, h1a)
+	insertEvent(t, sqlDB, "r2", "t-reg", "svc-a", 2.0, 20.0, 300, 400, h1b)
+	insertEvent(t, sqlDB, "r3", "t-reg", "svc-a", 4.0, 40.0, 500, 600, h2a)
+
+	since := time.Date(2026, 3, 20, 14, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 20, 16, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryTenantMetrics("t-reg", "hourly", since, until, "")
+	require.NoError(t, err)
+	require.Len(t, metrics, 2, "events at minute-0 and minute-30 should collapse into one hourly bucket")
+
+	assert.Equal(t, "2026-03-20T14:00:00Z", metrics[0].Timestamp)
+	assert.InDelta(t, 3.0, metrics[0].CPUSeconds, 0.01, "hour-14 should sum 1.0+2.0")
+	assert.InDelta(t, 30.0, metrics[0].MemoryMBAvg, 0.01)
+	assert.Equal(t, int64(400), metrics[0].NetworkRxBytes)
+	assert.Equal(t, int64(600), metrics[0].NetworkTxBytes)
+
+	assert.Equal(t, "2026-03-20T15:00:00Z", metrics[1].Timestamp)
+	assert.InDelta(t, 4.0, metrics[1].CPUSeconds, 0.01)
+}
+
+// Regression: daily period groups events on the same calendar day together,
+// regardless of their hour-of-day.
+func TestMeteringStore_Regression_DailyGrouping(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	d1am := time.Date(2026, 3, 20, 2, 0, 0, 0, time.UTC).Unix()
+	d1pm := time.Date(2026, 3, 20, 22, 0, 0, 0, time.UTC).Unix()
+	d2 := time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC).Unix()
+
+	insertEvent(t, sqlDB, "r1", "t-day", "svc-b", 3.0, 30.0, 300, 400, d1am)
+	insertEvent(t, sqlDB, "r2", "t-day", "svc-b", 7.0, 70.0, 700, 800, d1pm)
+	insertEvent(t, sqlDB, "r3", "t-day", "svc-b", 5.0, 50.0, 500, 600, d2)
+
+	since := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 22, 0, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryTenantMetrics("t-day", "daily", since, until, "")
+	require.NoError(t, err)
+	require.Len(t, metrics, 2, "events at 02:00 and 22:00 on same day should share one daily bucket")
+
+	assert.Equal(t, "2026-03-20T00:00:00Z", metrics[0].Timestamp)
+	assert.InDelta(t, 10.0, metrics[0].CPUSeconds, 0.01, "day 20 should sum 3.0+7.0")
+
+	assert.Equal(t, "2026-03-21T00:00:00Z", metrics[1].Timestamp)
+	assert.InDelta(t, 5.0, metrics[1].CPUSeconds, 0.01)
+}
+
+// Regression: QueryServiceMetrics filters to only the specified service.
+// Events for other services under the same tenant must not appear.
+func TestMeteringStore_Regression_ServiceFilterStrict(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC).Unix()
+	insertEvent(t, sqlDB, "r1", "t-sf", "svc-target", 10.0, 100.0, 1000, 2000, ts)
+	insertEvent(t, sqlDB, "r2", "t-sf", "svc-other-1", 20.0, 200.0, 2000, 3000, ts)
+	insertEvent(t, sqlDB, "r3", "t-sf", "svc-other-2", 30.0, 300.0, 3000, 4000, ts)
+
+	since := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryServiceMetrics("t-sf", "svc-target", "daily", since, until)
+	require.NoError(t, err)
+	require.Len(t, metrics, 1, "should return only the target service")
+	assert.InDelta(t, 10.0, metrics[0].CPUSeconds, 0.01)
+	assert.Equal(t, int64(1000), metrics[0].NetworkRxBytes)
+}
+
+// Regression: since/until time range filtering works correctly.
+// Events outside the window must be excluded.
+func TestMeteringStore_Regression_TimeRangeFiltering(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	beforeWindow := time.Date(2026, 3, 19, 23, 59, 59, 0, time.UTC).Unix()
+	insideWindow := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC).Unix()
+	afterWindow := time.Date(2026, 3, 21, 0, 0, 1, 0, time.UTC).Unix()
+
+	insertEvent(t, sqlDB, "r1", "t-tr", "svc-1", 5.0, 50.0, 100, 200, beforeWindow)
+	insertEvent(t, sqlDB, "r2", "t-tr", "svc-1", 10.0, 100.0, 1000, 2000, insideWindow)
+	insertEvent(t, sqlDB, "r3", "t-tr", "svc-1", 15.0, 150.0, 1500, 3000, afterWindow)
+
+	since := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryTenantMetrics("t-tr", "daily", since, until, "")
+	require.NoError(t, err)
+	require.Len(t, metrics, 1, "only the event inside the window should appear")
+	assert.InDelta(t, 10.0, metrics[0].CPUSeconds, 0.01)
+}
+
+// Regression: querying a non-existent service returns empty, not an error.
+func TestMeteringStore_Regression_NonexistentServiceReturnsEmpty(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC).Unix()
+	insertEvent(t, sqlDB, "r1", "t-ne", "svc-exists", 10.0, 100.0, 1000, 2000, ts)
+
+	since := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryServiceMetrics("t-ne", "svc-does-not-exist", "daily", since, until)
+	require.NoError(t, err, "non-existent service should not error")
+	assert.Empty(t, metrics, "should return empty slice for non-existent service")
+	assert.NotNil(t, metrics, "should be non-nil empty slice")
+}
+
+// Regression: multiple services with overlapping timestamps aggregate correctly
+// by tenant. When querying without a service filter, each service+bucket pair
+// should be a separate row, not collapsed into a single aggregate.
+func TestMeteringStore_Regression_MultiServiceOverlappingTimestamps(t *testing.T) {
+	sqlDB := newMeteringDB(t)
+	store := NewStore(sqlDB)
+
+	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC).Unix()
+	insertEvent(t, sqlDB, "r1", "t-ms", "svc-A", 10.0, 100.0, 1000, 2000, ts)
+	insertEvent(t, sqlDB, "r2", "t-ms", "svc-A", 5.0, 50.0, 500, 1000, ts)
+	insertEvent(t, sqlDB, "r3", "t-ms", "svc-B", 20.0, 200.0, 2000, 3000, ts)
+	insertEvent(t, sqlDB, "r4", "t-ms", "svc-C", 7.0, 70.0, 700, 1400, ts)
+
+	since := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
+
+	metrics, err := store.QueryTenantMetrics("t-ms", "daily", since, until, "")
+	require.NoError(t, err)
+	// The query groups by (bucket, service_id), so we expect 3 rows:
+	// svc-A aggregated (10+5=15), svc-B (20), svc-C (7)
+	require.Len(t, metrics, 3, "each service should get its own row in the same daily bucket")
+
+	// Verify total CPU across all services
+	totalCPU := 0.0
+	for _, m := range metrics {
+		totalCPU += m.CPUSeconds
+	}
+	assert.InDelta(t, 42.0, totalCPU, 0.01, "total CPU across all services should be 10+5+20+7=42")
+
+	// Verify svc-A is aggregated correctly
+	for _, m := range metrics {
+		if m.ServiceID == "svc-A" {
+			assert.InDelta(t, 15.0, m.CPUSeconds, 0.01, "svc-A events should sum to 15")
+			assert.InDelta(t, 150.0, m.MemoryMBAvg, 0.01)
+			assert.Equal(t, int64(1500), m.NetworkRxBytes)
+		}
+	}
+}

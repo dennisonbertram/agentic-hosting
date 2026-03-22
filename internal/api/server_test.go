@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
@@ -19,6 +20,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
+	"github.com/dennisonbertram/agentic-hosting/internal/metering"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1433,6 +1435,1606 @@ func TestDeploymentCancel_ServiceNotFound_Returns404(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusNotFound, rr.Code, "nonexistent service should return 404")
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestServiceList_StatusFilter_Regression
+// (PR #140, issue #110)
+// ---------------------------------------------------------------------------
+
+func TestServiceList_StatusFilter_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+
+	// Helper to insert a service with a specific status directly in the DB.
+	insertService := func(t *testing.T, stateDB *sql.DB, id, name, status string) {
+		t.Helper()
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES (?, 'tenant-1', ?, '', ?, 'nginx:latest', 8080, '', '', ?, ?)`,
+			id, name, status, 1000, 1000,
+		)
+		require.NoError(t, err)
+	}
+
+	// Helper to create a fresh server, DB, and auth token for each subtest.
+	setup := func(t *testing.T) (*sql.DB, *Server, string) {
+		t.Helper()
+		stateDB := testutil.NewStateDB(t)
+		masterKey := []byte("0123456789abcdef0123456789abcdef")
+		token := seedAuthenticatedTenant(t, stateDB, masterKey)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+		return stateDB, srv, token
+	}
+
+	// Helper to do a GET /v1/services with optional query string and return the response.
+	doListRequest := func(t *testing.T, srv *Server, token, query, clientIP string) *httptest.ResponseRecorder {
+		t.Helper()
+		url := "/v1/services"
+		if query != "" {
+			url += "?" + query
+		}
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-Real-Ip", clientIP)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		return rr
+	}
+
+	t.Run("single_status_running", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-r1", "web-running", "running")
+		insertService(t, stateDB, "svc-s1", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-f1", "web-failed", "failed")
+
+		rr := doListRequest(t, srv, token, "status=running", "10.110.1.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 1, "should return only running services")
+		assert.Equal(t, "svc-r1", svcs[0]["id"])
+		assert.Equal(t, "running", svcs[0]["status"])
+	})
+
+	t.Run("single_status_stopped", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-r2", "web-running", "running")
+		insertService(t, stateDB, "svc-s2", "web-stopped", "stopped")
+
+		rr := doListRequest(t, srv, token, "status=stopped", "10.110.1.2")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 1)
+		assert.Equal(t, "svc-s2", svcs[0]["id"])
+		assert.Equal(t, "stopped", svcs[0]["status"])
+	})
+
+	t.Run("single_status_created", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-c1", "web-created", "created")
+		insertService(t, stateDB, "svc-r3", "web-running", "running")
+
+		rr := doListRequest(t, srv, token, "status=created", "10.110.1.3")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 1)
+		assert.Equal(t, "created", svcs[0]["status"])
+	})
+
+	t.Run("multiple_comma_separated_statuses", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-m-r", "web-running", "running")
+		insertService(t, stateDB, "svc-m-s", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-m-f", "web-failed", "failed")
+		insertService(t, stateDB, "svc-m-c", "web-created", "created")
+
+		rr := doListRequest(t, srv, token, "status=running,stopped", "10.110.2.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 2, "should return union of running and stopped")
+
+		statuses := map[string]bool{}
+		for _, svc := range svcs {
+			statuses[svc["status"].(string)] = true
+		}
+		assert.True(t, statuses["running"], "should include running services")
+		assert.True(t, statuses["stopped"], "should include stopped services")
+		assert.False(t, statuses["failed"], "should not include failed services")
+		assert.False(t, statuses["created"], "should not include created services")
+	})
+
+	t.Run("multiple_statuses_three_values", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-3-r", "web-running", "running")
+		insertService(t, stateDB, "svc-3-s", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-3-f", "web-failed", "failed")
+		insertService(t, stateDB, "svc-3-d", "web-deploying", "deploying")
+
+		rr := doListRequest(t, srv, token, "status=running,stopped,failed", "10.110.2.2")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 3, "should return running, stopped, and failed")
+
+		statuses := map[string]bool{}
+		for _, svc := range svcs {
+			statuses[svc["status"].(string)] = true
+		}
+		assert.True(t, statuses["running"])
+		assert.True(t, statuses["stopped"])
+		assert.True(t, statuses["failed"])
+		assert.False(t, statuses["deploying"], "deploying should be excluded")
+	})
+
+	t.Run("case_sensitivity_uppercase_rejected", func(t *testing.T) {
+		_, srv, token := setup(t)
+
+		rr := doListRequest(t, srv, token, "status=Running", "10.110.3.1")
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "uppercase status should be rejected")
+		assert.Contains(t, rr.Body.String(), "invalid status value")
+	})
+
+	t.Run("case_sensitivity_mixed_case_rejected", func(t *testing.T) {
+		_, srv, token := setup(t)
+
+		rr := doListRequest(t, srv, token, "status=RUNNING", "10.110.3.2")
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "all-caps status should be rejected")
+		assert.Contains(t, rr.Body.String(), "invalid status value")
+	})
+
+	t.Run("case_sensitivity_one_valid_one_invalid", func(t *testing.T) {
+		_, srv, token := setup(t)
+
+		rr := doListRequest(t, srv, token, "status=running,Stopped", "10.110.3.3")
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"mixed valid+invalid statuses should be rejected; body: %s", rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "invalid status value")
+	})
+
+	t.Run("empty_status_parameter_no_filter", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-e-r", "web-running", "running")
+		insertService(t, stateDB, "svc-e-s", "web-stopped", "stopped")
+
+		rr := doListRequest(t, srv, token, "status=", "10.110.4.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 2, "empty status= should return all services (no filter)")
+	})
+
+	t.Run("status_with_only_commas_no_filter", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-comma-r", "web-running", "running")
+		insertService(t, stateDB, "svc-comma-s", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-comma-f", "web-failed", "failed")
+
+		rr := doListRequest(t, srv, token, "status=,,,", "10.110.5.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 3, "status=,,, should be treated as no filter (all empty segments skipped)")
+	})
+
+	t.Run("combined_with_pagination_limit", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		// Insert 3 running services with different created_at for deterministic ordering
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES ('svc-pg-1', 'tenant-1', 'web-1', '', 'running', 'nginx:latest', 8080, '', '', 1000, 1000)`)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES ('svc-pg-2', 'tenant-1', 'web-2', '', 'running', 'nginx:latest', 8080, '', '', 2000, 2000)`)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES ('svc-pg-3', 'tenant-1', 'web-3', '', 'running', 'nginx:latest', 8080, '', '', 3000, 3000)`)
+		require.NoError(t, err)
+		// Insert a stopped service that should not appear
+		insertService(t, stateDB, "svc-pg-s", "web-stopped", "stopped")
+
+		// Page 1: limit=1, offset=0
+		rr := doListRequest(t, srv, token, "status=running&limit=1&offset=0", "10.110.6.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var page1 []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&page1))
+		require.Len(t, page1, 1, "limit=1 should return exactly 1 service")
+		assert.Equal(t, "running", page1[0]["status"])
+
+		// Page 2: limit=1, offset=1
+		rr2 := doListRequest(t, srv, token, "status=running&limit=1&offset=1", "10.110.6.2")
+		require.Equal(t, http.StatusOK, rr2.Code, "body: %s", rr2.Body.String())
+
+		var page2 []map[string]any
+		require.NoError(t, json.NewDecoder(rr2.Body).Decode(&page2))
+		require.Len(t, page2, 1, "page 2 should return exactly 1 service")
+		assert.Equal(t, "running", page2[0]["status"])
+		assert.NotEqual(t, page1[0]["id"], page2[0]["id"], "page 2 should return a different service than page 1")
+
+		// All running: limit=10, offset=0
+		rrAll := doListRequest(t, srv, token, "status=running&limit=10&offset=0", "10.110.6.3")
+		require.Equal(t, http.StatusOK, rrAll.Code, "body: %s", rrAll.Body.String())
+
+		var allRunning []map[string]any
+		require.NoError(t, json.NewDecoder(rrAll.Body).Decode(&allRunning))
+		assert.Len(t, allRunning, 3, "should return all 3 running services")
+		for _, svc := range allRunning {
+			assert.Equal(t, "running", svc["status"], "all returned services should be running")
+		}
+	})
+
+	t.Run("filter_matching_zero_services_returns_empty_array", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		// Only insert running services
+		insertService(t, stateDB, "svc-z-r1", "web-1", "running")
+		insertService(t, stateDB, "svc-z-r2", "web-2", "running")
+
+		rr := doListRequest(t, srv, token, "status=stopped", "10.110.7.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		// Verify it's an empty JSON array, not null
+		body := strings.TrimSpace(rr.Body.String())
+		assert.Equal(t, "[]", body, "zero matches should return empty JSON array, not null")
+
+		// Also decode to verify
+		var svcs []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(body), &svcs))
+		assert.Len(t, svcs, 0)
+	})
+
+	t.Run("filter_matching_zero_services_deploying_returns_empty_array", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-zd-r1", "web-1", "running")
+
+		rr := doListRequest(t, srv, token, "status=deploying", "10.110.7.2")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		body := strings.TrimSpace(rr.Body.String())
+		assert.Equal(t, "[]", body, "filtering by deploying when none exist should return empty array")
+	})
+
+	t.Run("invalid_status_value_returns_400", func(t *testing.T) {
+		_, srv, token := setup(t)
+
+		rr := doListRequest(t, srv, token, "status=bogus", "10.110.8.1")
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "invalid status should return 400")
+		assert.Contains(t, rr.Body.String(), "invalid status value")
+	})
+
+	t.Run("invalid_status_in_comma_list_returns_400", func(t *testing.T) {
+		_, srv, token := setup(t)
+
+		rr := doListRequest(t, srv, token, "status=running,bogus,stopped", "10.110.8.2")
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"any invalid status in comma list should return 400; body: %s", rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "invalid status value: bogus")
+	})
+
+	t.Run("no_status_param_returns_all", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-all-r", "web-running", "running")
+		insertService(t, stateDB, "svc-all-s", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-all-f", "web-failed", "failed")
+		insertService(t, stateDB, "svc-all-c", "web-created", "created")
+		insertService(t, stateDB, "svc-all-d", "web-deploying", "deploying")
+
+		rr := doListRequest(t, srv, token, "", "10.110.9.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 5, "no status param should return all services")
+	})
+
+	t.Run("all_valid_statuses_accepted", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-vs-r", "web-running", "running")
+		insertService(t, stateDB, "svc-vs-s", "web-stopped", "stopped")
+		insertService(t, stateDB, "svc-vs-f", "web-failed", "failed")
+		insertService(t, stateDB, "svc-vs-c", "web-created", "created")
+		insertService(t, stateDB, "svc-vs-d", "web-deploying", "deploying")
+
+		rr := doListRequest(t, srv, token, "status=created,deploying,running,stopped,failed", "10.110.10.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 5, "all 5 valid statuses should return all 5 services")
+	})
+
+	t.Run("whitespace_around_status_values_trimmed", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-ws-r", "web-running", "running")
+		insertService(t, stateDB, "svc-ws-s", "web-stopped", "stopped")
+
+		// Spaces around values in the comma list
+		rr := doListRequest(t, srv, token, "status=+running+,+stopped", "10.110.11.1")
+		// URL query values with + are interpreted as spaces by net/http
+		require.Equal(t, http.StatusOK, rr.Code, "whitespace around status values should be trimmed; body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 2, "whitespace-trimmed running and stopped should match 2 services")
+	})
+
+	t.Run("duplicate_status_values_work", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		insertService(t, stateDB, "svc-dup-r", "web-running", "running")
+		insertService(t, stateDB, "svc-dup-s", "web-stopped", "stopped")
+
+		rr := doListRequest(t, srv, token, "status=running,running", "10.110.12.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 1, "duplicate running should still return 1 running service (SQL IN deduplicates)")
+		assert.Equal(t, "running", svcs[0]["status"])
+	})
+
+	t.Run("tenant_isolation_with_status_filter", func(t *testing.T) {
+		stateDB, srv, token := setup(t)
+		// Insert services for tenant-1 (the authenticated tenant)
+		insertService(t, stateDB, "svc-iso-t1", "web-t1", "running")
+
+		// Insert a running service for a different tenant directly in DB
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-other", "Other", "other@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES ('svc-iso-t2', 'tenant-other', 'web-other', '', 'running', 'nginx:latest', 8080, '', '', 1000, 1000)`,
+		)
+		require.NoError(t, err)
+
+		rr := doListRequest(t, srv, token, "status=running", "10.110.13.1")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		require.Len(t, svcs, 1, "should only return services for the authenticated tenant")
+		assert.Equal(t, "svc-iso-t1", svcs[0]["id"])
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestSnapshotReveal_Regression
+// (PR #141, issue #112)
+// ---------------------------------------------------------------------------
+
+// seedSnapshotTestDB sets up a tenant, service, and optionally env vars for snapshot tests.
+// Returns the auth token, stateDB, and the service ID used.
+func seedSnapshotTestDB(t *testing.T, withEnvVars bool) (token string, stateDB *sql.DB, serviceID string) {
+	t.Helper()
+	stateDB = testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token = seedAuthenticatedTenant(t, stateDB, masterKey)
+	serviceID = "svc-snap-1"
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at)
+		 VALUES (?, ?, ?, 'running', 'nginx:latest', 8080, ?, ?)`,
+		serviceID, "tenant-1", "snap-test-svc", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	if withEnvVars {
+		now := int64(1000)
+		for k, v := range map[string]string{"DB_HOST": "localhost", "DB_PASSWORD": "secret123"} {
+			encrypted, err := crypto.Encrypt([]byte(v), masterKey)
+			require.NoError(t, err)
+			_, err = stateDB.Exec(
+				`INSERT INTO service_env (service_id, key, value_encrypted, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?)`,
+				serviceID, k, encrypted, now, now,
+			)
+			require.NoError(t, err)
+		}
+	}
+
+	return token, stateDB, serviceID
+}
+
+// createSnapshotViaAPI creates a snapshot via the API and returns the snapshot ID.
+func createSnapshotViaAPI(t *testing.T, srv http.Handler, token, serviceID, name string) string {
+	t.Helper()
+	body := []byte(`{"name":"` + name + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/"+serviceID+"/snapshots", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "snapshot create failed: %s", rr.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+	id, ok := resp["id"].(string)
+	require.True(t, ok, "snapshot response should contain string id")
+	return id
+}
+
+func TestSnapshotReveal_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	t.Run("no_env_vars/reveal_true_returns_empty_or_absent_env_vars", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		snapID := createSnapshotViaAPI(t, srv, token, serviceID, "no-env-snap")
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots/"+snapID+"?reveal=true", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.1.1")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, snapID, resp["id"])
+
+		// env_vars should be absent or an empty map for a snapshot with no env vars
+		if envVars, ok := resp["env_vars"].(map[string]interface{}); ok {
+			assert.Empty(t, envVars, "env_vars should be empty for a snapshot with no env vars")
+		}
+		// else: env_vars omitted entirely, which is also acceptable
+	})
+
+	t.Run("with_env_vars/default_no_reveal_returns_masked", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, true)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		snapID := createSnapshotViaAPI(t, srv, token, serviceID, "env-snap")
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots/"+snapID, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.1.2")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+		envVars, ok := resp["env_vars"].(map[string]interface{})
+		require.True(t, ok, "response should contain env_vars map")
+		assert.Len(t, envVars, 2, "should have 2 env var keys")
+
+		// Values should be masked
+		for key, val := range envVars {
+			assert.Equal(t, "********", val, "env var %q should be masked", key)
+		}
+		// Keys should be present
+		assert.Contains(t, envVars, "DB_HOST")
+		assert.Contains(t, envVars, "DB_PASSWORD")
+	})
+
+	t.Run("with_env_vars/reveal_true_returns_decrypted", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, true)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		snapID := createSnapshotViaAPI(t, srv, token, serviceID, "reveal-snap")
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots/"+snapID+"?reveal=true", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.1.3")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+		envVars, ok := resp["env_vars"].(map[string]interface{})
+		require.True(t, ok, "response should contain env_vars map")
+		assert.Len(t, envVars, 2, "should have 2 env vars")
+		assert.Equal(t, "localhost", envVars["DB_HOST"], "DB_HOST should be decrypted")
+		assert.Equal(t, "secret123", envVars["DB_PASSWORD"], "DB_PASSWORD should be decrypted")
+	})
+
+	t.Run("not_found/returns_404_regardless_of_reveal", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		for _, url := range []string{
+			"/v1/snapshots/nonexistent-snap-id",
+			"/v1/snapshots/nonexistent-snap-id?reveal=true",
+		} {
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-Real-Ip", "10.112.1.4")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusNotFound, rr.Code,
+				"GET %s should return 404, got %d: %s", url, rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("reveal_false_explicit/behaves_same_as_no_reveal", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, true)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		snapID := createSnapshotViaAPI(t, srv, token, serviceID, "reveal-false-snap")
+
+		// Request with reveal=false
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots/"+snapID+"?reveal=false", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.1.5")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+		envVars, ok := resp["env_vars"].(map[string]interface{})
+		require.True(t, ok, "response should contain env_vars map")
+
+		// Should be masked, same as default (no reveal param)
+		for key, val := range envVars {
+			assert.Equal(t, "********", val, "env var %q should be masked with reveal=false", key)
+		}
+	})
+
+	t.Run("reveal_true/produces_audit_log", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, true)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		snapID := createSnapshotViaAPI(t, srv, token, serviceID, "audit-snap")
+
+		logBuf := captureLog(t)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots/"+snapID+"?reveal=true", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.1.6")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		logOutput := logBuf.String()
+		assert.Contains(t, logOutput, "AUDIT:")
+		assert.Contains(t, logOutput, "action=snapshot.env.revealed")
+		assert.Contains(t, logOutput, "tenant=tenant-1")
+		assert.Contains(t, logOutput, "snapshot="+snapID)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestSnapshotListFilter_Regression
+// (PR #142, issue #113)
+// ---------------------------------------------------------------------------
+
+// insertSnapshotDirect inserts a snapshot row directly into the database (bypassing Docker/API).
+func insertSnapshotDirect(t *testing.T, stateDB *sql.DB, id, tenantID, serviceID, name string, createdAt int64) {
+	t.Helper()
+	imageRef := "127.0.0.1:5000/snapshots/" + tenantID + ":" + id
+	_, err := stateDB.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		id, tenantID, serviceID, name, imageRef, createdAt,
+	)
+	require.NoError(t, err)
+}
+
+func TestSnapshotListFilter_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	t.Run("filter_by_service_id", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, false)
+
+		// Create a second service
+		svc2ID := "svc-snap-2"
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at)
+			 VALUES (?, ?, ?, 'running', 'redis:latest', 6379, ?, ?)`,
+			svc2ID, "tenant-1", "snap-test-svc-2", 1000, 1000,
+		)
+		require.NoError(t, err)
+
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		// Create snapshots on both services
+		createSnapshotViaAPI(t, srv, token, serviceID, "svc1-snap")
+		createSnapshotViaAPI(t, srv, token, svc2ID, "svc2-snap")
+
+		// Filter by service_id=svc-snap-1
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?service_id="+serviceID, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.1")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var snaps []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&snaps))
+		require.Len(t, snaps, 1, "should return only snapshots for the filtered service")
+		assert.Equal(t, serviceID, snaps[0]["service_id"])
+	})
+
+	t.Run("filter_by_name_partial_match", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		createSnapshotViaAPI(t, srv, token, serviceID, "prod-backup-daily")
+		createSnapshotViaAPI(t, srv, token, serviceID, "staging-backup-daily")
+		createSnapshotViaAPI(t, srv, token, serviceID, "dev-snapshot")
+
+		// Filter by name containing "backup"
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?name=backup", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.2")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var snaps []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&snaps))
+		require.Len(t, snaps, 2, "should return 2 snapshots matching 'backup'")
+
+		for _, snap := range snaps {
+			name := snap["name"].(string)
+			assert.Contains(t, name, "backup", "each returned snapshot name should contain 'backup'")
+		}
+	})
+
+	t.Run("filter_by_since_unix_timestamp", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+
+		// Directly insert snapshots with specific timestamps to avoid time.Sleep
+		now := int64(2000000)
+		insertSnapshotDirect(t, stateDB, "old-snap", "tenant-1", "svc-snap-1", "old-snapshot", now-1000)
+		insertSnapshotDirect(t, stateDB, "new-snap", "tenant-1", "svc-snap-1", "new-snapshot", now)
+
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		// Filter for snapshots since now-500 (should exclude the old one)
+		sinceVal := strconv.FormatInt(now-500, 10)
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?since="+sinceVal, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.3")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var snaps []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&snaps))
+		require.Len(t, snaps, 1, "should return only the newer snapshot")
+		assert.Equal(t, "new-snap", snaps[0]["id"])
+	})
+
+	t.Run("combined_filters_service_id_and_since", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+
+		// Create a second service
+		svc2ID := "svc-snap-2"
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at)
+			 VALUES (?, ?, ?, 'running', 'redis:latest', 6379, ?, ?)`,
+			svc2ID, "tenant-1", "snap-test-svc-2", 1000, 1000,
+		)
+		require.NoError(t, err)
+
+		now := int64(3000000)
+		// svc1: old and new
+		insertSnapshotDirect(t, stateDB, "s1-old", "tenant-1", "svc-snap-1", "s1-old-snap", now-2000)
+		insertSnapshotDirect(t, stateDB, "s1-new", "tenant-1", "svc-snap-1", "s1-new-snap", now)
+		// svc2: new
+		insertSnapshotDirect(t, stateDB, "s2-new", "tenant-1", svc2ID, "s2-new-snap", now)
+
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		// Filter by service_id=svc-snap-1 AND since=now-500
+		sinceVal := strconv.FormatInt(now-500, 10)
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?service_id=svc-snap-1&since="+sinceVal, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.4")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var snaps []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&snaps))
+		require.Len(t, snaps, 1, "should return only svc1 new snapshot")
+		assert.Equal(t, "s1-new", snaps[0]["id"])
+		assert.Equal(t, "svc-snap-1", snaps[0]["service_id"])
+	})
+
+	t.Run("invalid_since_negative_returns_400", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?since=-1", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.5")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"negative since value should return 400: %s", rr.Body.String())
+	})
+
+	t.Run("invalid_since_non_numeric_returns_400", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?since=not-a-number", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.6")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code,
+			"non-numeric since value should return 400: %s", rr.Body.String())
+	})
+
+	t.Run("no_filters_returns_all_snapshots", func(t *testing.T) {
+		token, stateDB, serviceID := seedSnapshotTestDB(t, false)
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		createSnapshotViaAPI(t, srv, token, serviceID, "snap-a")
+		createSnapshotViaAPI(t, srv, token, serviceID, "snap-b")
+		createSnapshotViaAPI(t, srv, token, serviceID, "snap-c")
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.7")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var snaps []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&snaps))
+		assert.Len(t, snaps, 3, "should return all 3 snapshots when no filters applied")
+	})
+
+	t.Run("pagination_works_with_filters", func(t *testing.T) {
+		token, stateDB, _ := seedSnapshotTestDB(t, false)
+
+		// Insert 5 snapshots with the same prefix in their name
+		now := int64(4000000)
+		for i := 0; i < 5; i++ {
+			id := "page-snap-" + strconv.Itoa(i)
+			name := "filtered-snap-" + strconv.Itoa(i)
+			insertSnapshotDirect(t, stateDB, id, "tenant-1", "svc-snap-1", name, now+int64(i))
+		}
+
+		srv := NewServer(ServerConfig{
+			Store:     &db.Store{StateDB: stateDB},
+			MasterKey: masterKey,
+			DevMode:   true,
+			Docker:    &testutil.MockDockerClient{},
+		})
+
+		// Request page 1: limit=2, offset=0, with name filter
+		req := httptest.NewRequest(http.MethodGet, "/v1/snapshots?name=filtered&limit=2&offset=0", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Real-Ip", "10.112.2.8")
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var page1 []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&page1))
+		assert.Len(t, page1, 2, "page 1 should have 2 results")
+
+		// Request page 2: limit=2, offset=2
+		req2 := httptest.NewRequest(http.MethodGet, "/v1/snapshots?name=filtered&limit=2&offset=2", nil)
+		req2.Header.Set("Authorization", "Bearer "+token)
+		req2.Header.Set("X-Real-Ip", "10.112.2.9")
+
+		rr2 := httptest.NewRecorder()
+		srv.ServeHTTP(rr2, req2)
+
+		require.Equal(t, http.StatusOK, rr2.Code, "body: %s", rr2.Body.String())
+
+		var page2 []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr2.Body).Decode(&page2))
+		assert.Len(t, page2, 2, "page 2 should have 2 results")
+
+		// Request page 3: limit=2, offset=4
+		req3 := httptest.NewRequest(http.MethodGet, "/v1/snapshots?name=filtered&limit=2&offset=4", nil)
+		req3.Header.Set("Authorization", "Bearer "+token)
+		req3.Header.Set("X-Real-Ip", "10.112.2.10")
+
+		rr3 := httptest.NewRecorder()
+		srv.ServeHTTP(rr3, req3)
+
+		require.Equal(t, http.StatusOK, rr3.Code, "body: %s", rr3.Body.String())
+
+		var page3 []map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr3.Body).Decode(&page3))
+		assert.Len(t, page3, 1, "page 3 should have 1 result (last page)")
+
+		// Verify no overlap between pages
+		allIDs := make(map[string]bool)
+		for _, snap := range page1 {
+			allIDs[snap["id"].(string)] = true
+		}
+		for _, snap := range page2 {
+			id := snap["id"].(string)
+			assert.False(t, allIDs[id], "page 2 snapshot %s should not overlap with page 1", id)
+			allIDs[id] = true
+		}
+		for _, snap := range page3 {
+			id := snap["id"].(string)
+			assert.False(t, allIDs[id], "page 3 snapshot %s should not overlap with earlier pages", id)
+			allIDs[id] = true
+		}
+		assert.Len(t, allIDs, 5, "all 5 snapshots should be returned across 3 pages")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestMeteringAPI_Regression
+// (PR #143, metering API)
+// ---------------------------------------------------------------------------
+
+// Regression: omitting the period param defaults to "daily" and returns 200.
+func TestMeteringAPI_Regression_MissingPeriodDefaults(t *testing.T) {
+	regLimiter.resetForTest()
+	t.Cleanup(regLimiter.resetForTest)
+
+	stateDB := testutil.NewStateDB(t)
+	meteringDB := testutil.NewMeteringDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	srv := NewServer(ServerConfig{
+		Store:         &db.Store{StateDB: stateDB, MeteringDB: meteringDB},
+		MasterKey:     masterKey,
+		DevMode:       true,
+		MeteringStore: metering.NewStore(meteringDB),
+	})
+
+	// No period param — should default to "daily" and return 200
+	req := httptest.NewRequest(http.MethodGet, "/v1/tenant/usage/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Real-Ip", "10.134.1.1")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code,
+		"missing period should default to daily and return 200, got body: %s", rr.Body.String())
+}
+
+// Regression: invalid period value returns 400.
+func TestMeteringAPI_Regression_InvalidPeriodReturns400(t *testing.T) {
+	regLimiter.resetForTest()
+	t.Cleanup(regLimiter.resetForTest)
+
+	stateDB := testutil.NewStateDB(t)
+	meteringDB := testutil.NewMeteringDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	srv := NewServer(ServerConfig{
+		Store:         &db.Store{StateDB: stateDB, MeteringDB: meteringDB},
+		MasterKey:     masterKey,
+		DevMode:       true,
+		MeteringStore: metering.NewStore(meteringDB),
+	})
+
+	for _, period := range []string{"weekly", "monthly", "minute", "HOURLY", ""} {
+		if period == "" {
+			continue // empty defaults to "daily", which is valid
+		}
+		t.Run("period="+period, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/tenant/usage/metrics?period="+period, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-Real-Ip", "10.134.2.1")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, http.StatusBadRequest, rr.Code,
+				"period=%q should return 400", period)
+			assert.Contains(t, rr.Body.String(), "period must be",
+				"error body should indicate valid periods")
+		})
+	}
+}
+
+// Regression: valid request returns 200 with a JSON metrics array.
+func TestMeteringAPI_Regression_ValidRequestReturnsMetrics(t *testing.T) {
+	regLimiter.resetForTest()
+	t.Cleanup(regLimiter.resetForTest)
+
+	stateDB := testutil.NewStateDB(t)
+	meteringDB := testutil.NewMeteringDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Seed usage events for two different hours
+	h1 := time.Date(2026, 3, 20, 10, 15, 0, 0, time.UTC).Unix()
+	h2 := time.Date(2026, 3, 20, 11, 30, 0, 0, time.UTC).Unix()
+	for i, ts := range []int64{h1, h2} {
+		_, err := meteringDB.Exec(
+			`INSERT INTO usage_events (id, tenant_id, service_id, event_type, cpu_seconds, memory_mb_seconds, network_ingress_bytes, network_egress_bytes, recorded_at)
+			 VALUES (?, ?, ?, 'sample', 5.0, 50.0, 100, 200, ?)`,
+			"reg-evt-"+strconv.Itoa(i), "tenant-1", "svc-1", ts,
+		)
+		require.NoError(t, err)
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:         &db.Store{StateDB: stateDB, MeteringDB: meteringDB},
+		MasterKey:     masterKey,
+		DevMode:       true,
+		MeteringStore: metering.NewStore(meteringDB),
+	})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/tenant/usage/metrics?period=hourly&since=2026-03-20T10:00:00Z&until=2026-03-20T12:00:00Z", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Real-Ip", "10.134.3.1")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var metrics []metering.Metric
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&metrics))
+	assert.Len(t, metrics, 2, "should return two hourly buckets")
+	assert.Equal(t, "2026-03-20T10:00:00Z", metrics[0].Timestamp)
+	assert.Equal(t, "2026-03-20T11:00:00Z", metrics[1].Timestamp)
+}
+
+// Regression: service-level metrics for a service belonging to a different
+// tenant must return 404 (tenant isolation at the API layer).
+func TestMeteringAPI_Regression_ServiceMetrics_WrongTenant404(t *testing.T) {
+	regLimiter.resetForTest()
+	t.Cleanup(regLimiter.resetForTest)
+
+	stateDB := testutil.NewStateDB(t)
+	meteringDB := testutil.NewMeteringDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey) // creates tenant-1
+
+	// Create a second tenant and its service
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+		"tenant-2", "Other Tenant", "other@example.com",
+	)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-other-tenant", "tenant-2", "web", "running", "nginx:latest", 8080, "", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	// Seed metering data for tenant-2's service
+	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC).Unix()
+	_, err = meteringDB.Exec(
+		`INSERT INTO usage_events (id, tenant_id, service_id, event_type, cpu_seconds, memory_mb_seconds, network_ingress_bytes, network_egress_bytes, recorded_at)
+		 VALUES (?, ?, ?, 'sample', 99.0, 999.0, 9999, 9999, ?)`,
+		"reg-cross-evt", "tenant-2", "svc-other-tenant", ts,
+	)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:         &db.Store{StateDB: stateDB, MeteringDB: meteringDB},
+		MasterKey:     masterKey,
+		DevMode:       true,
+		MeteringStore: metering.NewStore(meteringDB),
+	})
+
+	// Tenant-1 tries to access tenant-2's service metrics
+	req := httptest.NewRequest(http.MethodGet, "/v1/services/svc-other-tenant/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Real-Ip", "10.134.4.1")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code,
+		"accessing another tenant's service metrics should return 404")
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestQuotaUpdate_Regression
+// (PR #145, issue #136)
+// ---------------------------------------------------------------------------
+
+func TestQuotaUpdate_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+	const bootstrapToken = "test-bootstrap-token-quota-update"
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	newServer := func(t *testing.T, tokens []string) (*Server, *sql.DB) {
+		t.Helper()
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-quota", "Quota Tenant", "quota@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-quota")
+		require.NoError(t, err)
+
+		srv := NewServer(ServerConfig{
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: tokens,
+		})
+		return srv, stateDB
+	}
+
+	t.Run("valid update with bootstrap token succeeds 200", func(t *testing.T) {
+		srv, stateDB := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":10,"max_databases":5}`)
+		req := quotaRequest("10.136.1.1", "tenant-quota", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp QuotaUpdateResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, "tenant-quota", resp.TenantID)
+		assert.Equal(t, 10, resp.MaxServices)
+		assert.Equal(t, 5, resp.MaxDatabases)
+
+		// Verify persistence
+		var maxSvc, maxDB int
+		err := stateDB.QueryRow(`SELECT max_services, max_databases FROM tenant_quotas WHERE tenant_id = ?`, "tenant-quota").Scan(&maxSvc, &maxDB)
+		require.NoError(t, err)
+		assert.Equal(t, 10, maxSvc)
+		assert.Equal(t, 5, maxDB)
+	})
+
+	t.Run("missing bootstrap token returns 401", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":10}`)
+		req := quotaRequest("10.136.1.2", "tenant-quota", "", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	})
+
+	t.Run("wrong bootstrap token returns 401", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":10}`)
+		req := quotaRequest("10.136.1.3", "tenant-quota", "wrong-token", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	})
+
+	t.Run("non-existent tenant returns 404", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":10}`)
+		req := quotaRequest("10.136.1.4", "does-not-exist", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNotFound, rr.Code)
+	})
+
+	t.Run("zero value for quota field returns 400", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":0}`)
+		req := quotaRequest("10.136.1.5", "tenant-quota", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("negative value for quota field returns 400", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":-5}`)
+		req := quotaRequest("10.136.1.6", "tenant-quota", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("value exceeding cap returns 400", func(t *testing.T) {
+		srv, _ := newServer(t, []string{bootstrapToken})
+
+		body := []byte(`{"max_services":999}`)
+		req := quotaRequest("10.136.1.7", "tenant-quota", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("partial update only changes provided fields", func(t *testing.T) {
+		srv, stateDB := newServer(t, []string{bootstrapToken})
+
+		// Set initial values
+		_, err := stateDB.Exec(`UPDATE tenant_quotas SET max_services = 7, max_databases = 4 WHERE tenant_id = ?`, "tenant-quota")
+		require.NoError(t, err)
+
+		// Only update max_services, leave max_databases unchanged
+		body := []byte(`{"max_services":15}`)
+		req := quotaRequest("10.136.1.8", "tenant-quota", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp QuotaUpdateResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, 15, resp.MaxServices, "max_services should be updated")
+		assert.Equal(t, 4, resp.MaxDatabases, "max_databases should remain unchanged")
+	})
+
+	t.Run("no bootstrap tokens configured returns 503", func(t *testing.T) {
+		srv, _ := newServer(t, nil)
+
+		body := []byte(`{"max_services":10}`)
+		req := quotaRequest("10.136.1.9", "tenant-quota", "anything", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestRecoveryKeyringFull_Regression
+// (PR #147, issue #138)
+// ---------------------------------------------------------------------------
+
+func TestRecoveryKeyringFull_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+	const bootstrapToken = "test-bootstrap-token-keyring-full"
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// newRecoverServer creates a fresh in-memory DB with an active tenant and
+	// the specified number of existing API keys (all non-revoked).
+	newRecoverServer := func(t *testing.T, numKeys int, withExpiredKeys bool) (*Server, *sql.DB) {
+		t.Helper()
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-keyring", "Keyring Tenant", "keyring@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-keyring")
+		require.NoError(t, err)
+
+		// Seed keys. If withExpiredKeys is true, the first key is expired.
+		for i := 0; i < numKeys; i++ {
+			keyID := "key-" + strconv.Itoa(i)
+			prefix := "pref" + strconv.Itoa(i) + "xxx"
+			if len(prefix) > 8 {
+				prefix = prefix[:8]
+			}
+			var expiresAt interface{}
+			if withExpiredKeys && i == 0 {
+				// Make the first key expired (created long ago, expired 1 hour ago)
+				expiresAt = int64(1000) // expires_at in the past
+			}
+			_, err = stateDB.Exec(
+				`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				keyID, "tenant-keyring", "key-"+strconv.Itoa(i), prefix, "hash-"+strconv.Itoa(i),
+				int64(100+i), // created_at increments so we know which is "oldest"
+				expiresAt,
+			)
+			require.NoError(t, err)
+		}
+
+		srv := NewServer(ServerConfig{
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
+		})
+		return srv, stateDB
+	}
+
+	t.Run("recovery when keyring has room succeeds normally 201", func(t *testing.T) {
+		srv, _ := newRecoverServer(t, 5, false) // 5 keys, well under maxKeysPerTenant (20)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "keyring@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.138.1.1", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.ID)
+		assert.NotEmpty(t, resp.Key)
+		assert.Empty(t, resp.Warning, "no warning when keyring has room")
+		assert.Empty(t, resp.RevokedKeyID, "no revoked_key_id when keyring has room")
+	})
+
+	t.Run("recovery when keyring full with expired keys auto-revokes oldest expired", func(t *testing.T) {
+		srv, stateDB := newRecoverServer(t, maxKeysPerTenant, true) // full keyring, key-0 is expired
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "keyring@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.138.1.2", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.Key)
+		assert.Contains(t, resp.Warning, "revoked oldest key", "warning should mention key revocation")
+		assert.Equal(t, "key-0", resp.RevokedKeyID, "should have revoked the oldest expired key (key-0)")
+
+		// Verify key-0 was actually revoked in DB
+		var revokedAt *int64
+		err := stateDB.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = 'key-0'`).Scan(&revokedAt)
+		require.NoError(t, err)
+		assert.NotNil(t, revokedAt, "key-0 should have revoked_at set")
+	})
+
+	t.Run("recovery when keyring full with no expired keys auto-revokes oldest active", func(t *testing.T) {
+		srv, stateDB := newRecoverServer(t, maxKeysPerTenant, false) // full keyring, no expired keys
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "keyring@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.138.1.3", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+		var resp KeyRecoverResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.NotEmpty(t, resp.Key)
+		assert.Contains(t, resp.Warning, "revoked oldest key", "warning should mention key revocation")
+		assert.Equal(t, "key-0", resp.RevokedKeyID, "should have revoked the oldest key (key-0)")
+
+		// Verify key-0 was revoked
+		var revokedAt *int64
+		err := stateDB.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = 'key-0'`).Scan(&revokedAt)
+		require.NoError(t, err)
+		assert.NotNil(t, revokedAt, "key-0 should have revoked_at set")
+	})
+
+	t.Run("response includes warning field when auto-revoke happened", func(t *testing.T) {
+		srv, _ := newRecoverServer(t, maxKeysPerTenant, false)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "keyring@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.138.1.4", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		warning, ok := resp["warning"]
+		assert.True(t, ok, "response should include 'warning' field")
+		assert.NotEmpty(t, warning, "warning should not be empty when auto-revoke happened")
+	})
+
+	t.Run("response includes revoked_key_id when auto-revoke happened", func(t *testing.T) {
+		srv, _ := newRecoverServer(t, maxKeysPerTenant, true)
+
+		body, _ := json.Marshal(KeyRecoverRequest{
+			Email:          "keyring@example.com",
+			BootstrapToken: bootstrapToken,
+		})
+		req := recoverRequest("10.138.1.5", body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		revokedID, ok := resp["revoked_key_id"]
+		assert.True(t, ok, "response should include 'revoked_key_id' field")
+		assert.NotEmpty(t, revokedID, "revoked_key_id should not be empty when auto-revoke happened")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestDeploymentCancel_Regression
+// (PR #148, issue #139)
+// ---------------------------------------------------------------------------
+
+func TestDeploymentCancel_Regression(t *testing.T) {
+	regLimiter.resetForTest()
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// newCancelServerWithToken creates a fresh server with a service and deploy store,
+	// and returns the auth token for making authenticated requests.
+	newCancelServerWithToken := func(t *testing.T) (*Server, *sql.DB, *deployments.Store, string) {
+		t.Helper()
+		stateDB := testutil.NewStateDB(t)
+		token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			"svc-cancel", "tenant-1", "web", "", "running", "nginx:latest", 8080, "ctr-1", "", 1000, 1000,
+		)
+		require.NoError(t, err)
+
+		deployStore := deployments.NewStore(stateDB)
+
+		srv := NewServer(ServerConfig{
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			Docker:          &testutil.MockDockerClient{},
+			DeploymentStore: deployStore,
+		})
+
+		return srv, stateDB, deployStore, token
+	}
+
+	t.Run("cancel queued deployment succeeds 200", func(t *testing.T) {
+		srv, _, deployStore, token := newCancelServerWithToken(t)
+
+		// Insert a pending deployment.
+		require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+			ID:        "deploy-queued",
+			ServiceID: "svc-cancel",
+			TenantID:  "tenant-1",
+			Image:     "nginx:latest",
+			Status:    deployments.StatusPending,
+			Trigger:   deployments.TriggerManual,
+			StartedAt: 1000,
+			CreatedAt: 1000,
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/deploy-queued/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, "cancelled", resp["status"])
+	})
+
+	t.Run("cancel completed deployment returns 409", func(t *testing.T) {
+		srv, _, deployStore, token := newCancelServerWithToken(t)
+
+		require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+			ID:        "deploy-done",
+			ServiceID: "svc-cancel",
+			TenantID:  "tenant-1",
+			Image:     "nginx:latest",
+			Status:    deployments.StatusRunning,
+			Trigger:   deployments.TriggerManual,
+			StartedAt: 1000,
+			CreatedAt: 1000,
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/deploy-done/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusConflict, rr.Code, "completed deployment should return 409")
+	})
+
+	t.Run("cancel already-cancelled deployment returns 409", func(t *testing.T) {
+		srv, _, deployStore, token := newCancelServerWithToken(t)
+
+		require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+			ID:        "deploy-already-cancelled",
+			ServiceID: "svc-cancel",
+			TenantID:  "tenant-1",
+			Image:     "nginx:latest",
+			Status:    deployments.StatusCancelled,
+			Trigger:   deployments.TriggerManual,
+			StartedAt: 1000,
+			CreatedAt: 1000,
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/deploy-already-cancelled/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusConflict, rr.Code, "already-cancelled deployment should return 409")
+	})
+
+	t.Run("cancel deployment that does not exist returns 404", func(t *testing.T) {
+		srv, _, _, token := newCancelServerWithToken(t)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/nonexistent/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNotFound, rr.Code, "nonexistent deployment should return 404")
+	})
+
+	t.Run("cancel deployment belonging to different service returns 404", func(t *testing.T) {
+		srv, stateDB, deployStore, token := newCancelServerWithToken(t)
+
+		// Create another service.
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			"svc-other", "tenant-1", "other", "", "running", "nginx:latest", 8081, "", "", 1000, 1000,
+		)
+		require.NoError(t, err)
+
+		// Deployment belongs to svc-other, not svc-cancel.
+		require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+			ID:        "deploy-wrong-svc",
+			ServiceID: "svc-other",
+			TenantID:  "tenant-1",
+			Image:     "nginx:latest",
+			Status:    deployments.StatusPending,
+			Trigger:   deployments.TriggerManual,
+			StartedAt: 1000,
+			CreatedAt: 1000,
+		}))
+
+		// Try to cancel via svc-cancel path.
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/deploy-wrong-svc/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNotFound, rr.Code, "deployment belonging to different service should return 404")
+	})
+
+	t.Run("cancel deployment for non-existent service returns 404", func(t *testing.T) {
+		srv, _, _, token := newCancelServerWithToken(t)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/services/does-not-exist/deployments/any-deploy/cancel", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNotFound, rr.Code, "non-existent service should return 404")
+	})
 }
 
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {

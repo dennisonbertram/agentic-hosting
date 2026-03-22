@@ -3,6 +3,7 @@ package gc
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -250,6 +251,131 @@ func TestCollectOnce_SkipsNetworksWithActiveContainers(t *testing.T) {
 
 	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect from busy networks")
 	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove busy networks")
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — TestNetworkCleanup_Regression
+// ---------------------------------------------------------------------------
+
+// Regression: non-ah-tenant networks must never be removed by GC.
+// Only networks matching the "ah-tenant-*" prefix are candidates.
+func TestNetworkCleanup_Regression_NonTenantNetworksPreserved(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-bridge", Name: "bridge", Containers: 0},
+				{ID: "net-host", Name: "host", Containers: 0},
+				{ID: "net-traefik", Name: "traefik-public", Containers: 1},
+				{ID: "net-custom", Name: "my-custom-network", Containers: 0},
+				{ID: "net-ah-db", Name: "ah-database-net", Containers: 0}, // has "ah-" but NOT "ah-tenant-"
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect any non-tenant networks")
+	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove any non-tenant networks")
+}
+
+// Regression: ah-tenant-* networks with zero active services (0 or 1 container
+// where the single container is Traefik) must be removed.
+func TestNetworkCleanup_Regression_OrphanedTenantNetworksRemoved(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				// 0 containers — clearly orphaned
+				{ID: "net-empty", Name: "ah-tenant-dead1", Containers: 0},
+				// 1 container — only Traefik remains
+				{ID: "net-traefik-only", Name: "ah-tenant-dead2", Containers: 1},
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	// Both networks should be cleaned up
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-dead1")
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-dead2")
+	assert.Len(t, mock.RemoveNetworkCalls, 2)
+
+	// Traefik should be disconnected from both
+	assert.Len(t, mock.NetworkDisconnectCalls, 2)
+	for _, call := range mock.NetworkDisconnectCalls {
+		assert.Equal(t, "paas-traefik", call[1], "should disconnect paas-traefik container")
+	}
+}
+
+// Regression: networks with containers connected should have Traefik
+// disconnected before removal. Verify the disconnect happens for each network.
+func TestNetworkCleanup_Regression_DisconnectBeforeRemove(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+
+	disconnectOrder := make([]string, 0)
+	removeOrder := make([]string, 0)
+
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-1", Name: "ah-tenant-cleanup1", Containers: 1},
+			}, nil
+		},
+		NetworkDisconnectFn: func(ctx context.Context, networkID, containerID string) error {
+			disconnectOrder = append(disconnectOrder, networkID)
+			return nil
+		},
+		RemoveNetworkFn: func(ctx context.Context, networkID string) error {
+			removeOrder = append(removeOrder, networkID)
+			return nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	require.Len(t, disconnectOrder, 1, "disconnect should be called once")
+	require.Len(t, removeOrder, 1, "remove should be called once")
+	assert.Equal(t, "ah-tenant-cleanup1", disconnectOrder[0])
+	assert.Equal(t, "ah-tenant-cleanup1", removeOrder[0])
+}
+
+// Regression: an error on disconnect should not prevent cleanup of other
+// networks. GC must be resilient and continue processing remaining networks.
+func TestNetworkCleanup_Regression_DisconnectErrorContinues(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-fail", Name: "ah-tenant-fail", Containers: 1},
+				{ID: "net-ok", Name: "ah-tenant-ok", Containers: 0},
+			}, nil
+		},
+		NetworkDisconnectFn: func(ctx context.Context, networkID, containerID string) error {
+			if networkID == "ah-tenant-fail" {
+				return fmt.Errorf("simulated disconnect error")
+			}
+			return nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err, "GC should not return error even if disconnect fails")
+
+	// Both networks should still be attempted for removal.
+	// ah-tenant-fail's RemoveNetwork may fail (since disconnect failed and Traefik
+	// might still be connected), but ah-tenant-ok should definitely succeed.
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-ok",
+		"should still process ah-tenant-ok despite ah-tenant-fail disconnect error")
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-fail",
+		"should still attempt removal of ah-tenant-fail even after disconnect error")
 }
 
 func seedService(t *testing.T, stateDB *sql.DB, svcID, tenantID, containerID string) {

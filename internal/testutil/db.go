@@ -19,9 +19,12 @@ var dbCounter atomic.Int64
 // The returned *sql.DB is closed automatically when the test ends.
 func NewStateDB(t *testing.T) *sql.DB {
 	t.Helper()
-	// Use shared cache so all connections see the same in-memory database.
-	// Without this, each connection from the pool gets its own empty database.
-	sqlDB, err := sql.Open("sqlite3", "file::memory:?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000")
+	// Use a unique name per test so parallel tests don't share the same
+	// in-memory database. Shared cache is still required so all connections
+	// within a single test see the same data.
+	name := fmt.Sprintf("state_%d", dbCounter.Add(1))
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000", name)
+	sqlDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		t.Fatalf("testutil.NewStateDB: open: %v", err)
 	}

@@ -19,6 +19,18 @@ type MockDockerClient struct {
 	ConnectNetworkFn    func(ctx context.Context, networkID, containerID string) error
 	ConnectNetworkCalls [][2]string // [networkID, containerID] pairs
 
+	// NetworkDisconnect
+	NetworkDisconnectFn    func(ctx context.Context, networkID, containerID string) error
+	NetworkDisconnectCalls [][2]string // [networkID, containerID] pairs
+
+	// NetworkList
+	NetworkListFn    func(ctx context.Context) ([]docker.NetworkInfo, error)
+	NetworkListCalls int
+
+	// RemoveNetwork
+	RemoveNetworkFn    func(ctx context.Context, networkID string) error
+	RemoveNetworkCalls []string // network IDs removed
+
 	// RunContainer
 	RunContainerFn    func(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *docker.ResourceLimits) (string, error)
 	RunContainerCalls int
@@ -123,6 +135,30 @@ func (m *MockDockerClient) ConnectNetwork(ctx context.Context, networkID, contai
 	m.ConnectNetworkCalls = append(m.ConnectNetworkCalls, [2]string{networkID, containerID})
 	if m.ConnectNetworkFn != nil {
 		return m.ConnectNetworkFn(ctx, networkID, containerID)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) NetworkDisconnect(ctx context.Context, networkID, containerID string) error {
+	m.NetworkDisconnectCalls = append(m.NetworkDisconnectCalls, [2]string{networkID, containerID})
+	if m.NetworkDisconnectFn != nil {
+		return m.NetworkDisconnectFn(ctx, networkID, containerID)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) NetworkList(ctx context.Context) ([]docker.NetworkInfo, error) {
+	m.NetworkListCalls++
+	if m.NetworkListFn != nil {
+		return m.NetworkListFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockDockerClient) RemoveNetwork(ctx context.Context, networkID string) error {
+	m.RemoveNetworkCalls = append(m.RemoveNetworkCalls, networkID)
+	if m.RemoveNetworkFn != nil {
+		return m.RemoveNetworkFn(ctx, networkID)
 	}
 	return nil
 }

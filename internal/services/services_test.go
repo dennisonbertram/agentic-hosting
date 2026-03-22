@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -486,6 +487,48 @@ func TestCreateSetsDNSLabel(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "", svc.DNSLabel, "dns_label should be empty when baseDomain is not set")
 	})
+}
+
+func TestStopAllForTenant_DisconnectsAndRemovesTenantNetwork(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	// Insert a running service for tenant-1
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, 'svc', 'running', 'nginx', 8080, 'ctr-abc', 1, 1)`,
+		"svc-1", "tenant-1",
+	)
+	require.NoError(t, err)
+
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-t1", Name: "ah-tenant-tenant-1", Containers: 1},
+			}, nil
+		},
+	}
+
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
+	mgr.StopAllForTenant(context.Background(), "tenant-1")
+
+	// Verify container was stopped and removed
+	assert.Contains(t, mock.StopContainerCalls, "ctr-abc", "container should be stopped")
+	assert.Contains(t, mock.RemoveContainerCalls, "ctr-abc", "container should be removed")
+
+	// Verify Traefik was disconnected from the tenant network
+	found := false
+	for _, call := range mock.NetworkDisconnectCalls {
+		if call[0] == "ah-tenant-tenant-1" && call[1] == "paas-traefik" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "Traefik should be disconnected from tenant network")
+
+	// Verify network was removed
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-tenant-1", "tenant network should be removed")
 }
 
 func seedTenant(t *testing.T, db *sql.DB) {

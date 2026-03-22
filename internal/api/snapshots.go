@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
@@ -55,7 +56,20 @@ func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snaps, err := s.snapshotManager.List(r.Context(), tenantID, limit, offset)
+	// Parse optional filter query parameters.
+	var filter snapshots.ListFilter
+	filter.ServiceID = r.URL.Query().Get("service_id")
+	filter.Name = r.URL.Query().Get("name")
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		since, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || since < 0 {
+			writeError(w, http.StatusBadRequest, "since must be a non-negative unix timestamp")
+			return
+		}
+		filter.Since = since
+	}
+
+	snaps, err := s.snapshotManager.List(r.Context(), tenantID, limit, offset, &filter)
 	if err != nil {
 		apierr.WriteAPIError(w, err)
 		return

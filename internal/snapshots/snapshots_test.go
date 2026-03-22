@@ -193,7 +193,7 @@ func TestSnapshotList_Empty(t *testing.T) {
 	mgr, _, tenantID, _ := setupTest(t)
 	ctx := context.Background()
 
-	snapshots, err := mgr.List(ctx, tenantID, 100, 0)
+	snapshots, err := mgr.List(ctx, tenantID, 100, 0, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, snapshots, "should return empty slice, not nil")
 	assert.Len(t, snapshots, 0)
@@ -213,7 +213,7 @@ func TestSnapshotList_WithSnapshots(t *testing.T) {
 	snap2, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "snap-2"})
 	require.NoError(t, err)
 
-	snapshots, err := mgr.List(ctx, tenantID, 100, 0)
+	snapshots, err := mgr.List(ctx, tenantID, 100, 0, nil)
 	require.NoError(t, err)
 	require.Len(t, snapshots, 2)
 
@@ -235,17 +235,17 @@ func TestSnapshotList_Pagination(t *testing.T) {
 	}
 
 	// Limit 2, offset 0.
-	snapshots, err := mgr.List(ctx, tenantID, 2, 0)
+	snapshots, err := mgr.List(ctx, tenantID, 2, 0, nil)
 	require.NoError(t, err)
 	assert.Len(t, snapshots, 2)
 
 	// Limit 10, offset 2.
-	snapshots, err = mgr.List(ctx, tenantID, 10, 2)
+	snapshots, err = mgr.List(ctx, tenantID, 10, 2, nil)
 	require.NoError(t, err)
 	assert.Len(t, snapshots, 1)
 
 	// Limit 10, offset 3 (past end).
-	snapshots, err = mgr.List(ctx, tenantID, 10, 3)
+	snapshots, err = mgr.List(ctx, tenantID, 10, 3, nil)
 	require.NoError(t, err)
 	assert.Len(t, snapshots, 0)
 }
@@ -648,4 +648,180 @@ func TestCleanExpired_BothLimitsApplied(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = mgr.Get(ctx, tenantID, "recent-3")
 	assert.NoError(t, err)
+}
+
+// --- List filter tests ---
+
+func TestSnapshotList_FilterByServiceID(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	// Create a second service.
+	svc2ID := "svc-2"
+	_, err := db.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at) VALUES (?, ?, ?, 'running', 'nginx:latest', 8080, ?, ?)`,
+		svc2ID, tenantID, "test-svc-2", time.Now().Unix(), time.Now().Unix(),
+	)
+	require.NoError(t, err)
+
+	now := time.Now().Unix()
+	insertSnapshotWithAge(t, db, "s1-a", tenantID, serviceID, now-300)
+	insertSnapshotWithAge(t, db, "s1-b", tenantID, serviceID, now-200)
+	insertSnapshotWithAge(t, db, "s2-a", tenantID, svc2ID, now-100)
+
+	// Filter by service 1 — should return 2 snapshots.
+	result, err := mgr.List(ctx, tenantID, 100, 0, &ListFilter{ServiceID: serviceID})
+	require.NoError(t, err)
+	assert.Len(t, result, 2)
+	for _, s := range result {
+		assert.Equal(t, serviceID, s.ServiceID)
+	}
+
+	// Filter by service 2 — should return 1 snapshot.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{ServiceID: svc2ID})
+	require.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Equal(t, svc2ID, result[0].ServiceID)
+
+	// Filter by nonexistent service — should return 0.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{ServiceID: "no-such-svc"})
+	require.NoError(t, err)
+	assert.Len(t, result, 0)
+}
+
+func TestSnapshotList_FilterByName(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	// Insert snapshots with distinguishable names.
+	_, err := db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"snap-alpha", tenantID, serviceID, "alpha-deploy", "img:1", now-300,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"snap-beta", tenantID, serviceID, "beta-release", "img:2", now-200,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"snap-gamma", tenantID, serviceID, "alpha-hotfix", "img:3", now-100,
+	)
+	require.NoError(t, err)
+
+	// Substring match "alpha" — should return 2 snapshots.
+	result, err := mgr.List(ctx, tenantID, 100, 0, &ListFilter{Name: "alpha"})
+	require.NoError(t, err)
+	assert.Len(t, result, 2)
+
+	// Substring match "release" — should return 1.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{Name: "release"})
+	require.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "beta-release", result[0].Name)
+
+	// Substring match "nonexistent" — should return 0.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{Name: "nonexistent"})
+	require.NoError(t, err)
+	assert.Len(t, result, 0)
+}
+
+func TestSnapshotList_FilterBySince(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	insertSnapshotWithAge(t, db, "old", tenantID, serviceID, now-1000)
+	insertSnapshotWithAge(t, db, "mid", tenantID, serviceID, now-500)
+	insertSnapshotWithAge(t, db, "new", tenantID, serviceID, now-100)
+
+	// Since = now-600 — should return mid and new.
+	result, err := mgr.List(ctx, tenantID, 100, 0, &ListFilter{Since: now - 600})
+	require.NoError(t, err)
+	assert.Len(t, result, 2)
+
+	// Since = now-50 — should return 0 (all snapshots are older).
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{Since: now - 50})
+	require.NoError(t, err)
+	assert.Len(t, result, 0)
+
+	// Since = now-1100 — should return all 3.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{Since: now - 1100})
+	require.NoError(t, err)
+	assert.Len(t, result, 3)
+}
+
+func TestSnapshotList_FilterCombined(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	// Create a second service.
+	svc2ID := "svc-2"
+	_, err := db.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at) VALUES (?, ?, ?, 'running', 'nginx:latest', 8080, ?, ?)`,
+		svc2ID, tenantID, "test-svc-2", time.Now().Unix(), time.Now().Unix(),
+	)
+	require.NoError(t, err)
+
+	now := time.Now().Unix()
+	// Service 1, old timestamp, name "deploy-v1".
+	_, err = db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"s1-old", tenantID, serviceID, "deploy-v1", "img:1", now-1000,
+	)
+	require.NoError(t, err)
+	// Service 1, recent, name "deploy-v2".
+	_, err = db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"s1-new", tenantID, serviceID, "deploy-v2", "img:2", now-100,
+	)
+	require.NoError(t, err)
+	// Service 2, recent, name "deploy-v3".
+	_, err = db.Exec(
+		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
+		 VALUES (?, ?, ?, ?, '', ?, '', '{}', 8080, ?)`,
+		"s2-new", tenantID, svc2ID, "deploy-v3", "img:3", now-50,
+	)
+	require.NoError(t, err)
+
+	// Filter: service_id=svc-1 AND name contains "deploy" AND since=now-500.
+	// Should return only s1-new (s1-old is too old, s2-new is wrong service).
+	result, err := mgr.List(ctx, tenantID, 100, 0, &ListFilter{
+		ServiceID: serviceID,
+		Name:      "deploy",
+		Since:     now - 500,
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "s1-new", result[0].ID)
+
+	// Filter: name contains "deploy" AND since=now-500 (no service_id filter).
+	// Should return s1-new and s2-new.
+	result, err = mgr.List(ctx, tenantID, 100, 0, &ListFilter{
+		Name:  "deploy",
+		Since: now - 500,
+	})
+	require.NoError(t, err)
+	assert.Len(t, result, 2)
+}
+
+func TestSnapshotList_NilFilter(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	insertSnapshotWithAge(t, db, "a", tenantID, serviceID, now-200)
+	insertSnapshotWithAge(t, db, "b", tenantID, serviceID, now-100)
+
+	// nil filter should return all snapshots (backward compatible).
+	result, err := mgr.List(ctx, tenantID, 100, 0, nil)
+	require.NoError(t, err)
+	assert.Len(t, result, 2)
 }

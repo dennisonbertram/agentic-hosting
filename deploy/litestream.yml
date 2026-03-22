@@ -1,0 +1,32 @@
+# Litestream replication config for agentic-hosting (ah)
+#
+# Replicates both SQLite databases to an S3-compatible bucket.
+# All credentials are read from environment variables so this file
+# can be checked into version control safely.
+#
+# Usage:
+#   export $(grep -v '^#' /etc/default/litestream | xargs)
+#   litestream replicate -config /etc/litestream.yml
+#
+# See docs/ops/litestream-replication.md for the full runbook.
+
+dbs:
+  - path: /var/lib/ah/ah.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ah.db
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+
+  - path: /var/lib/ah/ah-metering.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ah-metering.db
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}

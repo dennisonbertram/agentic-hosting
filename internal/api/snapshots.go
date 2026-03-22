@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -63,6 +64,12 @@ func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snaps)
 }
 
+// snapshotGetResponse wraps a Snapshot with an optional env_vars field.
+type snapshotGetResponse struct {
+	*snapshots.Snapshot
+	EnvVars map[string]string `json:"env_vars,omitempty"`
+}
+
 func (s *Server) handleSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSnapshotManager(w) {
 		return
@@ -76,7 +83,29 @@ func (s *Server) handleSnapshotGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, snap)
+	reveal := r.URL.Query().Get("reveal") == "true"
+
+	var envVars map[string]string
+	if reveal {
+		envVars, err = s.snapshotManager.RestoreEnvVars(r.Context(), tenantID, snapshotID)
+		if err != nil {
+			apierr.WriteAPIError(w, err)
+			return
+		}
+		keyID := middleware.GetKeyID(r.Context())
+		log.Printf("AUDIT: action=snapshot.env.revealed tenant=%s snapshot=%s api_key=%s", tenantID, snapshotID, keyID)
+	} else {
+		envVars, err = s.snapshotManager.GetEnvKeys(r.Context(), tenantID, snapshotID)
+		if err != nil {
+			apierr.WriteAPIError(w, err)
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, snapshotGetResponse{
+		Snapshot: snap,
+		EnvVars:  envVars,
+	})
 }
 
 func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {

@@ -19,12 +19,13 @@ type HealthResponse struct {
 }
 
 type DetailedHealthResponse struct {
-	Status        string             `json:"status"`
-	Docker        DockerInfo         `json:"docker"`
-	GVisor        GVisorInfo         `json:"gvisor"`
-	Disk          DiskInfo           `json:"disk"`
-	DockerDisk    DiskInfo           `json:"docker_disk"`
-	DockerStorage *DockerStorageInfo `json:"docker_storage,omitempty"`
+	Status          string             `json:"status"`
+	Docker          DockerInfo         `json:"docker"`
+	GVisor          GVisorInfo         `json:"gvisor"`
+	Disk            DiskInfo           `json:"disk"`
+	DockerDisk      DiskInfo           `json:"docker_disk"`
+	DockerStorage   *DockerStorageInfo `json:"docker_storage,omitempty"`
+	TraefikNetworks *int               `json:"traefik_networks,omitempty"`
 }
 
 type DockerInfo struct {
@@ -157,6 +158,30 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 			}
 		} else {
 			log.Printf("WARNING: failed to fetch Docker disk usage: %v", err)
+		}
+	}
+
+	// Count tenant networks connected to Traefik (ah-tenant-* prefix).
+	// Warn at >150, degrade at >200 to surface accumulation early.
+	if s.dockerClient != nil {
+		ctx4, cancel4 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel4()
+		if nets, err := s.dockerClient.NetworkList(ctx4); err == nil {
+			count := 0
+			for _, n := range nets {
+				if len(n.Name) > 10 && n.Name[:10] == "ah-tenant-" {
+					count++
+				}
+			}
+			resp.TraefikNetworks = &count
+			if count > 200 {
+				resp.Status = "degraded"
+				log.Printf("WARNING: traefik network count %d exceeds 200 — degraded", count)
+			} else if count > 150 {
+				log.Printf("WARNING: traefik network count %d approaching limit (>150)", count)
+			}
+		} else {
+			log.Printf("WARNING: failed to list Docker networks for health check: %v", err)
 		}
 	}
 

@@ -207,6 +207,51 @@ func TestCollectOnce_SkipsSnapshotCleanerWhenNil(t *testing.T) {
 	// Should not panic or fail — just skip snapshot cleanup
 }
 
+func TestCollectOnce_RemovesOrphanedNetworks(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-1", Name: "ah-tenant-orphan1", Containers: 0},
+				{ID: "net-2", Name: "ah-tenant-orphan2", Containers: 1}, // only Traefik connected
+				{ID: "net-3", Name: "ah-tenant-active", Containers: 2},  // tenant + Traefik
+				{ID: "net-4", Name: "bridge", Containers: 5},            // not a tenant network
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	// Should disconnect Traefik from orphaned networks
+	assert.Len(t, mock.NetworkDisconnectCalls, 2, "should disconnect Traefik from 2 orphaned networks")
+	// Should remove orphaned networks
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan1")
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan2")
+	// Should NOT remove active or non-tenant networks
+	assert.NotContains(t, mock.RemoveNetworkCalls, "ah-tenant-active")
+	assert.NotContains(t, mock.RemoveNetworkCalls, "bridge")
+}
+
+func TestCollectOnce_SkipsNetworksWithActiveContainers(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-1", Name: "ah-tenant-busy", Containers: 3},
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect from busy networks")
+	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove busy networks")
+}
+
 func seedService(t *testing.T, stateDB *sql.DB, svcID, tenantID, containerID string) {
 	t.Helper()
 	_, err := stateDB.Exec(

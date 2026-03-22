@@ -145,7 +145,26 @@ func (g *GC) collectOnce(ctx context.Context) error {
 		removed += pruned
 	}
 
-	// 5. Snapshot retention — clean expired snapshots by count and age.
+	// 5. Orphaned tenant networks — disconnect Traefik and remove empty ah-tenant-* networks.
+	orphanedNets, netErr := g.findOrphanedNetworks(ctx)
+	if netErr != nil {
+		log.Printf("gc: orphaned network check failed: %v", netErr)
+	} else {
+		for _, net := range orphanedNets {
+			log.Printf("gc: removing orphaned tenant network %s", net.Name)
+			// Disconnect Traefik first (by container name); idempotent if not connected.
+			if disconnErr := g.docker.NetworkDisconnect(ctx, net.Name, "paas-traefik"); disconnErr != nil {
+				log.Printf("gc: failed to disconnect Traefik from network %s: %v", net.Name, disconnErr)
+			}
+			if rmErr := g.docker.RemoveNetwork(ctx, net.Name); rmErr != nil {
+				log.Printf("gc: failed to remove network %s: %v", net.Name, rmErr)
+			} else {
+				removed++
+			}
+		}
+	}
+
+	// 6. Snapshot retention — clean expired snapshots by count and age.
 	if g.snapCleaner != nil {
 		snapRemoved, snapErr := g.snapCleaner.CleanExpired(ctx, g.snapMaxPerService, g.snapMaxAge)
 		if snapErr != nil {
@@ -303,6 +322,31 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	return orphaned, nil
+}
+
+// findOrphanedNetworks lists Docker networks matching the tenant naming pattern
+// (ah-tenant-*) that have 0 non-Traefik containers connected. These are safe to
+// disconnect from Traefik and remove.
+func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
+	networks, err := g.docker.NetworkList(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var orphaned []docker.NetworkInfo
+	for _, net := range networks {
+		if !strings.HasPrefix(net.Name, "ah-tenant-") {
+			continue
+		}
+		// A network with 0 containers is clearly orphaned.
+		// A network with exactly 1 container is orphaned if that container is Traefik
+		// (the only reason Traefik is still connected is because disconnect was missed).
+		// Networks with 2+ containers have active tenant workloads — leave them alone.
+		if net.Containers <= 1 {
+			orphaned = append(orphaned, net)
+		}
+	}
 	return orphaned, nil
 }
 

@@ -896,6 +896,117 @@ func TestPatchService_EmptyBody_Returns400(t *testing.T) {
 	}
 }
 
+// TestServiceList_StatusFilter verifies that GET /v1/services?status=running returns
+// only services matching the requested status, and that invalid status values return 400.
+func TestServiceList_StatusFilter(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Insert services with different statuses.
+	for _, s := range []struct{ id, name, status string }{
+		{"svc-run1", "web1", "running"},
+		{"svc-run2", "web2", "running"},
+		{"svc-stop1", "web3", "stopped"},
+		{"svc-fail1", "web4", "failed"},
+	} {
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			s.id, "tenant-1", s.name, s.status, "nginx:latest", 8080, "", 1000, 1000,
+		)
+		require.NoError(t, err)
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    &testutil.MockDockerClient{},
+	})
+
+	t.Run("filter single status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services?status=running", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 2, "should return only the 2 running services")
+		for _, s := range svcs {
+			assert.Equal(t, "running", s["status"])
+		}
+	})
+
+	t.Run("filter comma-separated statuses", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services?status=running,stopped", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 3, "should return running + stopped = 3")
+	})
+
+	t.Run("no filter returns all", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 4, "no filter should return all 4 services")
+	})
+
+	t.Run("invalid status returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services?status=invalid_status", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+		assert.Contains(t, rr.Body.String(), "invalid status value")
+	})
+
+	t.Run("valid and invalid mixed returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services?status=running,bogus", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+		assert.Contains(t, rr.Body.String(), "invalid status value: bogus")
+	})
+
+	t.Run("filter with no matches returns empty array", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/services?status=deploying", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		var svcs []map[string]any
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&svcs))
+		assert.Len(t, svcs, 0, "should return empty array for no matches")
+	})
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(

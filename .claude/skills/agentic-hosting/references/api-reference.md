@@ -14,7 +14,9 @@ GET /v1/system/health
 
 # Detailed health (auth required)
 GET /v1/system/health/detailed
-# → {"status":"ok","docker":{"available":true,"version":"29.x"},"gvisor":{"available":true},"disk":{"total_gb":435,"free_gb":397,"used_percent":8.7}}
+# → {"status":"ok","docker":{"available":true,"version":"29.x","storage_info":{"driver":"overlay2","data_space_used":"12.3 GB","data_space_total":"435 GB"}},"gvisor":{"available":true},"disk":{"total_gb":435,"free_gb":397,"used_percent":8.7}}
+# Add ?fresh=true to bypass the 30-second cache:
+GET /v1/system/health/detailed?fresh=true
 ```
 
 ---
@@ -40,9 +42,16 @@ GET /v1/tenant/usage
 PATCH /v1/tenant
 Body: {"name":"new-name","email":"new@email.com"}
 
+# Reactivate a suspended tenant (requires bootstrap token)
+POST /v1/tenant/reactivate
+Headers: X-Bootstrap-Token: <bootstrap-token>
+# → 200 on success; restores a suspended tenant to active status
+
 # Delete tenant (irreversible — removes ALL resources)
 DELETE /v1/tenant
 ```
+
+**Note:** Quota exceeded errors return `409 Conflict` (not `403`).
 
 ---
 
@@ -69,7 +78,14 @@ Body: {"email":"tenant@example.com"}
 # → {"api_key":"newkeyid.newsecret"}
 # Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
 # Email must match the tenant's registered email
+
+# Validate a bootstrap token (does not register — just checks validity)
+POST /v1/auth/bootstrap/validate
+Headers: X-Bootstrap-Token: <bootstrap-token>
+# → 200 if valid, 401 if invalid
 ```
+
+**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
 
 ---
 
@@ -86,6 +102,7 @@ Body: {
   "cpu_count": 1              # optional, default 1
 }
 # → {"id":"hex32","name":"...","status":"deploying","url":"http://<id>.localhost",...}
+# Port must be > 0; returns 400 if invalid
 
 # Create service from snapshot (instant fork — copies image, env, resource limits)
 POST /v1/services?from_snapshot=:snapshotID
@@ -99,6 +116,11 @@ GET /v1/services?limit=50&offset=0
 # Get one service
 GET /v1/services/:serviceID
 # → {"id":"...","name":"...","status":"running","url":"...","last_error":"...","circuit_open":false}
+
+# Rename a service (validates DNS-safe name)
+PATCH /v1/services/:serviceID
+Body: {"name":"new-name"}
+# → returns updated service object
 
 # Delete service
 DELETE /v1/services/:serviceID
@@ -138,7 +160,7 @@ POST /v1/services/:serviceID/redeploy
 
 # Deployment history
 GET /v1/services/:serviceID/deployments
-# → [{"id":"...","image":"...","status":"running","deployed_at":unix}]
+# → [{"id":"...","build_id":"...","source":"image|build","image":"...","status":"running","started_at":unix,"finished_at":unix,"deployed_at":unix}]
 
 # Stream runtime logs (basic — stdout/stderr not yet fully supported, see #11)
 GET /v1/services/:serviceID/logs
@@ -191,6 +213,12 @@ DELETE /v1/services/:serviceID/builds/:buildID
 GET /v1/builds?limit=50
 ```
 
+**Build log ring buffer:** Logs are tail-preserved when they exceed the maximum size -- the oldest lines are dropped so the most recent output is always available.
+
+**Auto-cancel on suspension:** When a tenant is suspended, all in-progress builds for that tenant are automatically cancelled (`CancelAllForTenant`).
+
+**Pagination limit cap:** List endpoints enforce a server-side maximum on `limit`; requests above the cap are silently clamped.
+
 ---
 
 ## Databases
@@ -217,6 +245,8 @@ GET /v1/databases/:dbID/connection-string
 DELETE /v1/databases/:dbID
 ```
 
+**Name validation:** Database names must be DNS-safe -- alphanumeric characters and hyphens only, must start and end with an alphanumeric character.
+
 ---
 
 ## Snapshots
@@ -240,14 +270,18 @@ GET /v1/snapshots/:snapshotID
 DELETE /v1/snapshots/:snapshotID
 ```
 
+**Retention policy:** Snapshots older than `--snapshot-max-age` or exceeding `--snapshot-max-per-service` are automatically cleaned up by the GC.
+
 ---
 
 ## Kanban (Vikunja)
 
-Provisions a per-tenant Vikunja kanban board in a dedicated container.
+Provisions a per-tenant Vikunja kanban board in a dedicated container. Provisioning is async -- the `POST` returns immediately and the kanban URL becomes available once the container is ready. Poll `GET /v1/kanban` until the `url` field is populated.
+
+The host port range for kanban containers is configurable via `--kanban-port-start` and `--kanban-port-end` daemon flags.
 
 ```bash
-# Provision board (takes ~30s — use idempotency key)
+# Provision board (async — poll GET /v1/kanban for URL; use idempotency key)
 POST /v1/kanban
 Header: Idempotency-Key: <uuid>
 # → {"id":"...","url":"http://...:PORT","created_at":unix}
@@ -272,7 +306,16 @@ DELETE /v1/kanban
 # Synthetic event log for the tenant
 GET /v1/activity?limit=50
 # → [{"id":"...","resource_type":"service|database|build","action":"created|started|failed","message":"...","created_at":unix}]
+
+# Filtering parameters:
+#   resource_type=service|database|build   — filter by resource type
+#   action=created|started|failed|...      — filter by action
+#   service_id=<id>                        — filter by service
+#   since=2026-03-01T00:00:00Z             — RFC3339 lower bound
+#   offset=0                               — pagination offset (int)
 ```
+
+**Audit events:** Sensitive operations are automatically logged: env var reveals (`?reveal=true`), connection string access, and kanban admin token access.
 
 ---
 

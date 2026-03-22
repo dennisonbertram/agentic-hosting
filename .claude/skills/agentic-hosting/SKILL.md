@@ -42,9 +42,12 @@ Six slash commands are available when the Claude Code skill is installed:
 
 Requires the bootstrap token. On the server, read it with:
 ```bash
-ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/paasd"
-# (path varies by install — may be /etc/default/ah on fresh installs)
+ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah"
 ```
+
+Multiple bootstrap tokens are supported — set `AH_BOOTSTRAP_TOKEN` to a comma-separated list (e.g. `token1,token2`). Any valid token in the list is accepted.
+
+To verify a bootstrap token without registering, use `POST /v1/auth/bootstrap/validate` with the `X-Bootstrap-Token` header — returns `200` if valid.
 
 ```bash
 curl -s -X POST $AH_URL/v1/tenants/register \
@@ -219,6 +222,9 @@ curl -s $AH_URL/v1/system/health
 # Detailed health: disk, Docker, gVisor
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed | python3 -m json.tool
 
+# Detailed health bypassing 30-second cache
+curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/system/health/detailed?fresh=true" | python3 -m json.tool
+
 # List services / databases
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/services | python3 -m json.tool
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/databases | python3 -m json.tool
@@ -228,6 +234,11 @@ curl -s -X POST   $AH_URL/v1/services/$SERVICE_ID/stop    -H "Authorization: Bea
 curl -s -X POST   $AH_URL/v1/services/$SERVICE_ID/start   -H "Authorization: Bearer $AH_KEY"
 curl -s -X POST   $AH_URL/v1/services/$SERVICE_ID/restart -H "Authorization: Bearer $AH_KEY"
 curl -s -X DELETE $AH_URL/v1/services/$SERVICE_ID         -H "Authorization: Bearer $AH_KEY"
+
+# Rename a service
+curl -s -X PATCH $AH_URL/v1/services/$SERVICE_ID \
+  -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"new-name"}'
 
 # Redeploy (rebuild from same git source)
 curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/redeploy -H "Authorization: Bearer $AH_KEY"
@@ -260,6 +271,10 @@ curl -s -X PATCH $AH_URL/v1/tenant \
 
 # Activity feed (synthetic event log across all resources)
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/activity?limit=50" | python3 -m json.tool
+
+# Reactivate a suspended tenant (requires bootstrap token)
+curl -s -X POST $AH_URL/v1/tenant/reactivate \
+  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN"
 ```
 
 ---
@@ -287,19 +302,37 @@ curl -s -X DELETE $AH_URL/v1/snapshots/$SNAPSHOT_ID -H "Authorization: Bearer $A
 
 ## Kanban — per-tenant Vikunja board
 
+Provisioning is async — the `POST` returns immediately and the kanban URL becomes available once the container is ready. Poll `GET /v1/kanban` until the `url` field is populated.
+
 ```bash
-# Provision a Vikunja kanban board (takes ~30s, use idempotency key)
+# Provision a Vikunja kanban board (async — poll GET /v1/kanban for URL)
 curl -s -X POST $AH_URL/v1/kanban \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Idempotency-Key: $(uuidgen)" | python3 -m json.tool
 
-# Get board URL + credentials
+# Get board URL + credentials (poll until url is available)
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban | python3 -m json.tool
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/kanban/admin-token | python3 -m json.tool
 
 # Delete board (irreversible)
 curl -s -X DELETE $AH_URL/v1/kanban -H "Authorization: Bearer $AH_KEY"
 ```
+
+---
+
+## Operations / Admin
+
+**Master key rotation:** Rotate the encryption key used for secrets at rest:
+```bash
+ah rotate-key --new-key-file /path/to/new.key
+```
+
+**Snapshot retention:** Configure automatic cleanup of old snapshots via daemon flags:
+- `--snapshot-max-per-service N` — keep at most N snapshots per service (oldest pruned first)
+- `--snapshot-max-age DURATION` — delete snapshots older than the given duration (e.g. `720h` for 30 days)
+
+**Kanban port range:** Control the host port range allocated to kanban containers:
+- `--kanban-port-start PORT` and `--kanban-port-end PORT`
 
 ---
 

@@ -295,6 +295,93 @@ func TestDetailedHealth_ResponseIncludesDockerDisk(t *testing.T) {
 	assert.True(t, hasDockerDisk, "docker_disk field should always be present in response")
 }
 
+func TestDetailedHealth_IncludesTraefikNetworks(t *testing.T) {
+	resetDetailedHealthCache()
+	t.Cleanup(resetDetailedHealthCache)
+
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	mockDocker := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "n1", Name: "ah-tenant-aaa", Containers: 2},
+				{ID: "n2", Name: "ah-tenant-bbb", Containers: 1},
+				{ID: "n3", Name: "bridge", Containers: 5},
+			}, nil
+		},
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    mockDocker,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/system/health/detailed", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp DetailedHealthResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+	require.NotNil(t, resp.TraefikNetworks, "traefik_networks should be present")
+	assert.Equal(t, 2, *resp.TraefikNetworks, "should count only ah-tenant-* networks")
+	assert.Equal(t, "ok", resp.Status, "2 networks should not degrade status")
+}
+
+func TestDetailedHealth_TraefikNetworks_DegradedOver200(t *testing.T) {
+	resetDetailedHealthCache()
+	t.Cleanup(resetDetailedHealthCache)
+
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Generate 201 tenant networks to trigger degradation.
+	mockDocker := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			nets := make([]docker.NetworkInfo, 201)
+			for i := 0; i < 201; i++ {
+				nets[i] = docker.NetworkInfo{
+					ID:         fmt.Sprintf("n%d", i),
+					Name:       fmt.Sprintf("ah-tenant-%04d", i),
+					Containers: 1,
+				}
+			}
+			return nets, nil
+		},
+	}
+
+	srv := NewServer(ServerConfig{
+		Store:     &db.Store{StateDB: stateDB},
+		MasterKey: masterKey,
+		DevMode:   true,
+		Docker:    mockDocker,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/system/health/detailed", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp DetailedHealthResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+	require.NotNil(t, resp.TraefikNetworks)
+	assert.Equal(t, 201, *resp.TraefikNetworks)
+	assert.Equal(t, "degraded", resp.Status, "status should degrade when >200 tenant networks")
+}
+
 func TestDetailedHealth_CacheBypass(t *testing.T) {
 	// Make sure cache is warm.
 	detailedHealthCacheMu.Lock()

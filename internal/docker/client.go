@@ -25,6 +25,9 @@ import (
 type Client interface {
 	EnsureNetwork(ctx context.Context, name string) (string, error)
 	ConnectNetwork(ctx context.Context, networkID, containerID string) error
+	NetworkDisconnect(ctx context.Context, networkID, containerID string) error
+	NetworkList(ctx context.Context) ([]NetworkInfo, error)
+	RemoveNetwork(ctx context.Context, networkID string) error
 	RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
 	StartContainer(ctx context.Context, containerID string) error
@@ -47,6 +50,13 @@ type Client interface {
 	PruneDanglingImages(ctx context.Context) (int, error)
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
 	DiskUsage(ctx context.Context) (*StorageUsage, error)
+}
+
+// NetworkInfo holds metadata about a Docker network.
+type NetworkInfo struct {
+	ID         string
+	Name       string
+	Containers int // number of containers connected to this network
 }
 
 // StorageUsage holds aggregate Docker storage consumption broken down by type.
@@ -131,6 +141,38 @@ func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, 
 // ConnectNetwork connects a container to an additional network.
 func (c *DockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
 	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+}
+
+// NetworkDisconnect disconnects a container from a network.
+// Ignores "not connected" errors (idempotent).
+func (c *DockerClient) NetworkDisconnect(ctx context.Context, networkID, containerID string) error {
+	err := c.cli.NetworkDisconnect(ctx, networkID, containerID, false)
+	if err != nil && strings.Contains(err.Error(), "is not connected") {
+		return nil
+	}
+	return err
+}
+
+// NetworkList returns all Docker networks with container counts.
+func (c *DockerClient) NetworkList(ctx context.Context) ([]NetworkInfo, error) {
+	networks, err := c.cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list networks: %w", err)
+	}
+	result := make([]NetworkInfo, 0, len(networks))
+	for _, n := range networks {
+		result = append(result, NetworkInfo{
+			ID:         n.ID,
+			Name:       n.Name,
+			Containers: len(n.Containers),
+		})
+	}
+	return result, nil
+}
+
+// RemoveNetwork removes a Docker network by ID or name.
+func (c *DockerClient) RemoveNetwork(ctx context.Context, networkID string) error {
+	return c.cli.NetworkRemove(ctx, networkID)
 }
 
 // TenantNetworkName returns the deterministic network name for a tenant.

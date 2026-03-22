@@ -1184,6 +1184,49 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 			m.updateStatus(ctx, svcID, "stopped")
 		}
 	}
+
+	// After all containers are stopped, disconnect Traefik from and remove
+	// the tenant's network so it does not accumulate as a dangling endpoint.
+	tenantNet := docker.TenantNetworkName(tenantID)
+	m.cleanupTenantNetwork(ctx, tenantNet)
+}
+
+// cleanupTenantNetwork disconnects Traefik from the tenant network and removes it.
+// Errors are logged but do not propagate — this is best-effort cleanup.
+func (m *Manager) cleanupTenantNetwork(ctx context.Context, tenantNet string) {
+	// Find the Traefik container to disconnect it from the tenant network.
+	// We search by label-less container list; the network may still list Traefik
+	// as a connected endpoint even after the tenant containers are removed.
+	networks, err := m.docker.NetworkList(ctx)
+	if err != nil {
+		log.Printf("services: failed to list networks for cleanup of %s: %v", tenantNet, err)
+		return
+	}
+
+	var netID string
+	for _, n := range networks {
+		if n.Name == tenantNet {
+			netID = n.ID
+			break
+		}
+	}
+	if netID == "" {
+		// Network doesn't exist — nothing to clean up.
+		return
+	}
+
+	// Disconnect Traefik (by name). Use the deterministic container name "paas-traefik".
+	// NetworkDisconnect is idempotent — ignores "not connected" errors.
+	if disconnErr := m.docker.NetworkDisconnect(ctx, tenantNet, "paas-traefik"); disconnErr != nil {
+		log.Printf("services: failed to disconnect Traefik from network %s: %v", tenantNet, disconnErr)
+	}
+
+	// Now remove the network. This will succeed only if no containers remain connected.
+	if rmErr := m.docker.RemoveNetwork(ctx, tenantNet); rmErr != nil {
+		log.Printf("services: failed to remove tenant network %s: %v (GC will retry)", tenantNet, rmErr)
+	} else {
+		log.Printf("services: removed tenant network %s", tenantNet)
+	}
 }
 
 // Logs returns a reader for the service container logs.

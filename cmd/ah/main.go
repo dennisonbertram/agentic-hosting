@@ -23,6 +23,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
+	"github.com/dennisonbertram/agentic-hosting/internal/metering"
 	"github.com/dennisonbertram/agentic-hosting/internal/reconciler"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/dennisonbertram/agentic-hosting/internal/snapshots"
@@ -180,6 +181,9 @@ func main() {
 	// Create database manager
 	dbMgr := databases.NewManager(store.StateDB, dockerClient, masterKey[:32])
 
+	// Create metering store
+	meteringStore := metering.NewStore(store.MeteringDB)
+
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
 	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
@@ -196,6 +200,7 @@ func main() {
 		DeploymentStore:  deployStore,
 		DatabaseManager:  dbMgr,
 		KanbanManager:    kanbanMgr,
+		MeteringStore:    meteringStore,
 		BaseDomain:       *baseDomain,
 		TraefikConfigDir: cfg.TraefikConfigDir,
 	})

@@ -17,6 +17,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
+	"github.com/dennisonbertram/agentic-hosting/internal/metering"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/dennisonbertram/agentic-hosting/internal/snapshots"
@@ -35,6 +36,7 @@ type ServerConfig struct {
 	DeploymentStore  *deployments.Store
 	DatabaseManager  databaseManager
 	KanbanManager    kanbanManager
+	MeteringStore    *metering.Store
 	BaseDomain       string
 	TraefikConfigDir string
 }
@@ -73,6 +75,7 @@ type Server struct {
 	deploymentStore   *deployments.Store
 	dbManager         databaseManager
 	kanbanManager     kanbanManager
+	meteringStore     *metering.Store
 	dockerClient      docker.Client
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
@@ -112,6 +115,7 @@ func NewServer(cfg ServerConfig) *Server {
 		deploymentStore:   cfg.DeploymentStore,
 		dbManager:         cfg.DatabaseManager,
 		kanbanManager:     cfg.KanbanManager,
+		meteringStore:     cfg.MeteringStore,
 		dockerClient:      cfg.Docker,
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
@@ -172,6 +176,7 @@ func (s *Server) setupRoutes() {
 
 		r.Get("/v1/tenant", s.handleTenantGet)
 		r.Get("/v1/tenant/usage", s.handleTenantUsage)
+		r.Get("/v1/tenant/usage/metrics", s.handleTenantMetrics)
 		r.Patch("/v1/tenant", s.handleTenantUpdate)
 		r.Delete("/v1/tenant", s.handleTenantDelete)
 
@@ -196,6 +201,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/env", s.handleServiceEnvGet)
 		r.Post("/v1/services/{serviceID}/env", s.handleServiceEnvSet)
 		r.Delete("/v1/services/{serviceID}/env/{key}", s.handleServiceEnvDelete)
+		r.Get("/v1/services/{serviceID}/metrics", s.handleServiceMetrics)
 
 		// Snapshot routes
 		r.Post("/v1/services/{serviceID}/snapshots", s.handleSnapshotCreate)

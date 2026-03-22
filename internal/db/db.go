@@ -210,6 +210,72 @@ func ApplyStateMigrations(stateDB *sql.DB) error {
 	return nil
 }
 
+// ApplyMeteringMigrations applies all metering_*.sql migrations from the
+// embedded FS to the given database. Exported for use by testutil and other
+// packages that need an in-memory metering schema for testing.
+func ApplyMeteringMigrations(meteringDB *sql.DB) error {
+	if _, err := meteringDB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		name TEXT PRIMARY KEY,
+		applied_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations table: %w", err)
+	}
+
+	entries, err := fs.ReadDir(MigrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") || !strings.HasPrefix(name, "metering_") {
+			continue
+		}
+
+		var count int
+		if err := meteringDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", name, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		data, err := fs.ReadFile(MigrationsFS, "migrations/"+name)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+
+		tx, err := meteringDB.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", name, err)
+		}
+
+		if _, err := tx.Exec(string(data)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("exec migration %s: %w", name, err)
+		}
+
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			name, time.Now().Unix()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", name, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
 func (s *Store) Close() error {
 	var errs []error
 	if s.StateDB != nil {

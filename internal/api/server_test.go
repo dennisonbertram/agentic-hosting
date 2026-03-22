@@ -896,6 +896,254 @@ func TestPatchService_EmptyBody_Returns400(t *testing.T) {
 	}
 }
 
+// TestDeploymentCancel_QueuedDeployment verifies that POST /v1/services/{id}/deployments/{id}/cancel
+// cancels a pending deployment and returns 200 with cancelled status and cancelled_at timestamp.
+func TestDeploymentCancel_QueuedDeployment(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-cancel", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-1", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	deployStore := deployments.NewStore(stateDB)
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-q1",
+		ServiceID: "svc-cancel",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    deployments.StatusPending,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: 1000,
+		CreatedAt: 1000,
+	}))
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel/deployments/deploy-q1/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unexpected body: %s", rr.Body.String())
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
+	assert.Equal(t, "cancelled", body["status"])
+	assert.Equal(t, "deploy-q1", body["id"])
+	assert.NotNil(t, body["cancelled_at"], "response should include cancelled_at timestamp")
+}
+
+// TestDeploymentCancel_CompletedDeployment_Returns409 verifies that cancelling a
+// completed (running) deployment returns 409 Conflict.
+func TestDeploymentCancel_CompletedDeployment_Returns409(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-cancel2", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-1", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	deployStore := deployments.NewStore(stateDB)
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-done",
+		ServiceID: "svc-cancel2",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    deployments.StatusRunning,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: 1000,
+		CreatedAt: 1000,
+	}))
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel2/deployments/deploy-done/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusConflict, rr.Code, "cancelling a running deployment should return 409")
+}
+
+// TestDeploymentCancel_AlreadyCancelled_Returns409 verifies that cancelling an
+// already-cancelled deployment returns 409 Conflict.
+func TestDeploymentCancel_AlreadyCancelled_Returns409(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-cancel3", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-1", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	deployStore := deployments.NewStore(stateDB)
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-already",
+		ServiceID: "svc-cancel3",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    deployments.StatusPending,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: 1000,
+		CreatedAt: 1000,
+	}))
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	// First cancel should succeed.
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel3/deployments/deploy-already/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Second cancel should return 409.
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel3/deployments/deploy-already/cancel", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rr2 := httptest.NewRecorder()
+	srv.ServeHTTP(rr2, req2)
+	assert.Equal(t, http.StatusConflict, rr2.Code, "cancelling an already-cancelled deployment should return 409")
+}
+
+// TestDeploymentCancel_NotFound_Returns404 verifies that cancelling a nonexistent
+// deployment returns 404.
+func TestDeploymentCancel_NotFound_Returns404(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	_, err := stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"svc-cancel4", "tenant-1", "web", "running", "nginx:latest", 8080, "ctr-1", 1000, 1000,
+	)
+	require.NoError(t, err)
+
+	deployStore := deployments.NewStore(stateDB)
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-cancel4/deployments/nonexistent/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code, "cancelling a nonexistent deployment should return 404")
+}
+
+// TestDeploymentCancel_WrongService_Returns404 verifies that a deployment belonging
+// to a different service returns 404.
+func TestDeploymentCancel_WrongService_Returns404(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	// Create two services.
+	for _, svc := range []struct{ id, name string }{{"svc-a", "svc-a"}, {"svc-b", "svc-b"}} {
+		_, err := stateDB.Exec(
+			`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			svc.id, "tenant-1", svc.name, "running", "nginx:latest", 8080, "ctr-1", 1000, 1000,
+		)
+		require.NoError(t, err)
+	}
+
+	deployStore := deployments.NewStore(stateDB)
+	// Create deployment belonging to svc-a.
+	require.NoError(t, deployStore.Create(context.Background(), &deployments.Deployment{
+		ID:        "deploy-svc-a",
+		ServiceID: "svc-a",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    deployments.StatusPending,
+		Trigger:   deployments.TriggerManual,
+		StartedAt: 1000,
+		CreatedAt: 1000,
+	}))
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	// Try to cancel deploy-svc-a via svc-b — should return 404.
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/svc-b/deployments/deploy-svc-a/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code, "deployment belonging to a different service should return 404")
+}
+
+// TestDeploymentCancel_ServiceNotFound_Returns404 verifies that specifying a
+// nonexistent service returns 404.
+func TestDeploymentCancel_ServiceNotFound_Returns404(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+
+	deployStore := deployments.NewStore(stateDB)
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		Docker:          &testutil.MockDockerClient{},
+		DeploymentStore: deployStore,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/services/nonexistent-svc/deployments/deploy-1/cancel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code, "nonexistent service should return 404")
+}
+
 func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) string {
 	t.Helper()
 	_, err := stateDB.Exec(

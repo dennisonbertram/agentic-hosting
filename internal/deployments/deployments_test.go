@@ -486,3 +486,156 @@ func TestListByTenant_EmptyResult(t *testing.T) {
 	assert.NotNil(t, list, "should return empty slice, not nil")
 	assert.Len(t, list, 0)
 }
+
+func TestCancel_PendingDeployment(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusPending,
+		Trigger:   TriggerManual,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	updated, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, updated.Status)
+	assert.NotNil(t, updated.CancelledAt, "CancelledAt should be set")
+	assert.NotNil(t, updated.CompletedAt, "CompletedAt should be set")
+
+	// Verify persisted state.
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, got.Status)
+	assert.NotNil(t, got.CancelledAt)
+	assert.NotNil(t, got.CompletedAt)
+}
+
+func TestCancel_DeployingDeployment(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusDeploying,
+		Trigger:   TriggerBuild,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	updated, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, updated.Status)
+	assert.NotNil(t, updated.CancelledAt)
+}
+
+func TestCancel_RunningDeployment_Returns409(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusRunning,
+		Trigger:   TriggerManual,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrConflict))
+}
+
+func TestCancel_FailedDeployment_Returns409(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusFailed,
+		Trigger:   TriggerManual,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrConflict))
+}
+
+func TestCancel_AlreadyCancelledDeployment_Returns409(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusPending,
+		Trigger:   TriggerManual,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	// Cancel the first time.
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+
+	// Second cancel should return 409.
+	_, err = store.Cancel(ctx, "tenant-1", d.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrConflict))
+}
+
+func TestCancel_NotFound(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	_, err := store.Cancel(ctx, "tenant-1", "nonexistent-id")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+}
+
+func TestCancel_WrongTenant(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	seedTestData(t, db, "tenant-2", "svc-2")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{
+		ServiceID: "svc-1",
+		TenantID:  "tenant-1",
+		Image:     "nginx:latest",
+		Status:    StatusPending,
+		Trigger:   TriggerManual,
+		StartedAt: time.Now().Unix(),
+	}
+	require.NoError(t, store.Create(ctx, d))
+
+	// tenant-2 should not be able to cancel tenant-1's deployment.
+	_, err := store.Cancel(ctx, "tenant-2", d.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+}

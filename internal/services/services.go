@@ -1203,19 +1203,46 @@ func (m *Manager) List(ctx context.Context, tenantID string) ([]*Service, error)
 	return m.ListPaginated(ctx, tenantID, 100, 0)
 }
 
+// ValidStatuses is the set of recognised service status values.
+var ValidStatuses = map[string]bool{
+	"created":   true,
+	"running":   true,
+	"stopped":   true,
+	"deploying": true,
+	"failed":    true,
+	"error":     true,
+	"crashed":   true,
+}
+
 // ListPaginated returns services for a tenant with limit and offset.
-func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, offset int) ([]*Service, error) {
+// An optional statusFilter restricts results to services whose status
+// matches one of the given values. Pass nil or an empty slice to list all.
+func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, offset int, statusFilter ...string) ([]*Service, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, dns_label, status, image, port, container_id, url, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
-		 FROM services WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		tenantID, limit, offset,
-	)
+
+	// Build the query dynamically to include an optional status IN clause.
+	query := `SELECT id, tenant_id, name, dns_label, status, image, port, container_id, url, last_error, crash_count, circuit_open, last_crashed_at, created_at, updated_at
+		 FROM services WHERE tenant_id = ?`
+	args := []any{tenantID}
+
+	if len(statusFilter) > 0 {
+		placeholders := make([]string, len(statusFilter))
+		for i, s := range statusFilter {
+			placeholders[i] = "?"
+			args = append(args, s)
+		}
+		query += " AND status IN (" + strings.Join(placeholders, ",") + ")"
+	}
+
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+
+	rows, err := m.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list services: %w", err)
 	}

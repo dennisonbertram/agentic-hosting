@@ -154,6 +154,58 @@ func TestListPaginated(t *testing.T) {
 	assert.Len(t, svcs, 1)
 }
 
+func TestListPaginated_StatusFilter(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+
+	mgr := NewManager(stateDB, mock, masterKey, "", "", nil)
+
+	// Create 3 services, then manually set different statuses in DB.
+	for i, name := range []string{"svc-a", "svc-b", "svc-c"} {
+		_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
+			Name:  name,
+			Image: "nginx:latest",
+		})
+		require.NoError(t, err)
+		// Directly update statuses: a=running, b=stopped, c=running
+		status := "running"
+		if i == 1 {
+			status = "stopped"
+		}
+		_, err = stateDB.Exec(`UPDATE services SET status = ? WHERE name = ?`, status, name)
+		require.NoError(t, err)
+	}
+
+	t.Run("single status filter", func(t *testing.T) {
+		svcs, err := mgr.ListPaginated(context.Background(), "tenant-1", 100, 0, "running")
+		require.NoError(t, err)
+		assert.Len(t, svcs, 2, "should return only the 2 running services")
+		for _, s := range svcs {
+			assert.Equal(t, "running", s.Status)
+		}
+	})
+
+	t.Run("multiple status filter", func(t *testing.T) {
+		svcs, err := mgr.ListPaginated(context.Background(), "tenant-1", 100, 0, "running", "stopped")
+		require.NoError(t, err)
+		assert.Len(t, svcs, 3, "should return all 3 services matching running or stopped")
+	})
+
+	t.Run("no match filter", func(t *testing.T) {
+		svcs, err := mgr.ListPaginated(context.Background(), "tenant-1", 100, 0, "deploying")
+		require.NoError(t, err)
+		assert.Len(t, svcs, 0, "should return no services for a status none have")
+	})
+
+	t.Run("empty filter returns all", func(t *testing.T) {
+		svcs, err := mgr.ListPaginated(context.Background(), "tenant-1", 100, 0)
+		require.NoError(t, err)
+		assert.Len(t, svcs, 3, "no status filter should return all services")
+	})
+}
+
 func TestDelete_Success(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	seedTenant(t, stateDB)

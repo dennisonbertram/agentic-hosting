@@ -394,6 +394,70 @@ func TestSnapshotRestoreEnvVars_Empty(t *testing.T) {
 	assert.Empty(t, restored)
 }
 
+func TestSnapshotGetEnvKeys_Success(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	// Insert encrypted env vars.
+	envVars := map[string]string{
+		"API_KEY":    "abc123",
+		"SECRET_KEY": "xyz789",
+	}
+	now := time.Now().Unix()
+	for k, v := range envVars {
+		encrypted, err := crypto.Encrypt([]byte(v), testMasterKey)
+		require.NoError(t, err)
+		_, err = db.Exec(
+			`INSERT INTO service_env (service_id, key, value_encrypted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			serviceID, k, encrypted, now, now,
+		)
+		require.NoError(t, err)
+	}
+
+	// Create a snapshot that captures the env vars.
+	snap, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "key-test"})
+	require.NoError(t, err)
+
+	// Get keys only — values should be masked.
+	keys, err := mgr.GetEnvKeys(ctx, tenantID, snap.ID)
+	require.NoError(t, err)
+	assert.Len(t, keys, 2)
+	assert.Equal(t, "********", keys["API_KEY"])
+	assert.Equal(t, "********", keys["SECRET_KEY"])
+}
+
+func TestSnapshotGetEnvKeys_Empty(t *testing.T) {
+	mgr, _, tenantID, serviceID := setupTest(t)
+	ctx := context.Background()
+
+	// Create a snapshot with no env vars.
+	snap, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "no-env-keys"})
+	require.NoError(t, err)
+
+	keys, err := mgr.GetEnvKeys(ctx, tenantID, snap.ID)
+	require.NoError(t, err)
+	assert.NotNil(t, keys)
+	assert.Empty(t, keys)
+}
+
+func TestSnapshotGetEnvKeys_WrongTenant(t *testing.T) {
+	mgr, _, db, tenantID, serviceID := setupTestWithDB(t)
+	ctx := context.Background()
+
+	snap, err := mgr.Create(ctx, tenantID, serviceID, CreateRequest{Name: "isolated-keys"})
+	require.NoError(t, err)
+
+	_, err = db.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+		"tenant-2", "Other Tenant", "other@example.com",
+	)
+	require.NoError(t, err)
+
+	_, err = mgr.GetEnvKeys(ctx, "tenant-2", snap.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+}
+
 // --- Snapshot retention tests ---
 
 // insertSnapshotWithAge directly inserts a snapshot with a specific created_at time

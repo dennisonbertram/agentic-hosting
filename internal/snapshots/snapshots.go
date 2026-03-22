@@ -194,8 +194,15 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 	}, nil
 }
 
-// List returns snapshots for a tenant with pagination.
-func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) ([]*Snapshot, error) {
+// ListFilter holds optional filter parameters for listing snapshots.
+type ListFilter struct {
+	ServiceID string // exact match on service_id
+	Name      string // substring match on name (LIKE %name%)
+	Since     int64  // filter created_at >= since (unix timestamp)
+}
+
+// List returns snapshots for a tenant with pagination and optional filters.
+func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int, filter *ListFilter) ([]*Snapshot, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
@@ -203,11 +210,29 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 		offset = 0
 	}
 
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, service_id, name, description, image_ref, resource_config, port, created_at
-		 FROM snapshots WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		tenantID, limit, offset,
-	)
+	query := `SELECT id, tenant_id, service_id, name, description, image_ref, resource_config, port, created_at
+		 FROM snapshots WHERE tenant_id = ?`
+	args := []interface{}{tenantID}
+
+	if filter != nil {
+		if filter.ServiceID != "" {
+			query += ` AND service_id = ?`
+			args = append(args, filter.ServiceID)
+		}
+		if filter.Name != "" {
+			query += ` AND name LIKE ?`
+			args = append(args, "%"+filter.Name+"%")
+		}
+		if filter.Since > 0 {
+			query += ` AND created_at >= ?`
+			args = append(args, filter.Since)
+		}
+	}
+
+	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := m.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query snapshots: %w", err)
 	}

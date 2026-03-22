@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"regexp"
@@ -554,6 +555,195 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		APIKey:   token,
 		Status:   "active",
 	})
+}
+
+// QuotaUpdateRequest is the request body for PATCH /v1/tenants/{tenantID}/quotas.
+// All fields are optional pointers — only non-nil fields are updated.
+type QuotaUpdateRequest struct {
+	MaxServices          *int `json:"max_services,omitempty"`
+	MaxDatabases         *int `json:"max_databases,omitempty"`
+	MaxBuildsConcurrent  *int `json:"max_builds_concurrent,omitempty"`
+	MaxEnvVarsPerService *int `json:"max_env_vars_per_service,omitempty"`
+}
+
+// QuotaUpdateResponse is the response body for PATCH /v1/tenants/{tenantID}/quotas.
+type QuotaUpdateResponse struct {
+	TenantID             string `json:"tenant_id"`
+	MaxServices          int    `json:"max_services"`
+	MaxDatabases         int    `json:"max_databases"`
+	MaxBuildsConcurrent  int    `json:"max_builds_concurrent"`
+	MaxEnvVarsPerService int    `json:"max_env_vars_per_service"`
+	MaxMemoryMB          int    `json:"max_memory_mb"`
+	MaxCPUCores          float64 `json:"max_cpu_cores"`
+	MaxDiskGB            int    `json:"max_disk_gb"`
+	APIRateLimit         int    `json:"api_rate_limit"`
+}
+
+// Quota caps — hard upper bounds for operator-set quotas.
+const (
+	quotaCapMaxServices          = 100
+	quotaCapMaxDatabases         = 50
+	quotaCapMaxBuildsConcurrent  = 10
+	quotaCapMaxEnvVarsPerService = 500
+)
+
+// handleQuotaUpdate handles PATCH /v1/tenants/{tenantID}/quotas.
+//
+// Security model:
+//   - Rate-limited by the same per-IP / global limiter used for tenant
+//     registration (5/IP/hour, 20/global/hour).
+//   - Requires bootstrap token via X-Bootstrap-Token header.
+//   - Only updates fields that are present in the request body (partial update).
+//   - Validates that all values are positive and within defined caps.
+func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
+	// Apply the same rate limiter as tenant registration to prevent
+	// brute-force of the bootstrap token via this endpoint.
+	ip := trustedRealIP(r)
+	if ok, wait := regLimiter.allow(ip); !ok {
+		secs := int(math.Ceil(wait.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+		return
+	}
+
+	// Fail closed: reject if no bootstrap tokens are configured.
+	if len(s.bootstrapTokens) == 0 {
+		writeError(w, http.StatusServiceUnavailable, "quota update temporarily unavailable")
+		return
+	}
+
+	// Verify bootstrap token via HMAC-compare (no length leak).
+	provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
+	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
+		writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+		return
+	}
+
+	tenantID := chi.URLParam(r, "tenantID")
+	if tenantID == "" {
+		writeError(w, http.StatusBadRequest, "tenant ID is required")
+		return
+	}
+
+	// Verify the tenant exists.
+	var tenantExists int
+	err := s.store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE id = ?`, tenantID,
+	).Scan(&tenantExists)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if tenantExists == 0 {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	var req QuotaUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	// Validate: all provided values must be positive and within caps.
+	if req.MaxServices != nil {
+		if *req.MaxServices < 1 {
+			writeError(w, http.StatusBadRequest, "max_services must be at least 1")
+			return
+		}
+		if *req.MaxServices > quotaCapMaxServices {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_services must not exceed %d", quotaCapMaxServices))
+			return
+		}
+	}
+	if req.MaxDatabases != nil {
+		if *req.MaxDatabases < 1 {
+			writeError(w, http.StatusBadRequest, "max_databases must be at least 1")
+			return
+		}
+		if *req.MaxDatabases > quotaCapMaxDatabases {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_databases must not exceed %d", quotaCapMaxDatabases))
+			return
+		}
+	}
+	if req.MaxBuildsConcurrent != nil {
+		if *req.MaxBuildsConcurrent < 1 {
+			writeError(w, http.StatusBadRequest, "max_builds_concurrent must be at least 1")
+			return
+		}
+		if *req.MaxBuildsConcurrent > quotaCapMaxBuildsConcurrent {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_builds_concurrent must not exceed %d", quotaCapMaxBuildsConcurrent))
+			return
+		}
+	}
+	if req.MaxEnvVarsPerService != nil {
+		if *req.MaxEnvVarsPerService < 1 {
+			writeError(w, http.StatusBadRequest, "max_env_vars_per_service must be at least 1")
+			return
+		}
+		if *req.MaxEnvVarsPerService > quotaCapMaxEnvVarsPerService {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_env_vars_per_service must not exceed %d", quotaCapMaxEnvVarsPerService))
+			return
+		}
+	}
+
+	// Build dynamic UPDATE query for partial updates.
+	setClauses := []string{}
+	args := []any{}
+	if req.MaxServices != nil {
+		setClauses = append(setClauses, "max_services = ?")
+		args = append(args, *req.MaxServices)
+	}
+	if req.MaxDatabases != nil {
+		setClauses = append(setClauses, "max_databases = ?")
+		args = append(args, *req.MaxDatabases)
+	}
+	if req.MaxBuildsConcurrent != nil {
+		setClauses = append(setClauses, "max_builds_concurrent = ?")
+		args = append(args, *req.MaxBuildsConcurrent)
+	}
+	if req.MaxEnvVarsPerService != nil {
+		setClauses = append(setClauses, "max_env_vars_per_service = ?")
+		args = append(args, *req.MaxEnvVarsPerService)
+	}
+
+	if len(setClauses) > 0 {
+		query := "UPDATE tenant_quotas SET " + strings.Join(setClauses, ", ") + " WHERE tenant_id = ?"
+		args = append(args, tenantID)
+		if _, err := s.store.StateDB.Exec(query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update quotas")
+			return
+		}
+	}
+
+	// AUDIT log the quota change. Use helper to dereference pointers for clean output.
+	ptrIntStr := func(p *int) string {
+		if p == nil {
+			return "<unchanged>"
+		}
+		return strconv.Itoa(*p)
+	}
+	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s",
+		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService))
+
+	// Read back the updated quotas and return them.
+	var resp QuotaUpdateResponse
+	resp.TenantID = tenantID
+	err = s.store.StateDB.QueryRow(
+		`SELECT max_services, max_databases, max_builds_concurrent, max_env_vars_per_service,
+		        max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
+		 FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&resp.MaxServices, &resp.MaxDatabases, &resp.MaxBuildsConcurrent, &resp.MaxEnvVarsPerService,
+		&resp.MaxMemoryMB, &resp.MaxCPUCores, &resp.MaxDiskGB, &resp.APIRateLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // hmacEqual compares two strings in constant time regardless of length.

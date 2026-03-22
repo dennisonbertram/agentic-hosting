@@ -311,6 +311,38 @@ func (m *Manager) RestoreEnvVars(ctx context.Context, tenantID, snapshotID strin
 	return plaintext, nil
 }
 
+// GetEnvKeys returns the env var keys stored in a snapshot with masked values.
+// This allows callers to see which env vars exist without revealing their values.
+func (m *Manager) GetEnvKeys(ctx context.Context, tenantID, snapshotID string) (map[string]string, error) {
+	var envEncrypted string
+	err := m.db.QueryRowContext(ctx,
+		`SELECT env_encrypted FROM snapshots WHERE id = ? AND tenant_id = ?`,
+		snapshotID, tenantID,
+	).Scan(&envEncrypted)
+	if err == sql.ErrNoRows {
+		return nil, apierr.NotFound("snapshot not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query snapshot env keys: %w", err)
+	}
+
+	if envEncrypted == "" {
+		return map[string]string{}, nil
+	}
+
+	// Unmarshal just to extract keys — values stay encrypted and are not returned.
+	var encryptedMap map[string]string
+	if err := json.Unmarshal([]byte(envEncrypted), &encryptedMap); err != nil {
+		return nil, fmt.Errorf("unmarshal env blob: %w", err)
+	}
+
+	masked := make(map[string]string, len(encryptedMap))
+	for k := range encryptedMap {
+		masked[k] = "********"
+	}
+	return masked, nil
+}
+
 // CleanExpired removes snapshots that exceed per-service count or age limits.
 // It deletes the oldest snapshots first when over the count limit and removes
 // any snapshot older than maxAge. Returns the number of snapshots removed.

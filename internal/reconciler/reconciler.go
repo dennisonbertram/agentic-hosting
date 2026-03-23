@@ -522,7 +522,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	// 4a. Mark stuck 'creating' environments (> 5 min) as 'failed'
 	fiveMinAgo := time.Now().Add(-5 * time.Minute).Unix()
 	envCreateResult, err := r.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'failed', last_error = 'creation timed out (reconciler)',
+		`UPDATE environments SET status = 'failed',
 		 updated_at = ? WHERE status = 'creating' AND updated_at < ?`,
 		time.Now().Unix(), fiveMinAgo)
 	if err != nil {

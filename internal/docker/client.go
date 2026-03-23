@@ -702,6 +702,11 @@ type RunEnvironmentConfig struct {
 func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error) {
 	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID, cfg.EnvID)
 
+	// Pull the image if not available locally.
+	if err := c.PullImage(ctx, cfg.Image); err != nil {
+		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
+	}
+
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
@@ -753,15 +758,14 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 
 	netCfg := &network.NetworkingConfig{}
 
+	// Ensure the tenant network exists before creating the container.
+	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
+		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+	}
+
 	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
 	if err != nil {
 		return "", fmt.Errorf("create environment container: %w", err)
-	}
-
-	// Ensure the tenant network exists
-	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {

@@ -465,7 +465,102 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 	}
 
-	// 4. Detect split-brain containers: ah.service-labeled containers not tracked in DB.
+	// 4. Check environments marked "running" — if container gone, mark "stopped"
+	envRows, err := r.db.QueryContext(ctx,
+		`SELECT id, container_id, tenant_id FROM environments WHERE status = 'running' AND container_id != ''`)
+	if err != nil {
+		log.Printf("reconciler: failed to query environments: %v", err)
+	} else {
+		type envRecord struct{ id, containerID, tenantID string }
+		var runningEnvs []envRecord
+		for envRows.Next() {
+			var e envRecord
+			if err := envRows.Scan(&e.id, &e.containerID, &e.tenantID); err != nil {
+				continue
+			}
+			runningEnvs = append(runningEnvs, e)
+		}
+		envRows.Close()
+
+		for _, e := range runningEnvs {
+			checked++
+			if !containerSet[e.containerID] {
+				_, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil && isNotFoundError(inspectErr) {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+						time.Now().Unix(), e.id, e.tenantID)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container not found)", e.id)
+						fixed++
+					}
+				} else if inspectErr != nil {
+					log.Printf("reconciler: transient Docker error for environment %s, skipping: %v", e.id, inspectErr)
+				}
+			} else {
+				info, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
+				if inspectErr != nil {
+					continue
+				}
+				if info.Status == "exited" || info.Status == "dead" {
+					_, err := r.db.ExecContext(ctx,
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+						time.Now().Unix(), e.id, e.tenantID)
+					if err != nil {
+						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
+					} else {
+						log.Printf("reconciler: environment %s marked stopped (container %s)", e.id, info.Status)
+						fixed++
+					}
+				}
+			}
+		}
+	}
+
+	// 4a. Mark stuck 'creating' environments (> 5 min) as 'failed'
+	fiveMinAgo := time.Now().Add(-5 * time.Minute).Unix()
+	envCreateResult, err := r.db.ExecContext(ctx,
+		`UPDATE environments SET status = 'failed', last_error = 'creation timed out (reconciler)',
+		 updated_at = ? WHERE status = 'creating' AND updated_at < ?`,
+		time.Now().Unix(), fiveMinAgo)
+	if err != nil {
+		log.Printf("reconciler: failed to mark stale environment creates: %v", err)
+	} else if n, _ := envCreateResult.RowsAffected(); n > 0 {
+		log.Printf("reconciler: marked %d stale environment creates as failed", n)
+		fixed += int(n)
+	}
+
+	// 4b. Expire environment leases: running environments past their lease expiry
+	envLeaseResult, err := r.db.ExecContext(ctx,
+		`UPDATE environments SET status = 'stopped', updated_at = ?
+		 WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+		time.Now().Unix(), time.Now().Unix())
+	if err != nil {
+		log.Printf("reconciler: failed to expire environment leases: %v", err)
+	} else if n, _ := envLeaseResult.RowsAffected(); n > 0 {
+		log.Printf("reconciler: expired %d environment leases", n)
+		// Stop the containers for expired leases
+		expiredRows, expErr := r.db.QueryContext(ctx,
+			`SELECT container_id FROM environments WHERE status = 'stopped' AND container_id != '' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+			time.Now().Unix())
+		if expErr == nil {
+			for expiredRows.Next() {
+				var cid string
+				if err := expiredRows.Scan(&cid); err != nil {
+					continue
+				}
+				if stopErr := r.docker.StopContainer(ctx, cid); stopErr != nil {
+					log.Printf("reconciler: failed to stop expired environment container %s: %v", cid[:12], stopErr)
+				}
+			}
+			expiredRows.Close()
+		}
+		fixed += int(n)
+	}
+
+	// 5. Detect split-brain containers: ah.service-labeled containers not tracked in DB.
 	// We intentionally do NOT auto-repair DB state from container labels, as labels can
 	// be spoofed by any actor with Docker access. Instead, we log warnings for operator
 	// awareness and let GC handle cleanup of orphaned containers after minResourceAge.

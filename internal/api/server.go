@@ -15,6 +15,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/metering"
@@ -36,9 +37,10 @@ type ServerConfig struct {
 	DeploymentStore  *deployments.Store
 	DatabaseManager  databaseManager
 	KanbanManager    kanbanManager
-	MeteringStore    *metering.Store
-	BaseDomain       string
-	TraefikConfigDir string
+	MeteringStore      *metering.Store
+	EnvironmentManager *environments.Manager
+	BaseDomain         string
+	TraefikConfigDir   string
 }
 
 type kanbanManager interface {
@@ -75,6 +77,7 @@ type Server struct {
 	deploymentStore   *deployments.Store
 	dbManager         databaseManager
 	kanbanManager     kanbanManager
+	envManager        *environments.Manager
 	meteringStore     *metering.Store
 	dockerClient      docker.Client
 	authRateLimiter   *middleware.RateLimiter
@@ -115,6 +118,7 @@ func NewServer(cfg ServerConfig) *Server {
 		deploymentStore:   cfg.DeploymentStore,
 		dbManager:         cfg.DatabaseManager,
 		kanbanManager:     cfg.KanbanManager,
+		envManager:        cfg.EnvironmentManager,
 		meteringStore:     cfg.MeteringStore,
 		dockerClient:      cfg.Docker,
 		authRateLimiter:   rl,
@@ -231,6 +235,18 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/kanban", s.handleKanbanGet)
 		r.Get("/v1/kanban/admin-token", s.handleKanbanAdminToken)
 		r.Delete("/v1/kanban", s.handleKanbanDelete)
+
+		// Environment routes (except POST create and exec which need longer timeout)
+		// IMPORTANT: template routes must be registered before {envID} routes
+		// to prevent chi from treating "templates" as an envID.
+		r.Get("/v1/environments", s.handleEnvironmentList)
+		r.Get("/v1/environments/templates", s.handleEnvironmentTemplateList)
+		r.Get("/v1/environments/templates/{templateID}", s.handleEnvironmentTemplateGet)
+		r.Get("/v1/environments/{envID}", s.handleEnvironmentGet)
+		r.Delete("/v1/environments/{envID}", s.handleEnvironmentDelete)
+		r.Post("/v1/environments/{envID}/start", s.handleEnvironmentStart)
+		r.Post("/v1/environments/{envID}/stop", s.handleEnvironmentStop)
+		r.Post("/v1/environments/{envID}/lease", s.handleEnvironmentLeaseExtend)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -244,6 +260,16 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
 		r.Post("/v1/kanban", s.handleKanbanCreate)
+		r.Post("/v1/environments", s.handleEnvironmentCreate)
+	})
+
+	// Long-running endpoints that skip BOTH standard timeout AND idempotency.
+	// Exec is not idempotent — running the same command twice should produce two executions.
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMW)
+		r.Use(s.authRateLimiter.Middleware)
+		r.Use(s.globalRateLimiter.Middleware)
+		r.Post("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
 	})
 
 	s.router = r

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
@@ -118,6 +119,18 @@ type MockDockerClient struct {
 	// DiskUsage
 	DiskUsageFn    func(ctx context.Context) (*docker.StorageUsage, error)
 	DiskUsageCalls int
+
+	// RunEnvironment
+	RunEnvironmentFn    func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error)
+	RunEnvironmentCalls int
+
+	// ExecCreate
+	ExecCreateFn    func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
+	ExecCreateCalls []string // containerIDs
+
+	// ExecRun
+	ExecRunFn    func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error)
+	ExecRunCalls []string // exec IDs
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -337,4 +350,28 @@ func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage,
 		return m.DiskUsageFn(ctx)
 	}
 	return &docker.StorageUsage{}, nil
+}
+
+func (m *MockDockerClient) RunEnvironment(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
+	m.RunEnvironmentCalls++
+	if m.RunEnvironmentFn != nil {
+		return m.RunEnvironmentFn(ctx, cfg)
+	}
+	return "mock-env-container-" + cfg.EnvID, nil
+}
+
+func (m *MockDockerClient) ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+	m.ExecCreateCalls = append(m.ExecCreateCalls, containerID)
+	if m.ExecCreateFn != nil {
+		return m.ExecCreateFn(ctx, containerID, cmd, workDir)
+	}
+	return "mock-exec-id", nil
+}
+
+func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {
+	m.ExecRunCalls = append(m.ExecRunCalls, execID)
+	if m.ExecRunFn != nil {
+		return m.ExecRunFn(ctx, execID, timeout)
+	}
+	return nil, nil, 0, nil
 }

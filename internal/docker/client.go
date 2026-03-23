@@ -4,6 +4,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"bytes"
 	"io"
 	"log"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -50,6 +52,9 @@ type Client interface {
 	PruneDanglingImages(ctx context.Context) (int, error)
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
 	DiskUsage(ctx context.Context) (*StorageUsage, error)
+	RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error)
+	ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
+	ExecRun(ctx context.Context, execID string, timeout time.Duration) (stdout []byte, stderr []byte, exitCode int, err error)
 }
 
 // NetworkInfo holds metadata about a Docker network.
@@ -676,4 +681,164 @@ func (c *DockerClient) ListVolumes(ctx context.Context, prefix string) ([]string
 		names = append(names, v.Name)
 	}
 	return names, nil
+}
+
+// RunEnvironmentConfig holds parameters for running an environment container.
+type RunEnvironmentConfig struct {
+	TenantID    string
+	EnvID       string
+	Image       string
+	MemoryMB    int64
+	CPUMillis   int64
+	VolumeName  string
+	NetworkName string
+	Labels      map[string]string
+	EgressAllow bool
+}
+
+// RunEnvironment creates and starts an environment container with gVisor runtime.
+// Environments are dev workspaces: writable rootfs, sleep infinity entrypoint,
+// workspace volume at /workspace.
+func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error) {
+	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID, cfg.EnvID)
+
+	memoryBytes := cfg.MemoryMB * 1024 * 1024
+	nanoCPUs := cfg.CPUMillis * 1_000_000
+
+	// Build labels; ah.* keys are set last and cannot be overridden.
+	labels := make(map[string]string, len(cfg.Labels)+4)
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	labels["ah.tenant"] = cfg.TenantID
+	labels["ah.environment"] = cfg.EnvID
+	labels["ah.type"] = "environment"
+	labels["traefik.enable"] = "false"
+
+	containerCfg := &container.Config{
+		Image:      cfg.Image,
+		Cmd:        []string{"sleep", "infinity"},
+		WorkingDir: "/workspace",
+		Labels:     labels,
+	}
+
+	initTrue := true
+	hostCfg := &container.HostConfig{
+		Runtime: "runsc",
+		Init:    &initTrue,
+		Resources: container.Resources{
+			Memory:     memoryBytes,
+			MemorySwap: memoryBytes, // no swap
+			NanoCPUs:   nanoCPUs,
+			PidsLimit:  int64Ptr(256),
+		},
+		CapDrop:     []string{"ALL"},
+		SecurityOpt: []string{"no-new-privileges"},
+		Mounts: []mount.Mount{
+			{
+				Type:   mount.TypeVolume,
+				Source: cfg.VolumeName,
+				Target: "/workspace",
+			},
+		},
+		Tmpfs: map[string]string{
+			"/tmp":     "rw,noexec,nosuid,size=64m",
+			"/var/run": "rw,noexec,nosuid,size=16m",
+			"/var/tmp": "rw,noexec,nosuid,size=16m",
+			"/run":     "rw,noexec,nosuid,size=16m",
+		},
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		NetworkMode:   container.NetworkMode(cfg.NetworkName),
+	}
+
+	netCfg := &network.NetworkingConfig{}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("create environment container: %w", err)
+	}
+
+	// Ensure the tenant network exists
+	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("start environment container: %w", err)
+	}
+
+	return resp.ID, nil
+}
+
+// ExecCreate creates an exec instance in a container. Returns the exec ID.
+func (c *DockerClient) ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+	if workDir == "" {
+		workDir = "/workspace"
+	}
+	execCfg := container.ExecOptions{
+		AttachStdout: true,
+		AttachStderr: true,
+		Cmd:          cmd,
+		WorkingDir:   workDir,
+	}
+	resp, err := c.cli.ContainerExecCreate(ctx, containerID, execCfg)
+	if err != nil {
+		return "", fmt.Errorf("exec create: %w", err)
+	}
+	return resp.ID, nil
+}
+
+// maxExecOutputBytes limits stdout/stderr capture to 1MB each.
+const maxExecOutputBytes = 1024 * 1024
+
+// ExecRun attaches to an exec instance, reads stdout/stderr, and returns
+// the output along with the exit code. Output is capped at 1MB per stream.
+func (c *DockerClient) ExecRun(ctx context.Context, execID string, timeout time.Duration) (stdout []byte, stderr []byte, exitCode int, err error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resp, err := c.cli.ContainerExecAttach(ctx, execID, container.ExecAttachOptions{})
+	if err != nil {
+		return nil, nil, -1, fmt.Errorf("exec attach: %w", err)
+	}
+	defer resp.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	// stdcopy.StdCopy demuxes the multiplexed Docker stream.
+	// Use cappedWriter to truncate output at maxExecOutputBytes.
+	_, err = stdcopy.StdCopy(
+		&cappedWriter{buf: &stdoutBuf, max: maxExecOutputBytes},
+		&cappedWriter{buf: &stderrBuf, max: maxExecOutputBytes},
+		resp.Reader,
+	)
+	if err != nil && ctx.Err() == nil {
+		return nil, nil, -1, fmt.Errorf("exec read: %w", err)
+	}
+
+	inspect, err := c.cli.ContainerExecInspect(ctx, execID)
+	if err != nil {
+		return stdoutBuf.Bytes(), stderrBuf.Bytes(), -1, fmt.Errorf("exec inspect: %w", err)
+	}
+
+	return stdoutBuf.Bytes(), stderrBuf.Bytes(), inspect.ExitCode, nil
+}
+
+// cappedWriter writes to buf up to max bytes, silently discarding the rest.
+type cappedWriter struct {
+	buf *bytes.Buffer
+	max int
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	remaining := w.max - w.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil // discard but report success
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	w.buf.Write(p)
+	return len(p), nil
 }

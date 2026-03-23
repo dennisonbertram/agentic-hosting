@@ -55,6 +55,7 @@ type Client interface {
 	RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error)
 	ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
 	ExecRun(ctx context.Context, execID string, timeout time.Duration) (stdout []byte, stderr []byte, exitCode int, err error)
+	RenameContainer(ctx context.Context, containerID, newName string) error
 }
 
 // NetworkInfo holds metadata about a Docker network.
@@ -774,6 +775,11 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	}
 
 	return resp.ID, nil
+}
+
+// RenameContainer renames a container.
+func (c *DockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
+	return c.cli.ContainerRename(ctx, containerID, newName)
 }
 
 // ExecCreate creates an exec instance in a container. Returns the exec ID.

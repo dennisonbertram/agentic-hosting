@@ -131,6 +131,10 @@ type MockDockerClient struct {
 	// ExecRun
 	ExecRunFn    func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error)
 	ExecRunCalls []string // exec IDs
+
+	// RenameContainer
+	RenameContainerFn    func(ctx context.Context, containerID, newName string) error
+	RenameContainerCalls int
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -374,4 +378,12 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 		return m.ExecRunFn(ctx, execID, timeout)
 	}
 	return nil, nil, 0, nil
+}
+
+func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
+	m.RenameContainerCalls++
+	if m.RenameContainerFn != nil {
+		return m.RenameContainerFn(ctx, containerID, newName)
+	}
+	return nil
 }

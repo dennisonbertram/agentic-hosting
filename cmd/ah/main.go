@@ -185,8 +185,16 @@ func main() {
 	// Create metering store
 	meteringStore := metering.NewStore(store.MeteringDB)
 
-	// Create environment manager
+	// Create environment manager with warm pool
 	envMgr := environments.NewManager(store.StateDB, dockerClient)
+	envPool := environments.NewPoolManager(store.StateDB, dockerClient, environments.PoolConfig{
+		Enabled:      true,
+		PoolSize:     2,
+		MaxTotal:     6,
+		RefillPeriod: 60 * time.Second,
+	})
+	envMgr.SetPool(envPool)
+	go envPool.Run(context.Background())
 
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)

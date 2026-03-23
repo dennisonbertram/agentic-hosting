@@ -78,6 +78,7 @@ type ExecResponse struct {
 type Manager struct {
 	db     *sql.DB
 	docker docker.Client
+	pool   *PoolManager
 	mu     sync.Mutex // for state transitions
 }
 
@@ -90,6 +91,11 @@ func NewManager(db *sql.DB, docker docker.Client) *Manager {
 		db:     db,
 		docker: docker,
 	}
+}
+
+// SetPool sets the warm pool manager for faster environment creation.
+func (m *Manager) SetPool(p *PoolManager) {
+	m.pool = p
 }
 
 // Create provisions a new environment.

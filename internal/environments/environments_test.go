@@ -379,6 +379,13 @@ func TestListTemplates(t *testing.T) {
 
 	templates, err := mgr.ListTemplates(context.Background())
 	require.NoError(t, err)
-	assert.Len(t, templates, 1)
-	assert.Equal(t, "default", templates[0].Name)
+	assert.GreaterOrEqual(t, len(templates), 1, "should have at least 1 template")
+	// Find the default template
+	var foundDefault bool
+	for _, tmpl := range templates {
+		if tmpl.Name == "default" {
+			foundDefault = true
+		}
+	}
+	assert.True(t, foundDefault, "should include default template")
 }

@@ -186,7 +186,7 @@ func main() {
 	meteringStore := metering.NewStore(store.MeteringDB)
 
 	// Create environment manager with warm pool
-	envMgr := environments.NewManager(store.StateDB, dockerClient)
+	envMgr := environments.NewManager(store.StateDB, dockerClient, *baseDomain, cfg.TraefikConfigDir)
 	envPool := environments.NewPoolManager(store.StateDB, dockerClient, environments.PoolConfig{
 		Enabled:      true,
 		PoolSize:     2,

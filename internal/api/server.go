@@ -247,6 +247,9 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/environments/{envID}/start", s.handleEnvironmentStart)
 		r.Post("/v1/environments/{envID}/stop", s.handleEnvironmentStop)
 		r.Post("/v1/environments/{envID}/lease", s.handleEnvironmentLeaseExtend)
+		r.Post("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewCreate)
+		r.Get("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewList)
+		r.Delete("/v1/environments/{envID}/previews/{previewID}", s.handleEnvironmentPreviewDelete)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -261,6 +264,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/databases", s.handleDatabaseCreate)
 		r.Post("/v1/kanban", s.handleKanbanCreate)
 		r.Post("/v1/environments", s.handleEnvironmentCreate)
+		r.Post("/v1/environments/{envID}/sync", s.handleEnvironmentSync)
 	})
 
 	// Long-running endpoints that skip BOTH standard timeout AND idempotency.

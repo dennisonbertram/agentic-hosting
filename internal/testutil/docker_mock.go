@@ -135,6 +135,10 @@ type MockDockerClient struct {
 	// RenameContainer
 	RenameContainerFn    func(ctx context.Context, containerID, newName string) error
 	RenameContainerCalls int
+
+	// CopyToContainer
+	CopyToContainerFn    func(ctx context.Context, containerID string, dstPath string, content io.Reader) error
+	CopyToContainerCalls []string // containerIDs
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -384,6 +388,14 @@ func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, new
 	m.RenameContainerCalls++
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID string, dstPath string, content io.Reader) error {
+	m.CopyToContainerCalls = append(m.CopyToContainerCalls, containerID)
+	if m.CopyToContainerFn != nil {
+		return m.CopyToContainerFn(ctx, containerID, dstPath, content)
 	}
 	return nil
 }

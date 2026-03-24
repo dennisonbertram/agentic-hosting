@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -74,22 +76,54 @@ type ExecResponse struct {
 	DurationMs int64  `json:"duration_ms"`
 }
 
+// SyncRequest holds parameters for syncing code into an environment.
+type SyncRequest struct {
+	GitURL string `json:"git_url,omitempty"`
+	GitRef string `json:"git_ref,omitempty"` // branch/tag/commit, default "HEAD"
+}
+
+// Preview represents a preview route exposing an environment port via Traefik.
+type Preview struct {
+	ID            string `json:"id"`
+	EnvironmentID string `json:"environment_id"`
+	TenantID      string `json:"tenant_id"`
+	Name          string `json:"name"`
+	Port          int    `json:"port"`
+	DNSLabel      string `json:"dns_label"`
+	URL           string `json:"url,omitempty"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+// CreatePreviewRequest holds parameters for creating a preview route.
+type CreatePreviewRequest struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+}
+
+// previewNamePattern matches valid preview names: 1-63 chars, alphanumeric + hyphens.
+var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
+
 // Manager manages environment lifecycle.
 type Manager struct {
-	db     *sql.DB
-	docker docker.Client
-	pool   *PoolManager
-	mu     sync.Mutex // for state transitions
+	db               *sql.DB
+	docker           docker.Client
+	pool             *PoolManager
+	baseDomain       string
+	traefikConfigDir string
+	mu               sync.Mutex // for state transitions
 }
 
 // NewManager creates an environment manager.
-func NewManager(db *sql.DB, docker docker.Client) *Manager {
+func NewManager(db *sql.DB, docker docker.Client, baseDomain, traefikConfigDir string) *Manager {
 	if docker == nil {
 		panic("environments: NewManager requires non-nil docker client")
 	}
 	return &Manager{
-		db:     db,
-		docker: docker,
+		db:               db,
+		docker:           docker,
+		baseDomain:       baseDomain,
+		traefikConfigDir: traefikConfigDir,
 	}
 }
 
@@ -302,6 +336,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 	if err != nil {
 		return err
 	}
+
+	// Clean up preview Traefik route files before DB cascade deletes the rows
+	m.cleanupPreviews(ctx, envID)
 
 	// Stop and remove container (ignore not-found errors)
 	if e.ContainerID != "" {
@@ -649,4 +686,282 @@ func isNotFoundError(err error) bool {
 		strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no such volume") ||
 		strings.Contains(msg, "404")
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Sync
+// ---------------------------------------------------------------------------
+
+// SyncWorkspace syncs code into an environment's /workspace directory via git.
+func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req SyncRequest) error {
+	e, err := m.Get(ctx, tenantID, envID)
+	if err != nil {
+		return err
+	}
+	if e.Status != "running" {
+		return apierr.Validation(fmt.Sprintf("environment must be running to sync (current: %s)", e.Status))
+	}
+
+	if req.GitURL == "" {
+		return apierr.Validation("git_url is required")
+	}
+	if !strings.HasPrefix(req.GitURL, "https://") {
+		return apierr.Validation("git_url must start with https://")
+	}
+
+	ref := req.GitRef
+	if ref == "" {
+		ref = "HEAD"
+	}
+
+	// Build the git clone/pull command to run inside the container.
+	// If /workspace/.git exists, fetch and checkout; otherwise clone fresh.
+	gitCmd := fmt.Sprintf(
+		`cd /workspace && if [ -d .git ]; then git fetch origin && git checkout %s; else git clone --depth=1 %s .; fi`,
+		ref, req.GitURL,
+	)
+
+	// Create and run exec with a 5-minute timeout
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"sh", "-c", gitCmd}, "/workspace")
+	if err != nil {
+		return fmt.Errorf("sync exec create: %w", err)
+	}
+
+	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("sync exec run: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("git sync failed with exit code %d", exitCode)
+	}
+
+	// Update last_activity_at
+	now := time.Now().Unix()
+	_, _ = m.db.ExecContext(ctx,
+		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ?`,
+		now, now, envID,
+	)
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Preview Routing
+// ---------------------------------------------------------------------------
+
+// CreatePreview creates a preview route for an environment port.
+func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req CreatePreviewRequest) (*Preview, error) {
+	e, err := m.Get(ctx, tenantID, envID)
+	if err != nil {
+		return nil, err
+	}
+	if e.Status != "running" {
+		return nil, apierr.Validation(fmt.Sprintf("environment must be running to create preview (current: %s)", e.Status))
+	}
+
+	// Validate name
+	if !previewNamePattern.MatchString(req.Name) {
+		return nil, apierr.Validation("preview name must be 1-63 characters, alphanumeric and hyphens, starting with alphanumeric")
+	}
+
+	// Validate port
+	if req.Port < 1 || req.Port > 65535 {
+		return nil, apierr.Validation("port must be between 1 and 65535")
+	}
+
+	// Generate ID and DNS label
+	id, err := generateID()
+	if err != nil {
+		return nil, err
+	}
+
+	// DNS label: env-{first8(envID)}-{name}
+	envPrefix := envID
+	if len(envPrefix) > 8 {
+		envPrefix = envPrefix[:8]
+	}
+	dnsLabel := fmt.Sprintf("env-%s-%s", envPrefix, req.Name)
+
+	now := time.Now().Unix()
+
+	// Insert DB row
+	_, err = m.db.ExecContext(ctx,
+		`INSERT INTO environment_previews (id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, apierr.Conflict(fmt.Sprintf("preview with name %q already exists for this environment", req.Name))
+		}
+		return nil, fmt.Errorf("insert preview: %w", err)
+	}
+
+	// Write Traefik route
+	containerName := fmt.Sprintf("ah-env-%s-%s", tenantID, envID)
+	if err := m.writePreviewTraefikRoute(id, dnsLabel, containerName, req.Port); err != nil {
+		// Rollback DB on Traefik write failure
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, id)
+		return nil, fmt.Errorf("write traefik route: %w", err)
+	}
+
+	url := ""
+	if m.baseDomain != "" {
+		url = fmt.Sprintf("https://%s.%s", dnsLabel, m.baseDomain)
+	}
+
+	return &Preview{
+		ID:            id,
+		EnvironmentID: envID,
+		TenantID:      tenantID,
+		Name:          req.Name,
+		Port:          req.Port,
+		DNSLabel:      dnsLabel,
+		URL:           url,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil
+}
+
+// ListPreviews returns all preview routes for an environment.
+func (m *Manager) ListPreviews(ctx context.Context, tenantID, envID string) ([]*Preview, error) {
+	// Verify environment belongs to tenant
+	if _, err := m.Get(ctx, tenantID, envID); err != nil {
+		return nil, err
+	}
+
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at
+		 FROM environment_previews WHERE environment_id = ? AND tenant_id = ?
+		 ORDER BY created_at DESC`,
+		envID, tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list previews: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]*Preview, 0)
+	for rows.Next() {
+		p := &Preview{}
+		if err := rows.Scan(&p.ID, &p.EnvironmentID, &p.TenantID, &p.Name,
+			&p.Port, &p.DNSLabel, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan preview: %w", err)
+		}
+		if m.baseDomain != "" {
+			p.URL = fmt.Sprintf("https://%s.%s", p.DNSLabel, m.baseDomain)
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
+// DeletePreview removes a preview route.
+func (m *Manager) DeletePreview(ctx context.Context, tenantID, envID, previewID string) error {
+	// Verify the preview exists and belongs to the right tenant/env
+	var id string
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id FROM environment_previews WHERE id = ? AND environment_id = ? AND tenant_id = ?`,
+		previewID, envID, tenantID,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return apierr.NotFound("preview not found")
+	}
+	if err != nil {
+		return fmt.Errorf("get preview: %w", err)
+	}
+
+	// Delete Traefik config file
+	m.deletePreviewTraefikRoute(previewID)
+
+	// Delete DB row
+	_, err = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, previewID)
+	if err != nil {
+		return fmt.Errorf("delete preview: %w", err)
+	}
+	return nil
+}
+
+// writePreviewTraefikRoute writes a Traefik dynamic config file for a preview.
+func (m *Manager) writePreviewTraefikRoute(previewID, dnsLabel, containerName string, port int) error {
+	if m.traefikConfigDir == "" {
+		return nil
+	}
+
+	var content string
+	if m.baseDomain != "" {
+		host := fmt.Sprintf("%s.%s", dnsLabel, m.baseDomain)
+		content = fmt.Sprintf(`http:
+  routers:
+    env-preview-%s:
+      rule: "Host(`+"`%s`"+`)"
+      service: "env-preview-%s"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+  services:
+    env-preview-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%d"
+`, previewID, host, previewID, previewID, containerName, port)
+	} else {
+		// Localhost mode
+		content = fmt.Sprintf(`http:
+  routers:
+    env-preview-%s:
+      rule: "Host(`+"`%s.localhost`"+`)"
+      service: "env-preview-%s"
+      entryPoints:
+        - web
+  services:
+    env-preview-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%d"
+`, previewID, dnsLabel, previewID, previewID, containerName, port)
+	}
+
+	path := filepath.Join(m.traefikConfigDir, "env-preview-"+previewID+".yml")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0640); err != nil {
+		return fmt.Errorf("write traefik route tmp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename traefik route %s: %w", path, err)
+	}
+	return nil
+}
+
+// deletePreviewTraefikRoute removes the Traefik config file for a preview.
+func (m *Manager) deletePreviewTraefikRoute(previewID string) {
+	if m.traefikConfigDir == "" {
+		return
+	}
+	path := filepath.Join(m.traefikConfigDir, "env-preview-"+previewID+".yml")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("environments: failed to remove traefik route %s: %v", path, err)
+	}
+}
+
+// cleanupPreviews deletes all preview Traefik route files for an environment
+// and removes the DB rows (CASCADE handles DB, but we also need file cleanup).
+func (m *Manager) cleanupPreviews(ctx context.Context, envID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id FROM environment_previews WHERE environment_id = ?`, envID)
+	if err != nil {
+		log.Printf("environments: cleanup previews query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var previewID string
+		if err := rows.Scan(&previewID); err != nil {
+			continue
+		}
+		m.deletePreviewTraefikRoute(previewID)
+	}
 }

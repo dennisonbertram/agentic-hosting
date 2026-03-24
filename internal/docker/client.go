@@ -56,6 +56,7 @@ type Client interface {
 	ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
 	ExecRun(ctx context.Context, execID string, timeout time.Duration) (stdout []byte, stderr []byte, exitCode int, err error)
 	RenameContainer(ctx context.Context, containerID, newName string) error
+	CopyToContainer(ctx context.Context, containerID string, dstPath string, content io.Reader) error
 }
 
 // NetworkInfo holds metadata about a Docker network.
@@ -833,6 +834,11 @@ func (c *DockerClient) ExecRun(ctx context.Context, execID string, timeout time.
 	}
 
 	return stdoutBuf.Bytes(), stderrBuf.Bytes(), inspect.ExitCode, nil
+}
+
+// CopyToContainer copies a tar archive into the container at dstPath.
+func (c *DockerClient) CopyToContainer(ctx context.Context, containerID string, dstPath string, content io.Reader) error {
+	return c.cli.CopyToContainer(ctx, containerID, dstPath, content, container.CopyToContainerOptions{})
 }
 
 // cappedWriter writes to buf up to max bytes, silently discarding the rest.

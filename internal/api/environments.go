@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
@@ -215,4 +216,95 @@ func (s *Server) handleEnvironmentTemplateGet(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, tmpl)
+}
+
+// POST /v1/environments/{envID}/sync
+func (s *Server) handleEnvironmentSync(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnvironmentManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	envID := chi.URLParam(r, "envID")
+
+	var req environments.SyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if req.GitURL == "" {
+		writeError(w, http.StatusBadRequest, "git_url is required")
+		return
+	}
+	if !strings.HasPrefix(req.GitURL, "https://") {
+		writeError(w, http.StatusBadRequest, "git_url must start with https://")
+		return
+	}
+
+	if err := s.envManager.SyncWorkspace(r.Context(), tenantID, envID, req); err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
+}
+
+// POST /v1/environments/{envID}/previews
+func (s *Server) handleEnvironmentPreviewCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnvironmentManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	envID := chi.URLParam(r, "envID")
+
+	var req environments.CreatePreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	preview, err := s.envManager.CreatePreview(r.Context(), tenantID, envID, req)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, preview)
+}
+
+// GET /v1/environments/{envID}/previews
+func (s *Server) handleEnvironmentPreviewList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnvironmentManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	envID := chi.URLParam(r, "envID")
+
+	previews, err := s.envManager.ListPreviews(r.Context(), tenantID, envID)
+	if err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+	if previews == nil {
+		previews = []*environments.Preview{}
+	}
+
+	writeJSON(w, http.StatusOK, previews)
+}
+
+// DELETE /v1/environments/{envID}/previews/{previewID}
+func (s *Server) handleEnvironmentPreviewDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireEnvironmentManager(w) {
+		return
+	}
+	tenantID := middleware.GetTenantID(r.Context())
+	envID := chi.URLParam(r, "envID")
+	previewID := chi.URLParam(r, "previewID")
+
+	if err := s.envManager.DeletePreview(r.Context(), tenantID, envID, previewID); err != nil {
+		apierr.WriteAPIError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

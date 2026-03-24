@@ -3,6 +3,7 @@ package environments
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -38,7 +39,17 @@ func newTestManager(t *testing.T, maxEnvs int) (*Manager, *testutil.MockDockerCl
 	seedTenant(t, db, testTenantID, maxEnvs)
 
 	mock := &testutil.MockDockerClient{}
-	mgr := NewManager(db, mock)
+	mgr := NewManager(db, mock, "", "")
+	return mgr, mock
+}
+
+func newTestManagerWithTraefik(t *testing.T, maxEnvs int, baseDomain, traefikDir string) (*Manager, *testutil.MockDockerClient) {
+	t.Helper()
+	db := testutil.NewStateDB(t)
+	seedTenant(t, db, testTenantID, maxEnvs)
+
+	mock := &testutil.MockDockerClient{}
+	mgr := NewManager(db, mock, baseDomain, traefikDir)
 	return mgr, mock
 }
 
@@ -388,4 +399,204 @@ func TestListTemplates(t *testing.T) {
 		}
 	}
 	assert.True(t, foundDefault, "should include default template")
+}
+
+// ---------------------------------------------------------------------------
+// SyncWorkspace
+// ---------------------------------------------------------------------------
+
+func TestSyncWorkspace_Success(t *testing.T) {
+	mgr, mock := newTestManager(t, 5)
+
+	mock.ExecCreateFn = func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+		// Verify git clone command is constructed correctly
+		assert.Equal(t, "/workspace", workDir)
+		assert.Equal(t, "sh", cmd[0])
+		assert.Equal(t, "-c", cmd[1])
+		assert.Contains(t, cmd[2], "https://github.com/test/repo.git")
+		return "exec-sync", nil
+	}
+	mock.ExecRunFn = func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {
+		assert.Equal(t, "exec-sync", execID)
+		assert.Equal(t, 5*time.Minute, timeout)
+		return nil, nil, 0, nil
+	}
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "sync-env"})
+	require.NoError(t, err)
+
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "https://github.com/test/repo.git",
+	})
+	require.NoError(t, err)
+	assert.Len(t, mock.ExecCreateCalls, 1)
+	assert.Len(t, mock.ExecRunCalls, 1)
+}
+
+func TestSyncWorkspace_NotRunning(t *testing.T) {
+	mgr, _ := newTestManager(t, 5)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "sync-env"})
+	require.NoError(t, err)
+
+	// Stop the environment
+	err = mgr.Stop(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "https://github.com/test/repo.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be running")
+}
+
+func TestSyncWorkspace_InvalidURL(t *testing.T) {
+	mgr, _ := newTestManager(t, 5)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "sync-env"})
+	require.NoError(t, err)
+
+	// http:// should be rejected
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "http://github.com/test/repo.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+
+	// git:// should be rejected
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "git://github.com/test/repo.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
+
+	// Empty should be rejected
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git_url is required")
+}
+
+// ---------------------------------------------------------------------------
+// Previews
+// ---------------------------------------------------------------------------
+
+func TestCreatePreview_Success(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
+	require.NoError(t, err)
+
+	preview, err := mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 8080,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, preview.ID)
+	assert.Equal(t, "api", preview.Name)
+	assert.Equal(t, 8080, preview.Port)
+	assert.Contains(t, preview.DNSLabel, "env-")
+	assert.Contains(t, preview.DNSLabel, "-api")
+	assert.Contains(t, preview.URL, "example.com")
+
+	// Verify Traefik route file was written
+	files, _ := os.ReadDir(dir)
+	assert.Len(t, files, 1)
+	assert.Contains(t, files[0].Name(), "env-preview-")
+}
+
+func TestCreatePreview_DuplicateName(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
+	require.NoError(t, err)
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 8080,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 3000,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+}
+
+func TestCreatePreview_InvalidPort(t *testing.T) {
+	mgr, _ := newTestManager(t, 5)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
+	require.NoError(t, err)
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 0,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "port must be between")
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 70000,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "port must be between")
+}
+
+func TestListPreviews_Success(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
+	require.NoError(t, err)
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 8080,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "web",
+		Port: 3000,
+	})
+	require.NoError(t, err)
+
+	previews, err := mgr.ListPreviews(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Len(t, previews, 2)
+}
+
+func TestDeletePreview_Success(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
+	require.NoError(t, err)
+
+	preview, err := mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "api",
+		Port: 8080,
+	})
+	require.NoError(t, err)
+
+	// Verify file exists
+	files, _ := os.ReadDir(dir)
+	assert.Len(t, files, 1)
+
+	err = mgr.DeletePreview(context.Background(), testTenantID, env.ID, preview.ID)
+	require.NoError(t, err)
+
+	// Verify file is removed
+	files, _ = os.ReadDir(dir)
+	assert.Len(t, files, 0)
+
+	// Verify DB row is gone
+	previews, err := mgr.ListPreviews(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Len(t, previews, 0)
 }

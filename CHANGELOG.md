@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+## [0.5.0] - 2026-03-30
+
+### Added
+
 - Deployment tracking — persistent `deployments` table records every deploy with status, timing, build ID, and source metadata (#79)
 - `PATCH /v1/services/{id}` — rename services without redeploying (#83)
 - Health endpoint cache bypass — `?fresh=true` query parameter skips the 30-second cache (#99)

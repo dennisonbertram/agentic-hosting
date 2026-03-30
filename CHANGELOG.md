@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Instant Environments** — first-class interactive workspaces for AI agents with full lifecycle management (create, start, stop, exec, delete)
+- **Warm Pool** — pre-created containers for instant environment startup with configurable pool sizes per template
+- **Language Templates** — built-in environment templates for default (Ubuntu), Node.js, Python, and Go workspaces
+- **Workspace Sync** — git-based file synchronization to environment workspaces via HTTPS
+- **Preview Routing** — HTTP routing to running environment containers with automatic Traefik configuration
 - Deployment tracking — persistent `deployments` table records every deploy with status, timing, build ID, and source metadata (#79)
 - `PATCH /v1/services/{id}` — rename services without redeploying (#83)
 - Health endpoint cache bypass — `?fresh=true` query parameter skips the 30-second cache (#99)
@@ -42,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Pagination limit cap on list endpoints prevents unbounded queries (#93)
 - Database name validation enforces DNS-safe names via regex (#104)
 - Quota error codes — `QuotaExceeded` now returns 409 Conflict instead of 403 Forbidden (#100)
+- Fixed flaky `TestStartBuild_LogTruncationEndToEnd` — resolved SQLite write contention and build log flush race
+- Fixed `StopAllForTenant` deadlock with serialized SQLite connections in tests
 
 ### Changed
 

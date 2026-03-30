@@ -1141,14 +1141,28 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 		log.Printf("services: failed to list services for tenant %s: %v", tenantID, err)
 		return
 	}
-	defer rows.Close()
 
+	// Collect all service records before closing the rows iterator.
+	// We must close the rows before calling ExecContext so that the single
+	// open connection (SetMaxOpenConns(1) in tests) is not held while we
+	// attempt to acquire it again, which would deadlock.
+	type svcRecord struct {
+		id          string
+		containerID sql.NullString
+	}
+	var svcs []svcRecord
 	for rows.Next() {
-		var svcID string
-		var containerID sql.NullString
-		if err := rows.Scan(&svcID, &containerID); err != nil {
+		var rec svcRecord
+		if err := rows.Scan(&rec.id, &rec.containerID); err != nil {
 			continue
 		}
+		svcs = append(svcs, rec)
+	}
+	rows.Close()
+
+	for _, rec := range svcs {
+		svcID := rec.id
+		containerID := rec.containerID
 		if containerID.Valid && containerID.String != "" {
 			// "Not found" from stop/remove is treated as success: the container is
 			// already gone (likely cleaned up by the label-based pre-pass above).

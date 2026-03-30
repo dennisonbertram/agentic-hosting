@@ -231,9 +231,11 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	defer func() { <-m.buildQueue }() // release queue slot
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
+	// Clean up the log state map entry when done.
+	// NOTE: flushTailBuffer is called explicitly before each final status write
+	// (succeeded/failed) so that the DB log is fully flushed before any caller
+	// polling on build status can observe the terminal state.
 	defer func() {
-		// Flush tail buffer if truncation occurred, then clean up
-		m.flushTailBuffer(ctx, buildID)
 		m.logMu.Lock()
 		delete(m.logStates, buildID)
 		m.logMu.Unlock()
@@ -268,6 +270,9 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if err != nil {
 		logCb("[ah] BUILD FAILED: " + err.Error())
 		log.Printf("build %s failed: %v", buildID, err)
+		// Flush tail buffer before writing final status so that any caller
+		// polling on status=failed will see a complete log.
+		m.flushTailBuffer(finalCtx, buildID)
 		if _, dbErr := m.db.ExecContext(finalCtx,
 			`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'`,
 			finishedAt, buildID,
@@ -286,6 +291,9 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag, buildID); deployErr != nil {
 			log.Printf("build %s deploy failed: %v", buildID, deployErr)
 			logCb("[ah] Deploy failed: " + deployErr.Error())
+			// Flush tail buffer before writing final status so that any caller
+			// polling on status=failed will see a complete log.
+			m.flushTailBuffer(finalCtx, buildID)
 			if _, dbErr := m.db.ExecContext(finalCtx,
 				`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'`,
 				finishedAt, buildID,
@@ -300,6 +308,9 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		}
 		deployCancel()
 	}
+	// Flush tail buffer before writing final status so that any caller
+	// polling on status=succeeded will see a complete log.
+	m.flushTailBuffer(finalCtx, buildID)
 	if _, dbErr := m.db.ExecContext(finalCtx,
 		`UPDATE builds SET status = 'succeeded', finished_at = ? WHERE id = ? AND status = 'running'`,
 		finishedAt, buildID,

@@ -28,6 +28,11 @@ func NewStateDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("testutil.NewStateDB: open: %v", err)
 	}
+	// Serialize all writes to in-memory SQLite. Without this, concurrent
+	// goroutines open multiple connections and contend on the same WAL lock,
+	// causing "database table is locked" errors that exceed _busy_timeout.
+	// SQLite in-memory databases are single-file; one connection is correct.
+	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
 	if err := db.ApplyStateMigrations(sqlDB); err != nil {
 		t.Fatalf("testutil.NewStateDB: migrations: %v", err)
@@ -47,6 +52,9 @@ func NewMeteringDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("testutil.NewMeteringDB: open: %v", err)
 	}
+	// Same rationale as NewStateDB: serialize writes to avoid lock contention
+	// on in-memory SQLite databases under concurrent test goroutines.
+	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
 	if err := db.ApplyMeteringMigrations(sqlDB); err != nil {
 		t.Fatalf("testutil.NewMeteringDB: migrations: %v", err)

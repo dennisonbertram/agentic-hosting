@@ -39,7 +39,7 @@ Single Go binary (`ah`) with zero runtime dependencies beyond Docker.
 [GC goroutine, 5min interval]
     → Prunes orphaned containers, volumes, images, build dirs
 
-[State DB: /var/lib/ah/ah.db]        (SQLite WAL, 9 migrations)
+[State DB: /var/lib/ah/ah.db]        (SQLite WAL, 19 migrations)
 [Metering DB: /var/lib/ah/ah-metering.db]
 
 [Docker Engine]
@@ -53,7 +53,7 @@ Single Go binary (`ah`) with zero runtime dependencies beyond Docker.
 
 ## Database Schema
 
-### State DB (9 migrations)
+### State DB (19 migrations)
 
 **tenants** — one row per customer
 **api_keys** — HMAC-SHA256 hashed, max 20 per tenant
@@ -62,6 +62,11 @@ Single Go binary (`ah`) with zero runtime dependencies beyond Docker.
 **service_env** — AES-256-GCM encrypted per-service environment variables
 **builds** — Nixpacks build records with log storage
 **databases** — Postgres/Redis provisioning state, encrypted credentials
+**deployments** — deployment tracking records per service (state_013)
+**environments** — instant workspace containers per tenant (state_016)
+**environment_templates** — pre-defined workspace images (default, node, python, go) (state_016/017)
+**warm_pool** — pre-warmed environment containers for fast allocation (state_018)
+**environment_previews** — per-port preview URL routing for environment workspaces (state_019)
 
 **services columns across all migrations:**
 ```
@@ -75,7 +80,40 @@ last_crashed_at,         -- state_007
 crash_window_start,      -- state_008
 circuit_retry_at,        -- state_009
 circuit_open_count       -- state_009
+dns_label,               -- state_011
+url                      -- state_012
 ```
+
+**tenant_quotas additional columns:**
+```
+max_builds_concurrent,        -- state_014 (default 3)
+max_env_vars_per_service,     -- state_014 (default 50)
+max_environments              -- state_016 (default 2)
+```
+
+**Migration index:**
+| Migration | Description |
+|-----------|-------------|
+| state_001 | Initial schema: tenants, api_keys, tenant_quotas, services |
+| state_002 | service_env table + port column |
+| state_003 | last_error column on services |
+| state_004 | builds table |
+| state_005 | databases table |
+| state_006 | databases port unique constraint |
+| state_007 | circuit breaker columns on services |
+| state_008 | crash_window_start column |
+| state_009 | circuit recovery: circuit_retry_at, circuit_open_count |
+| state_010_kanbans | kanban board tables |
+| state_010_snapshots | snapshot/restore tables |
+| state_011 | dns_label column on services |
+| state_012 | url column on services |
+| state_013 | deployments tracking table |
+| state_014 | max_builds_concurrent + max_env_vars_per_service quota columns |
+| state_015 | cancelled_at column on deployments |
+| state_016 | environments + environment_templates tables; max_environments quota column |
+| state_017 | Seed node, python, go environment templates |
+| state_018 | warm_pool table for pre-warmed containers |
+| state_019 | environment_previews table for preview URL routing |
 
 ### Metering DB (1 migration)
 
@@ -109,6 +147,13 @@ circuit_open_count       -- state_009
 | POST/GET | `/v1/databases` | Provision/list databases |
 | GET/DELETE | `/v1/databases/{id}` | Read/delete database |
 | GET | `/v1/databases/{id}/connection-string` | Plaintext connection string |
+| GET | `/v1/environments/templates` | List available workspace templates |
+| POST/GET | `/v1/environments` | Create/list environments |
+| GET/DELETE | `/v1/environments/{id}` | Read/delete environment |
+| POST | `/v1/environments/{id}/exec` | Execute command in environment container |
+| GET/PUT | `/v1/environments/{id}/files` | Read/write files via workspace sync |
+| POST/GET | `/v1/environments/{id}/previews` | Create/list preview URL routes |
+| DELETE | `/v1/environments/{id}/previews/{pid}` | Delete preview route |
 
 ---
 
@@ -202,6 +247,31 @@ Reconciler loop, circuit breaker (crash_count, crash_window, circuit_open), GC d
 - Round 6: systemd Docker access, image GC, path safety
 - Round 7: two-step circuit breaker updates (SQLite evaluation order), backup retention, path safety
 
+### Phase 6 — Instant Environments (2026-03-24)
+
+First-class interactive workspaces for AI agents. An environment is a persistent container (not a deployed service) — designed for ephemeral task execution, code exploration, and shell access.
+
+**Core features:**
+- Workspace templates: `default` (Ubuntu 24.04), `node` (Node 22), `python` (Python 3.12), `go` (Go 1.23)
+- Warm pool: pre-warmed containers per template for sub-second allocation (default, node, python templates; go is cold-start)
+- Lease system: configurable TTL with `lease_expires_at`; environments auto-expire
+- Workspace sync: read/write arbitrary files inside the environment container via HTTP
+- Preview routing: expose internal container ports via named DNS labels (e.g. `myapp.env.agentic.hosting`)
+- Exec API: run arbitrary commands inside the environment
+
+**Architecture additions:**
+```
+[Environment Manager]
+    ├── Warm pool goroutine — maintains pre-warmed containers per template
+    ├── Lease expiry — cleans up expired environments
+    └── Preview proxy — Traefik labels per preview port
+
+[environment_templates]  — tmpl_default, tmpl_node, tmpl_python, tmpl_go
+[warm_pool]              — ready containers keyed by template_id
+[environments]           — active workspace containers, one per tenant name
+[environment_previews]   — named port routes with unique DNS labels
+```
+
 ### Post-MVP Additions (2026-03-10)
 
 **Self-Healer** — commit `064232a`:
@@ -244,7 +314,7 @@ journalctl -u ah.service -f
 
 ## Known Gaps / Deferred Work
 
-- **Zero test coverage** — no `*_test.go` files exist anywhere; no CI. Highest priority: reconciler unit tests with mock Docker client.
+- **Test coverage exists** (as of 2026-03-19) across 20 packages; reconciler, API handlers, environments, warm pool all covered. CI/CD pipeline is deferred (decision doc at `docs/decisions/cicd-decision.md`).
 - **No metrics export** — metering tables exist but no Prometheus/Grafana integration
 - **No billing** — metering data is collected but not acted on
 - **No admin-first workflow** — operations remain available via REST API, with an optional supervisory dashboard
@@ -268,6 +338,7 @@ internal/
     services.go     — service CRUD + lifecycle
     builds.go       — build trigger, status, log streaming
     databases.go    — Postgres/Redis provisioning
+    environments.go — instant workspace endpoints
   middleware/
     auth.go         — HMAC verification + auth cache
     ratelimit.go    — per-tenant + global token bucket
@@ -275,7 +346,7 @@ internal/
     helpers.go      — shared error helpers
   db/
     db.go           — SQLite init, migration runner
-    migrations/     — state_001 through state_009, metering_001
+    migrations/     — state_001 through state_019, metering_001
   services/
     services.go     — service manager
     deploy_image.go — container deployment workflow
@@ -287,6 +358,9 @@ internal/
     builds.go       — build state management
   databases/
     databases.go    — database provisioning
+  environments/
+    environments.go — instant workspace lifecycle
+    warm_pool.go    — warm pool manager
   reconciler/
     reconciler.go   — 30s state sync loop
   gc/
@@ -334,17 +408,17 @@ ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254
 cd /root/agentic-hosting
 CGO_ENABLED=1 GOOS=linux go build -o bin/ah ./cmd/ah
 cp bin/ah /usr/local/bin/ah
-systemctl restart paasd.service
-journalctl -u paasd.service -f
+systemctl restart ah.service
+journalctl -u ah.service -f
 ```
 
 Go 1.25 is installed at `/usr/local/go` on the server. If `go` is not in PATH, use `/usr/local/go/bin/go`.
 
 ### Environment File is Required
 
-The systemd unit reads `EnvironmentFile=/etc/default/paasd`. If that file is absent, `AH_BOOTSTRAP_TOKEN` is unset and the binary refuses to start (or starts in a degraded mode depending on flags).
+The systemd unit reads `EnvironmentFile=/etc/default/ah`. If that file is absent, `AH_BOOTSTRAP_TOKEN` is unset and the binary refuses to start (or starts in a degraded mode depending on flags).
 
-Minimum `/etc/default/paasd` content:
+Minimum `/etc/default/ah` content:
 ```
 AH_BOOTSTRAP_TOKEN=<64-char hex token>
 ```
@@ -371,8 +445,8 @@ pkill -f '/usr/local/bin/ah' || true
 `systemctl start` runs the service now; `systemctl enable` makes it survive reboots. Both are required.
 
 ```bash
-systemctl enable paasd.service
-systemctl start paasd.service
+systemctl enable ah.service
+systemctl start ah.service
 ```
 
 ### Website Container Must Be Explicitly Rebuilt

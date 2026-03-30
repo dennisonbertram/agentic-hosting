@@ -600,3 +600,142 @@ func TestDeletePreview_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, previews, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Additional behavioral tests (regression coverage)
+// ---------------------------------------------------------------------------
+
+// TestSyncWorkspace_ExecCalledOnRunning verifies that SyncWorkspace calls ExecCreate
+// and ExecRun exactly once when the environment is running.
+func TestSyncWorkspace_ExecCalledOnRunning(t *testing.T) {
+	mgr, mock := newTestManager(t, 5)
+
+	var execCreateCount, execRunCount int
+	mock.ExecCreateFn = func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+		execCreateCount++
+		return "exec-sync-id", nil
+	}
+	mock.ExecRunFn = func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {
+		execRunCount++
+		return nil, nil, 0, nil
+	}
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "running-sync-env"})
+	require.NoError(t, err)
+	require.Equal(t, "running", env.Status)
+
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "https://github.com/example/repo.git",
+	})
+	require.NoError(t, err)
+
+	// Both ExecCreate and ExecRun must be called exactly once.
+	assert.Equal(t, 1, execCreateCount, "ExecCreate must be called once for running environment")
+	assert.Equal(t, 1, execRunCount, "ExecRun must be called once for running environment")
+}
+
+// TestSyncWorkspace_StoppedEnvReturnsError verifies that SyncWorkspace returns an
+// error (not nil) when the environment is not in running state.
+func TestSyncWorkspace_StoppedEnvReturnsError(t *testing.T) {
+	mgr, mock := newTestManager(t, 5)
+
+	var execCreateCalled bool
+	mock.ExecCreateFn = func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+		execCreateCalled = true
+		return "should-not-be-called", nil
+	}
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "stopped-sync-env"})
+	require.NoError(t, err)
+
+	// Explicitly stop the environment so it is not running.
+	err = mgr.Stop(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+
+	err = mgr.SyncWorkspace(context.Background(), testTenantID, env.ID, SyncRequest{
+		GitURL: "https://github.com/example/repo.git",
+	})
+	require.Error(t, err, "SyncWorkspace must return an error for a stopped environment")
+	assert.Contains(t, err.Error(), "must be running",
+		"error message should mention running requirement")
+	assert.False(t, execCreateCalled,
+		"ExecCreate must NOT be called when environment is not running")
+}
+
+// TestCreatePreview_TraefikFileWritten verifies that CreatePreview writes a
+// Traefik dynamic configuration file to the configured directory.
+func TestCreatePreview_TraefikFileWritten(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "preview.example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "traefik-env"})
+	require.NoError(t, err)
+
+	preview, err := mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "backend",
+		Port: 9090,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, preview.ID)
+	assert.Equal(t, "backend", preview.Name)
+	assert.Equal(t, 9090, preview.Port)
+	assert.Contains(t, preview.URL, "preview.example.com",
+		"preview URL should include the configured base domain")
+
+	// Exactly one Traefik config file must be written to the configured directory.
+	files, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, files, 1, "exactly one Traefik config file should be written per preview")
+	assert.Contains(t, files[0].Name(), ".yml",
+		"Traefik config file should have a .yml extension")
+}
+
+// TestListPreviews_EmptySlice verifies that ListPreviews returns an empty,
+// non-nil slice when the environment has no previews.
+func TestListPreviews_EmptySlice(t *testing.T) {
+	mgr, _ := newTestManager(t, 5)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "no-preview-env"})
+	require.NoError(t, err)
+
+	previews, err := mgr.ListPreviews(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+
+	// Result must be a non-nil empty slice — callers that range over it must not panic.
+	assert.NotNil(t, previews, "ListPreviews must return a non-nil slice even when empty")
+	assert.Len(t, previews, 0, "ListPreviews must return zero previews for a fresh environment")
+}
+
+// TestDeletePreview_RemovesRowAndFile verifies that DeletePreview removes the DB
+// row AND the corresponding Traefik config file in a single operation.
+func TestDeletePreview_RemovesRowAndFile(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "del.example.com", dir)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "del-preview-env"})
+	require.NoError(t, err)
+
+	preview, err := mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{
+		Name: "myroute",
+		Port: 4000,
+	})
+	require.NoError(t, err)
+
+	// Precondition: one config file must exist before delete.
+	files, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, files, 1, "precondition: Traefik file must exist before DeletePreview")
+
+	err = mgr.DeletePreview(context.Background(), testTenantID, env.ID, preview.ID)
+	require.NoError(t, err)
+
+	// The Traefik config file must be gone.
+	files, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, files, 0, "Traefik config file must be removed by DeletePreview")
+
+	// The DB row must be gone — ListPreviews should return empty.
+	previews, err := mgr.ListPreviews(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Len(t, previews, 0, "DB row must be removed by DeletePreview")
+}

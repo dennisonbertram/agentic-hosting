@@ -52,15 +52,14 @@ Getting Started:
 	root.AddCommand(newRegisterCmd(state))
 	root.AddCommand(newKeyCmd(state))
 	root.AddCommand(newRecoverCmd(state))
+	root.AddCommand(newDeployCmd(state))
+	root.AddCommand(newDbCmd(state))
+	root.AddCommand(newBuildCmd(state))
+	root.AddCommand(newLogsCmd(state))
+	root.AddCommand(newStatusCmd(state))
 
-	// Placeholder commands for the help listing (not yet implemented)
-	root.AddCommand(newPlaceholderCmd("deploy", "Deploy a service from a git URL or Docker image"))
-	root.AddCommand(newPlaceholderCmd("env", "Manage instant environments (create, exec, stop, delete)"))
-	root.AddCommand(newPlaceholderCmd("db", "Manage databases (provision, list, delete)"))
-	root.AddCommand(newPlaceholderCmd("build", "View builds and build logs"))
-	root.AddCommand(newPlaceholderCmd("logs", "Stream service runtime logs"))
-	root.AddCommand(newPlaceholderCmd("snapshot", "Manage service snapshots"))
-	root.AddCommand(newPlaceholderCmd("status", "Show system health and service status"))
+	root.AddCommand(newSnapshotCmd(state))
+	root.AddCommand(newEnvCmd(state))
 
 	return root
 }

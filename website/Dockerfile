@@ -2,5 +2,6 @@ FROM nginx:alpine
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY index.html /usr/share/nginx/html/index.html
 COPY install.sh /usr/share/nginx/html/install.sh
+COPY install-cli.sh /usr/share/nginx/html/install-cli.sh
 COPY changelog /usr/share/nginx/html/changelog
 COPY install-skill.sh /usr/share/nginx/html/install-skill.sh

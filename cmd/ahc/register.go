@@ -1,38 +1,22 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
 	"github.com/spf13/cobra"
 )
 
-// cliConfig is the structure saved to the config file by --save.
-type cliConfig struct {
-	APIKey    string `json:"api_key"`
-	ServerURL string `json:"server_url"`
-}
-
 // saveAPIKey persists the API key and server URL to a JSON config file,
-// creating parent directories as needed.
+// creating parent directories as needed. The file is written in the same
+// format that ahclient.LoadConfig reads: {"url": ..., "key": ...}.
 func saveAPIKey(path, apiKey, serverURL string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+	cfg := &ahclient.Config{
+		URL: serverURL,
+		Key: apiKey,
 	}
-	cfg := cliConfig{
-		APIKey:    apiKey,
-		ServerURL: serverURL,
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	return nil
+	return cfg.Save(path)
 }
 
 // resolveBootstrapToken returns the bootstrap token from the flag value (preferred)
@@ -47,13 +31,15 @@ func resolveBootstrapToken(flagVal, envVar string) (string, error) {
 	return "", fmt.Errorf("bootstrap token required: set --%s flag or %s env var", "bootstrap-token", envVar)
 }
 
-// defaultConfigPath returns the default path for the ahc config file.
+// defaultConfigPath returns the default path for the ahc config file,
+// delegating to ahclient.DefaultConfigPath so both register and configure
+// use the same location (~/.ah/config.json).
 func defaultConfigPath() string {
-	home, err := os.UserHomeDir()
+	p, err := ahclient.DefaultConfigPath()
 	if err != nil {
-		return ".ahc/config.json"
+		return ".ah/config.json"
 	}
-	return filepath.Join(home, ".ahc", "config.json")
+	return p
 }
 
 // newRegisterCmd builds the `ahc register` cobra command.

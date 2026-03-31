@@ -8,10 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)
+  - `ahc deploy` — deploy from Docker images or git repos with build log streaming
+  - `ahc service` — full service lifecycle management with env var support
+  - `ahc env` — instant environment management (create, exec, stop, delete)
+  - `ahc db` — database provisioning and management
+  - `ahc build` — build logs and history
+  - `ahc status` — system health dashboard with exit codes for CI
+  - `ahc snapshot` — service snapshots
+  - `ahc register` / `ahc key` — tenant registration and API key management
+
 ### Changed
 
 ### Fixed
 
+- **`ahc register --save`** — config was written to `~/.ahc/config.json` with wrong field names (`api_key`/`server_url`), making it unreadable by `ahclient.LoadConfig`; now writes to `~/.ah/config.json` with the correct `url`/`key` fields matching the standard config format
 - **Warm pool integration** — `Create()` now acquires pre-warmed containers from the pool instead of always cold-starting; environment creation is now sub-200ms when pool has capacity
 - **Ghost pool rows** — pool refill now prunes DB rows pointing to non-existent containers, preventing stale entries from blocking pool capacity
 - **Pool resource GC** — garbage collector now handles `ah-pool-` volumes and `ah.type=warm-pool` containers to prevent orphaned resources after service restarts

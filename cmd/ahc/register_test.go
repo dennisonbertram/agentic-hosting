@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +47,8 @@ func TestBootstrapTokenMissingReturnsError(t *testing.T) {
 }
 
 // TestSaveFlagWritesConfigFile verifies that when --save is used, the API key
-// is written to the config file at the expected location.
+// is written to the config file in the format that ahclient.LoadConfig can read
+// (fields "url" and "key", not "api_key" and "server_url").
 func TestSaveFlagWritesConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -54,13 +56,11 @@ func TestSaveFlagWritesConfigFile(t *testing.T) {
 	err := saveAPIKey(cfgPath, "test-api-key-value", "https://api.example.com")
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-
-	var cfg cliConfig
-	require.NoError(t, json.Unmarshal(data, &cfg))
-	assert.Equal(t, "test-api-key-value", cfg.APIKey)
-	assert.Equal(t, "https://api.example.com", cfg.ServerURL)
+	// Must be loadable by ahclient.LoadConfig
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: cfgPath})
+	require.NoError(t, err, "saved config must be readable by ahclient.LoadConfig")
+	assert.Equal(t, "test-api-key-value", cfg.Key, "Key field must match")
+	assert.Equal(t, "https://api.example.com", cfg.URL, "URL field must match")
 }
 
 // TestSaveFlagCreatesParentDir verifies that saveAPIKey creates parent
@@ -279,6 +279,84 @@ func TestKeyRevokeCallsServer(t *testing.T) {
 	err := cmd.Execute()
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "target-key-id", "output should mention the revoked key ID")
+}
+
+// TestRegisterSave_ConfigReadableByLoadConfig verifies that when --save is used,
+// the config file is written in a format that ahclient.LoadConfig can read.
+// This is a regression test: register --save previously used a different JSON schema
+// (api_key/server_url) and a different path (~/.ahc/) than LoadConfig expects
+// (key/url and ~/.ah/).
+func TestRegisterSave_ConfigReadableByLoadConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"tenant_id": "tid-save-test",
+			"api_key":   "savedkeyid.savedsecret",
+		})
+	}))
+	defer srv.Close()
+
+	// Point HOME to a temp dir so ~/.ah/ is isolated
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	out := &bytes.Buffer{}
+	cmd := newRootCmd()
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"--url", srv.URL,
+		"register", "SaveTest", "save@test.com",
+		"--bootstrap-token", "tok",
+		"--save",
+	})
+
+	err := cmd.Execute()
+	require.NoError(t, err, "register --save should succeed")
+
+	// Now verify that ahclient.LoadConfig can read the saved config
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{})
+	require.NoError(t, err, "ahclient.LoadConfig should be able to read the saved config")
+	assert.Equal(t, srv.URL, cfg.URL, "loaded URL should match the server URL used during registration")
+	assert.Equal(t, "savedkeyid.savedsecret", cfg.Key, "loaded Key should match the API key from registration")
+}
+
+// TestRegisterSave_DefaultConfigPath verifies that --save writes to the same
+// default path that DefaultConfigPath() returns (~/.ah/config.json).
+func TestRegisterSave_DefaultConfigPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"tenant_id": "tid-path-test",
+			"api_key":   "pathkeyid.pathsecret",
+		})
+	}))
+	defer srv.Close()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	out := &bytes.Buffer{}
+	cmd := newRootCmd()
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"--url", srv.URL,
+		"register", "PathTest", "path@test.com",
+		"--bootstrap-token", "tok",
+		"--save",
+	})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+
+	// Verify the file was written at the expected default path
+	expectedPath, err := ahclient.DefaultConfigPath()
+	require.NoError(t, err)
+	_, statErr := os.Stat(expectedPath)
+	require.NoError(t, statErr, "config file should be at the default path returned by DefaultConfigPath()")
 }
 
 // TestKeyRevokeNotFoundReturnsError verifies that a 404 response from revoke

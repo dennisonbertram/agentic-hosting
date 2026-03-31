@@ -297,6 +297,33 @@ func (g *GC) findOrphanedContainers(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	// Check warm-pool containers
+	poolContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "warm-pool")
+	if err != nil {
+		log.Printf("gc: warm-pool container list failed: %v", err)
+	} else {
+		for _, id := range poolContainers {
+			info, inspectErr := g.docker.InspectContainer(ctx, id)
+			if inspectErr != nil {
+				continue
+			}
+			if info.CreatedAt.After(cutoff) {
+				continue
+			}
+
+			var count int
+			err := g.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM warm_pool WHERE container_id = ?`, id).Scan(&count)
+			if err != nil {
+				log.Printf("gc: DB error checking warm-pool container %s, skipping: %v", id[:12], err)
+				continue
+			}
+			if count == 0 {
+				orphaned = append(orphaned, id)
+			}
+		}
+	}
+
 	return orphaned, nil
 }
 
@@ -364,6 +391,29 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 				`SELECT COUNT(*) FROM kanbans WHERE volume_name = ?`, name).Scan(&count)
 			if err != nil {
 				log.Printf("gc: DB error checking kanban volume %s, skipping: %v", name, err)
+				continue
+			}
+			if count == 0 {
+				orphaned = append(orphaned, name)
+			}
+		}
+	}
+
+	// Check warm pool volumes
+	poolVolumes, err := g.docker.ListVolumes(ctx, "ah-pool-")
+	if err != nil {
+		log.Printf("gc: pool volume list failed: %v", err)
+	} else {
+		for _, name := range poolVolumes {
+			if !strings.HasPrefix(name, "ah-pool-") {
+				continue
+			}
+
+			var count int
+			err := g.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?`, name).Scan(&count)
+			if err != nil {
+				log.Printf("gc: DB error checking pool volume %s, skipping: %v", name, err)
 				continue
 			}
 			if count == 0 {

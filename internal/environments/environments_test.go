@@ -739,3 +739,85 @@ func TestDeletePreview_RemovesRowAndFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, previews, 0, "DB row must be removed by DeletePreview")
 }
+
+// ---------------------------------------------------------------------------
+// BT-001: Create() uses warm pool when available
+// ---------------------------------------------------------------------------
+
+// newTestManagerWithPool creates a Manager with a seeded PoolManager attached.
+// Returns the shared DB so callers can seed warm_pool entries.
+func newTestManagerWithPool(t *testing.T, maxEnvs int) (*Manager, *testutil.MockDockerClient, *PoolManager, *sql.DB) {
+	t.Helper()
+	sharedDB := testutil.NewStateDB(t)
+	seedTenant(t, sharedDB, testTenantID, maxEnvs)
+
+	mock := &testutil.MockDockerClient{}
+	mgr := NewManager(sharedDB, mock, "", "")
+	pool := NewPoolManager(sharedDB, mock, PoolConfig{
+		Enabled:  true,
+		PoolSize: 2,
+		MaxTotal: 6,
+	})
+	mgr.SetPool(pool)
+	return mgr, mock, pool, sharedDB
+}
+
+// TestCreate_UsesPoolWhenAvailable verifies BT-001:
+// When Create() is called and the pool has a ready container for the template,
+// RunEnvironment is NOT called — the pool container is used instead.
+func TestCreate_UsesPoolWhenAvailable(t *testing.T) {
+	mgr, mock, _, sharedDB := newTestManagerWithPool(t, 5)
+
+	// Pre-seed a warm pool entry for the "default" template (DB id = "tmpl_default").
+	insertWarmPoolEntry(t, sharedDB, "wp_test_001", "tmpl_default", "pool-container-abc", "ah-pool-wp_test_001")
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{
+		Name:       "warm-env",
+		TemplateID: "default",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "running", env.Status)
+
+	// RunEnvironment must NOT have been called — we used the warm container.
+	assert.Equal(t, 0, mock.RunEnvironmentCalls,
+		"RunEnvironment must not be called when pool has a ready container")
+
+	// The environment's container ID should be the pool container.
+	assert.Equal(t, "pool-container-abc", env.ContainerID,
+		"environment should use the pool container ID")
+}
+
+// TestCreate_FallsBackToColdStartWhenPoolEmpty verifies that when the pool
+// has no ready container, Create() falls back to the normal cold-start path
+// and calls RunEnvironment.
+func TestCreate_FallsBackToColdStartWhenPoolEmpty(t *testing.T) {
+	mgr, mock, _, _ := newTestManagerWithPool(t, 5)
+
+	mock.RunEnvironmentFn = func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
+		return "cold-container-xyz", nil
+	}
+
+	// Pool is empty — no pre-seeded rows.
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{
+		Name:       "cold-env",
+		TemplateID: "default",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "running", env.Status)
+
+	// RunEnvironment MUST be called since pool was empty.
+	assert.Equal(t, 1, mock.RunEnvironmentCalls,
+		"RunEnvironment must be called when pool is empty (cold start)")
+	assert.Equal(t, "cold-container-xyz", env.ContainerID)
+}
+
+// insertWarmPoolEntry inserts a ready warm pool entry into the given DB.
+func insertWarmPoolEntry(t *testing.T, db *sql.DB, id, templateID, containerID, volumeName string) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		 VALUES (?, ?, ?, ?, 'ready', ?)`,
+		id, templateID, containerID, volumeName, time.Now().Unix(),
+	)
+	require.NoError(t, err)
+}

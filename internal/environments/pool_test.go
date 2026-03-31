@@ -344,3 +344,86 @@ func TestPoolStats_PerTemplate(t *testing.T) {
 	// Stats map should only contain templates that have ready containers.
 	assert.Len(t, stats, 2, "stats should only have entries for templates with ready containers")
 }
+
+// ---------------------------------------------------------------------------
+// BT-002: refill() prunes stale entries (ghost pool rows)
+// ---------------------------------------------------------------------------
+
+// TestPoolRefill_PrunesStaleEntries verifies BT-002:
+// When refill() runs and a DB row points to a non-existent container,
+// that row is deleted from the DB.
+func TestPoolRefill_PrunesStaleEntries(t *testing.T) {
+	db := testutil.NewStateDB(t)
+
+	// InspectContainer returns error for ghost containers (container gone),
+	// returns success for live containers.
+	mock := &testutil.MockDockerClient{
+		InspectContainerFn: func(ctx context.Context, id string) (*docker.ContainerInfo, error) {
+			if id == "ghost-container" {
+				return nil, fmt.Errorf("no such container: %s", id)
+			}
+			return &docker.ContainerInfo{Status: "running"}, nil
+		},
+	}
+
+	pool := NewPoolManager(db, mock, PoolConfig{
+		Enabled:      true,
+		PoolSize:     2,
+		MaxTotal:     6,
+		RefillPeriod: time.Hour,
+	})
+
+	now := time.Now().Unix()
+	// Insert one ghost row (container doesn't exist in Docker).
+	_, err := db.Exec(
+		`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		 VALUES ('ghost1', 'tmpl_default', 'ghost-container', 'ah-pool-ghost1', 'ready', ?)`,
+		now)
+	require.NoError(t, err)
+
+	// Run refill — it should prune the ghost row before counting/filling.
+	err = pool.refill(context.Background())
+	require.NoError(t, err)
+
+	// The ghost row must be gone.
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM warm_pool WHERE id = 'ghost1'`).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "ghost row must be deleted after refill prunes stale entries")
+}
+
+// TestPoolRefill_KeepsLiveEntries verifies the inverse of BT-002:
+// when a pool row's container DOES exist, refill() leaves the row intact.
+func TestPoolRefill_KeepsLiveEntries(t *testing.T) {
+	db := testutil.NewStateDB(t)
+
+	mock := &testutil.MockDockerClient{
+		InspectContainerFn: func(ctx context.Context, id string) (*docker.ContainerInfo, error) {
+			// All containers are alive.
+			return &docker.ContainerInfo{Status: "running"}, nil
+		},
+	}
+
+	pool := NewPoolManager(db, mock, PoolConfig{
+		Enabled:      true,
+		PoolSize:     2,
+		MaxTotal:     6,
+		RefillPeriod: time.Hour,
+	})
+
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		 VALUES ('live1', 'tmpl_default', 'live-container', 'ah-pool-live1', 'ready', ?)`,
+		now)
+	require.NoError(t, err)
+
+	err = pool.refill(context.Background())
+	require.NoError(t, err)
+
+	// The live row must still be there.
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM warm_pool WHERE id = 'live1'`).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "live row must not be deleted by stale-entry pruning")
+}

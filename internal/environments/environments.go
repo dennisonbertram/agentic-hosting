@@ -212,38 +212,65 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("insert environment: %w", err)
 	}
 
-	// Create volume
-	if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
-		m.updateStatus(ctx, id, "failed")
-		return nil, fmt.Errorf("create volume: %w", err)
-	}
-
-	// Ensure tenant network
+	// Ensure tenant network (needed for both warm and cold paths).
 	tenantNet := docker.TenantNetworkName(tenantID)
 	if _, err := m.docker.EnsureNetwork(ctx, tenantNet); err != nil {
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("ensure network: %w", err)
 	}
 
-	// Determine egress policy from template
-	egressAllow := tmpl.EgressPolicy == "allow"
+	// Try the warm pool first — skip volume creation and RunEnvironment if we
+	// get a pre-warmed container.
+	var containerID string
+	usedPool := false
+	if m.pool != nil {
+		poolContainerID, poolVolumeName, poolErr := m.pool.Acquire(ctx, tmpl.ID)
+		if poolErr == nil {
+			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
+			// Move the pool container from ah-pool network to the tenant network.
+			_ = m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
+			if connErr := m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID); connErr != nil {
+				log.Printf("environments: failed to connect pool container to tenant network, falling back to cold start: %v", connErr)
+				// Fall through to cold path; the pool container stays in its state.
+			} else {
+				// Update the DB volume_name to match the pool volume.
+				_, _ = m.db.ExecContext(ctx,
+					`UPDATE environments SET volume_name = ? WHERE id = ?`,
+					poolVolumeName, id)
+				volumeName = poolVolumeName
+				containerID = poolContainerID
+				usedPool = true
+			}
+		}
+		// If pool is empty (ErrPoolEmpty) or any other error, fall through to cold start.
+	}
 
-	// Run environment container
-	containerID, err := m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
-		TenantID:    tenantID,
-		EnvID:       id,
-		Image:       tmpl.BaseImage,
-		MemoryMB:    int64(tmpl.MemoryMB),
-		CPUMillis:   int64(tmpl.CPUMillis),
-		VolumeName:  volumeName,
-		NetworkName: tenantNet,
-		Labels:      map[string]string{},
-		EgressAllow: egressAllow,
-	})
-	if err != nil {
-		m.updateStatus(ctx, id, "failed")
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("run environment: %w", err)
+	if !usedPool {
+		// Cold-start path: create a new volume and run a fresh container.
+		if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
+			m.updateStatus(ctx, id, "failed")
+			return nil, fmt.Errorf("create volume: %w", err)
+		}
+
+		// Determine egress policy from template
+		egressAllow := tmpl.EgressPolicy == "allow"
+
+		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
+			TenantID:    tenantID,
+			EnvID:       id,
+			Image:       tmpl.BaseImage,
+			MemoryMB:    int64(tmpl.MemoryMB),
+			CPUMillis:   int64(tmpl.CPUMillis),
+			VolumeName:  volumeName,
+			NetworkName: tenantNet,
+			Labels:      map[string]string{},
+			EgressAllow: egressAllow,
+		})
+		if err != nil {
+			m.updateStatus(ctx, id, "failed")
+			_ = m.docker.RemoveVolume(ctx, volumeName)
+			return nil, fmt.Errorf("run environment: %w", err)
+		}
 	}
 
 	// Update DB with container_id, status=running, lease

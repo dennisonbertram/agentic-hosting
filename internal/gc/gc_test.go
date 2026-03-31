@@ -378,6 +378,126 @@ func TestNetworkCleanup_Regression_DisconnectErrorContinues(t *testing.T) {
 		"should still attempt removal of ah-tenant-fail even after disconnect error")
 }
 
+// ---------------------------------------------------------------------------
+// BT-003: GC cleans up ah-pool- volumes and warm-pool containers
+// ---------------------------------------------------------------------------
+
+// TestCollectOnce_RemovesOrphanedPoolVolumes verifies BT-003:
+// When GC runs and an ah-pool- volume exists with no matching warm_pool row,
+// it is removed by the GC.
+func TestCollectOnce_RemovesOrphanedPoolVolumes(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+
+	mock := &testutil.MockDockerClient{
+		ListVolumesFn: func(ctx context.Context, prefix string) ([]string, error) {
+			if prefix == "ah-pool-" {
+				// Return a pool volume with no matching DB row.
+				return []string{"ah-pool-orphan-vol"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Contains(t, mock.RemoveVolumeSafeCalls, "ah-pool-orphan-vol",
+		"orphaned ah-pool- volume with no warm_pool row must be removed by GC")
+}
+
+// TestCollectOnce_PreservesPoolVolumeInDB verifies that a pool volume that
+// HAS a matching warm_pool row is NOT removed by GC.
+func TestCollectOnce_PreservesPoolVolumeInDB(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+
+	// Seed a warm_pool row referencing the volume.
+	_, err := stateDB.Exec(
+		`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		 VALUES ('wp_gc_test', 'tmpl_default', 'ctr-gc-test', 'ah-pool-referenced-vol', 'ready', 1)`,
+	)
+	require.NoError(t, err)
+
+	mock := &testutil.MockDockerClient{
+		ListVolumesFn: func(ctx context.Context, prefix string) ([]string, error) {
+			if prefix == "ah-pool-" {
+				return []string{"ah-pool-referenced-vol"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err = g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-referenced-vol",
+		"pool volume with a matching warm_pool row must NOT be removed by GC")
+}
+
+// TestCollectOnce_RemovesOrphanedPoolContainers verifies that warm-pool
+// containers (ah.type=warm-pool) with no matching warm_pool row are removed.
+func TestCollectOnce_RemovesOrphanedPoolContainers(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+
+	mock := &testutil.MockDockerClient{
+		ListContainersByLabelFn: func(ctx context.Context, label, value string) ([]string, error) {
+			if label == "ah.type" && value == "warm-pool" {
+				return []string{"orphan-pool-ctr"}, nil
+			}
+			return nil, nil
+		},
+		InspectContainerFn: func(ctx context.Context, id string) (*docker.ContainerInfo, error) {
+			return &docker.ContainerInfo{
+				Status:    "running",
+				CreatedAt: time.Now().Add(-1 * time.Hour), // old enough
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err := g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Contains(t, mock.RemoveContainerCalls, "orphan-pool-ctr",
+		"orphaned warm-pool container with no warm_pool row must be removed by GC")
+}
+
+// TestCollectOnce_PreservesPoolContainerInDB verifies that a warm-pool container
+// that HAS a matching warm_pool row is NOT removed by GC.
+func TestCollectOnce_PreservesPoolContainerInDB(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+
+	// Seed a warm_pool row for this container.
+	_, err := stateDB.Exec(
+		`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		 VALUES ('wp_ctr_test', 'tmpl_default', 'live-pool-ctr', 'ah-pool-vol-ctr', 'ready', 1)`,
+	)
+	require.NoError(t, err)
+
+	mock := &testutil.MockDockerClient{
+		ListContainersByLabelFn: func(ctx context.Context, label, value string) ([]string, error) {
+			if label == "ah.type" && value == "warm-pool" {
+				return []string{"live-pool-ctr"}, nil
+			}
+			return nil, nil
+		},
+		InspectContainerFn: func(ctx context.Context, id string) (*docker.ContainerInfo, error) {
+			return &docker.ContainerInfo{
+				Status:    "running",
+				CreatedAt: time.Now().Add(-1 * time.Hour),
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	err = g.collectOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.NotContains(t, mock.RemoveContainerCalls, "live-pool-ctr",
+		"warm-pool container with a matching warm_pool row must NOT be removed by GC")
+}
+
 func seedService(t *testing.T, stateDB *sql.DB, svcID, tenantID, containerID string) {
 	t.Helper()
 	_, err := stateDB.Exec(

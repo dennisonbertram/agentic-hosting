@@ -92,9 +92,63 @@ func (p *PoolManager) safeRefill(ctx context.Context) {
 	}
 }
 
+// pruneStaleEntries removes warm_pool rows whose containers no longer exist in Docker.
+// This prevents ghost rows from making the pool appear full after server restarts or
+// docker prune events. Must be called with p.mu held.
+func (p *PoolManager) pruneStaleEntries(ctx context.Context) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, container_id, volume_name FROM warm_pool WHERE status = 'ready'`)
+	if err != nil {
+		log.Printf("warm-pool: pruneStaleEntries query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type entry struct {
+		id          string
+		containerID string
+		volumeName  string
+	}
+	var entries []entry
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.id, &e.containerID, &e.volumeName); err != nil {
+			log.Printf("warm-pool: pruneStaleEntries scan failed: %v", err)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warm-pool: pruneStaleEntries iterate failed: %v", err)
+		return
+	}
+
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		_, inspectErr := p.docker.InspectContainer(ctx, e.containerID)
+		if inspectErr == nil {
+			// Container exists — keep the row.
+			continue
+		}
+		// Container gone — delete the row and try to clean up the volume.
+		log.Printf("warm-pool: pruning stale entry %s (container %s gone): %v",
+			e.id, e.containerID[:min(12, len(e.containerID))], inspectErr)
+		if _, delErr := p.db.ExecContext(ctx,
+			`DELETE FROM warm_pool WHERE id = ?`, e.id); delErr != nil {
+			log.Printf("warm-pool: failed to delete stale entry %s: %v", e.id, delErr)
+		}
+		_ = p.docker.RemoveVolume(ctx, e.volumeName)
+	}
+}
+
 func (p *PoolManager) refill(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Remove rows that point to non-existent Docker containers before counting.
+	p.pruneStaleEntries(ctx)
 
 	// Get total ready count.
 	var totalReady int

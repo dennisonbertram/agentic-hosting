@@ -77,6 +77,27 @@
           <h2 class="font-instrument-serif italic text-3xl text-stone-900">Unreleased</h2>
           <span class="inline-flex px-2.5 py-1 rounded-full text-[10px] font-mono-stack bg-amber-100 text-amber-700">In progress</span>
         </div>
+
+        <!-- Fixed -->
+        <div class="mb-8">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack" style="background: rgba(239,68,68,0.1); color: #ef4444">Fixed</span>
+          </div>
+          <ul class="space-y-3 text-sm text-stone-600 leading-relaxed">
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 mt-0.5 flex-shrink-0">&#x2714;</span>
+              <span><strong>Warm pool integration</strong> &mdash; <code class="font-mono-stack text-xs bg-stone-100 px-1 py-0.5 rounded">Create()</code> now acquires pre-warmed containers from the pool instead of always cold-starting; environment creation is now sub-200ms when pool has capacity</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 mt-0.5 flex-shrink-0">&#x2714;</span>
+              <span><strong>Ghost pool rows</strong> &mdash; pool refill now prunes DB rows pointing to non-existent containers, preventing stale entries from blocking pool capacity after restarts</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 mt-0.5 flex-shrink-0">&#x2714;</span>
+              <span><strong>Pool resource GC</strong> &mdash; garbage collector now handles <code class="font-mono-stack text-xs bg-stone-100 px-1 py-0.5 rounded">ah-pool-</code> volumes and <code class="font-mono-stack text-xs bg-stone-100 px-1 py-0.5 rounded">ah.type=warm-pool</code> containers to prevent orphaned resources</span>
+            </li>
+          </ul>
+        </div>
       </article>
 
       <hr class="border-stone-200 mb-16">

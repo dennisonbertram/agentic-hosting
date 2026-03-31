@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Warm pool integration** — `Create()` now acquires pre-warmed containers from the pool instead of always cold-starting; environment creation is now sub-200ms when pool has capacity
+- **Ghost pool rows** — pool refill now prunes DB rows pointing to non-existent containers, preventing stale entries from blocking pool capacity
+- **Pool resource GC** — garbage collector now handles `ah-pool-` volumes and `ah.type=warm-pool` containers to prevent orphaned resources after service restarts
+
 ### Removed
 
 ## [0.5.0] - 2026-03-30

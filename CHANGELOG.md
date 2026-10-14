@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/bootstrap-stack.sh` builds the website image from the repository root. The website Dockerfile copies `docs-site/` and `llms*.txt` from the root, so building with `website/` as the context failed. The website container now serves the docs site at `https://agentic.hosting/docs/`.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

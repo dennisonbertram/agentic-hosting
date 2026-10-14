@@ -30,7 +30,7 @@ type authCacheEntry struct {
 	tenantID  string
 	keyHash   string
 	status    string
-	rateLimit int // tenant_quotas.api_rate_limit; 0 = default
+	rateLimit int    // tenant_quotas.api_rate_limit; 0 = default
 	expiresAt *int64 // key expiration time (nil = no expiry)
 	cachedAt  time.Time
 }

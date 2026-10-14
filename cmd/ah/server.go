@@ -17,7 +17,9 @@ func listenAddress(host, port string) string {
 
 // newHTTPServer deliberately sets no WriteTimeout: long routes (log follow,
 // exec, sync, builds) are exempt from chimw.Timeout and a server-wide write
-// deadline would cut them off. Normal routes stay bounded by chimw.Timeout.
+// deadline would cut them off. Per-request write deadlines are set by the api
+// router (middleware.WriteDeadline / IdleWriteDeadline), so a client that stops
+// reading cannot hold a slot.
 func newHTTPServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,

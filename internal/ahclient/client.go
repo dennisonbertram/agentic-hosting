@@ -416,7 +416,7 @@ func (c *Client) ListDeployments(serviceID string) ([]Deployment, error) {
 	return resp, nil
 }
 
-// CancelDeployment cancels an in-progress or queued deployment.
+// CancelDeployment cancels a deployment that has not started yet (status pending).
 func (c *Client) CancelDeployment(serviceID, deploymentID string) (*Deployment, error) {
 	var resp Deployment
 	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/deployments/"+deploymentID+"/cancel", nil, &resp, nil); err != nil {

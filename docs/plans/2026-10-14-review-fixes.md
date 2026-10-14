@@ -1,6 +1,6 @@
 # Plan: fix the 2026-10-14 codebase review findings
 
-Status: decisions made, not started.
+Status: implemented on branch fix/review-waves-1-5 (PR #150), 2026-10-14.
 Source: full-repo review on 2026-10-14 (five read-only reviewers, one per area).
 
 Context: the operator is the only user today; the agentic-hosting website

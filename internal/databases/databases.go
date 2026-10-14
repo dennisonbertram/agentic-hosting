@@ -417,6 +417,10 @@ func (m *Manager) GetConnectionString(ctx context.Context, tenantID, dbID string
 	return string(plaintext), nil
 }
 
+// containerCleanupTimeout bounds container stop+remove in Delete so a stalled
+// Docker daemon cannot hang the request forever. A variable so tests can shorten it.
+var containerCleanupTimeout = time.Minute
+
 // Delete destroys a database: stops container, removes volume, deletes record.
 // Only deletes the DB record after Docker cleanup succeeds to avoid orphaning resources.
 func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
@@ -432,11 +436,13 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 
 	// Stop and remove container
 	if d.ContainerID != "" {
-		if err := m.docker.StopContainer(ctx, d.ContainerID); err != nil {
+		ctrCtx, ctrCancel := context.WithTimeout(ctx, containerCleanupTimeout)
+		defer ctrCancel()
+		if err := m.docker.StopContainer(ctrCtx, d.ContainerID); err != nil {
 			log.Printf("databases: stop container %s: %v", d.ContainerID, err)
 			// Container may not exist (already stopped/removed) — continue
 		}
-		if err := m.docker.RemoveContainer(ctx, d.ContainerID); err != nil {
+		if err := m.docker.RemoveContainer(ctrCtx, d.ContainerID); err != nil {
 			// If container removal fails (not just "not found"), keep the record
 			if !strings.Contains(err.Error(), "No such container") &&
 				!strings.Contains(err.Error(), "not found") {

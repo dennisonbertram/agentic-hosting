@@ -91,7 +91,21 @@ type Server struct {
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
+	longInflight      *middleware.InflightLimiter
 }
+
+const (
+	// shortRouteConcurrency caps in-flight short requests (global pool). Long
+	// routes are excluded so slow exec/log streams cannot starve /v1/system/health.
+	shortRouteConcurrency = 200
+	// maxLongPerTenant caps concurrent long-running requests per tenant.
+	maxLongPerTenant = 4
+	// normalWriteDeadline bounds a whole response on short routes.
+	normalWriteDeadline = 60 * time.Second
+	// streamIdleWriteDeadline is how long a long/streaming route may go without
+	// the client accepting data before the connection is cut.
+	streamIdleWriteDeadline = 60 * time.Second
+)
 
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.Store == nil || cfg.Store.StateDB == nil {
@@ -139,6 +153,7 @@ func NewServer(cfg ServerConfig) *Server {
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
+		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
 	}
 	s.setupRoutes()
 	return s
@@ -153,9 +168,6 @@ func (s *Server) setupRoutes() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(maxBodySize(1 << 20))
-	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
-	r.Use(chimw.Throttle(200))
-
 	// Strip forwarded headers from non-loopback requests to prevent spoofing.
 	// This runs unconditionally (including dev mode) as a defense-in-depth measure.
 	r.Use(stripUntrustedForwardedHeaders)
@@ -169,6 +181,8 @@ func (s *Server) setupRoutes() {
 
 	// Public routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
+		r.Use(chimw.Throttle(shortRouteConcurrency))
+		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
@@ -188,6 +202,8 @@ func (s *Server) setupRoutes() {
 
 	// Authenticated short-lived routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
+		r.Use(chimw.Throttle(shortRouteConcurrency))
+		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
@@ -273,6 +289,8 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.longInflight.Middleware)
+		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Use(s.idempotencyStore.Middleware)
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
@@ -288,6 +306,8 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.longInflight.Middleware)
+		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Post("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
 	})
 

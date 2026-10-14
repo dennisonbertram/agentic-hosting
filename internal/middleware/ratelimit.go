@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
@@ -14,13 +17,16 @@ const maxRateLimitEntries = 10000
 
 type rateLimitEntry struct {
 	limiter  *rate.Limiter
-	lastSeen time.Time
+	rps      float64      // guarded by RateLimiter.mu
+	lastSeen atomic.Int64 // unix nanos
 }
 
 type RateLimiter struct {
+	mu    sync.Mutex // makes get-or-create atomic
 	lru   *cache.LRU[string, *rateLimitEntry]
 	rate  rate.Limit
 	burst int
+	now   func() time.Time // injectable for deterministic tests
 }
 
 func NewRateLimiter(rps float64, burst int) *RateLimiter {
@@ -28,6 +34,7 @@ func NewRateLimiter(rps float64, burst int) *RateLimiter {
 		lru:   cache.New[string, *rateLimitEntry](maxRateLimitEntries),
 		rate:  rate.Limit(rps),
 		burst: burst,
+		now:   time.Now,
 	}
 	go rl.cleanup()
 	return rl
@@ -36,25 +43,45 @@ func NewRateLimiter(rps float64, burst int) *RateLimiter {
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	for range ticker.C {
-		cutoff := time.Now().Add(-1 * time.Hour)
-		rl.lru.DeleteFunc(func(_ string, v *rateLimitEntry) bool {
-			return v.lastSeen.Before(cutoff)
-		})
+		rl.sweep(time.Now().Add(-1 * time.Hour))
 	}
 }
 
-func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
-	if entry, ok := rl.lru.Get(key); ok {
-		entry.lastSeen = time.Now()
-		return entry.limiter
+func (rl *RateLimiter) sweep(cutoff time.Time) {
+	rl.lru.DeleteFunc(func(_ string, v *rateLimitEntry) bool {
+		return v.lastSeen.Load() < cutoff.UnixNano()
+	})
+}
+
+type rateLimitKey struct{}
+
+// ContextWithRateLimit carries a tenant's api_rate_limit (requests/second)
+// from auth to the rate limiter. Values <= 0 mean "use the default".
+func ContextWithRateLimit(ctx context.Context, rps int) context.Context {
+	return context.WithValue(ctx, rateLimitKey{}, rps)
+}
+
+// getLimiter returns the tenant's limiter, creating it if needed. The limiter
+// runs at rps (burst 2x rps); rps <= 0 selects the default rate and burst.
+func (rl *RateLimiter) getLimiter(key string, rps float64) *rate.Limiter {
+	limit, burst := rl.rate, rl.burst
+	if rps > 0 {
+		limit, burst = rate.Limit(rps), int(math.Ceil(2*rps))
 	}
 
-	limiter := rate.NewLimiter(rl.rate, rl.burst)
-	rl.lru.Set(key, &rateLimitEntry{
-		limiter:  limiter,
-		lastSeen: time.Now(),
-	})
-	return limiter
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, ok := rl.lru.Get(key)
+	if !ok {
+		entry = &rateLimitEntry{limiter: rate.NewLimiter(limit, burst), rps: rps}
+		rl.lru.Set(key, entry)
+	} else if entry.rps != rps {
+		entry.limiter.SetLimit(limit)
+		entry.limiter.SetBurst(burst)
+		entry.rps = rps
+	}
+	entry.lastSeen.Store(rl.now().UnixNano())
+	return entry.limiter
 }
 
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
@@ -67,15 +94,16 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		limiter := rl.getLimiter(tenantID)
+		tenantRPS, _ := r.Context().Value(rateLimitKey{}).(int)
+		limiter := rl.getLimiter(tenantID, float64(tenantRPS))
+		now := rl.now()
 
 		// Set rate limit headers on all responses
-		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%.0f", float64(rl.rate)))
-		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%.0f", math.Max(0, float64(limiter.Tokens()))))
+		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%.0f", float64(limiter.Limit())))
+		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%.0f", math.Max(0, limiter.TokensAt(now))))
 
-		if !limiter.Allow() {
-			retryAfter := retryAfterFromLimiter(limiter)
-			w.Header().Set("Retry-After", retryAfter)
+		if !limiter.AllowN(now, 1) {
+			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter, now))
 			writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
@@ -99,7 +127,7 @@ func NewGlobalRateLimiter(rps float64, burst int) *GlobalRateLimiter {
 func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !gl.limiter.Allow() {
-			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter))
+			w.Header().Set("Retry-After", retryAfterFromLimiter(gl.limiter, time.Now()))
 			writeJSONError(w, http.StatusTooManyRequests, "global rate limit exceeded")
 			return
 		}
@@ -110,10 +138,10 @@ func (gl *GlobalRateLimiter) Middleware(next http.Handler) http.Handler {
 // retryAfterFromLimiter computes a Retry-After value (in seconds) based on
 // the token bucket's refill rate. Uses Reserve/Cancel to peek at the delay
 // without consuming a token.
-func retryAfterFromLimiter(l *rate.Limiter) string {
-	r := l.Reserve()
+func retryAfterFromLimiter(l *rate.Limiter, now time.Time) string {
+	r := l.ReserveN(now, 1)
 	delay := r.Delay()
-	r.Cancel()
+	r.CancelAt(now)
 	secs := int(math.Ceil(delay.Seconds()))
 	if secs < 1 {
 		secs = 1

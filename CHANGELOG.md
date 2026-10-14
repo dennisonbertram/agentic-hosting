@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Warm pool integration** — `Create()` now acquires pre-warmed containers from the pool instead of always cold-starting; environment creation is now sub-200ms when pool has capacity
 - **Ghost pool rows** — pool refill now prunes DB rows pointing to non-existent containers, preventing stale entries from blocking pool capacity
 - **Pool resource GC** — garbage collector now handles `ah-pool-` volumes and `ah.type=warm-pool` containers to prevent orphaned resources after service restarts
+- **Volume wipe** — `WipeVolume` no longer writes until the shared disk is full: each file is overwritten with exactly its own size. The wipe container now uses pinned, pulled `busybox:1.36`, gVisor, no network, dropped capabilities, memory/pids limits, and is force-removed on timeout
 
 ### Removed
 

@@ -67,6 +67,24 @@ class SmokeStackTests(unittest.TestCase):
         self.assertEqual(passed, [])
         self.assertEqual(skipped, ["service HTTP route (explicitly skipped)"])
 
+    def test_route_retries_transient_tls_failure_then_passes(self):
+        class DelayedRoute:
+            def __init__(self):
+                self.attempts = 0
+
+            def request(self, *_args, **_kwargs):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise smoke.SmokeError("GET / failed (SSLCertVerificationError)")
+                return 200, {"body": "ok"}
+
+        client = DelayedRoute()
+        passed = []
+        smoke.verify_route(client, "https://smoke.example.invalid/", False, passed, [],
+                           timeout=1, interval=0.001)
+        self.assertEqual(client.attempts, 2)
+        self.assertEqual(passed, ["service HTTP route"])
+
 
 if __name__ == "__main__":
     unittest.main()

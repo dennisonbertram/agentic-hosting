@@ -16,6 +16,7 @@ import urllib.request
 
 # Docker Hub lists v1.11.0 at multi-platform index sha256:200689790a0a0ea48ca45992e0450bc26ccab5307375b41c84dfc4f2475937ab.
 IMAGE = "traefik/whoami:v1.11.0"
+ROUTE_TIMEOUT = 120
 
 
 class SmokeError(Exception):
@@ -136,7 +137,7 @@ def is_local_host(host):
         return False
 
 
-def verify_route(client, route, skip, passed, skipped):
+def verify_route(client, route, skip, passed, skipped, timeout=ROUTE_TIMEOUT, interval=5):
     if skip:
         skipped.append("service HTTP route (explicitly skipped)")
         print("SKIPPED service HTTP route: --skip-public-route")
@@ -153,10 +154,24 @@ def verify_route(client, route, skip, passed, skipped):
         raise SmokeError("service route URL has an invalid port") from None
     require(parts.scheme == "https" or is_local_host(parts.hostname),
             "service route must use HTTPS unless it points to loopback or .localhost")
-    status, _ = client.request("GET", "", timeout=15, raw_url=route)
-    require(200 <= status < 300, "service route did not return a 2xx response")
-    passed.append("service HTTP route")
-    print("PASS service HTTP route returned 2xx")
+    require(timeout > 0 and interval > 0, "service route timeout and retry interval must be positive")
+    end = time.monotonic() + timeout
+    last_error = "route did not return a 2xx response"
+    while time.monotonic() < end:
+        remaining = end - time.monotonic()
+        try:
+            status, _ = client.request("GET", "", timeout=min(15, max(1, remaining)), raw_url=route)
+            require(200 <= status < 300, "service route did not return a 2xx response")
+            passed.append("service HTTP route")
+            print("PASS service HTTP route returned 2xx")
+            return
+        except SmokeError as exc:
+            last_error = str(exc)
+            remaining = end - time.monotonic()
+            if remaining > 0:
+                print("WAIT service HTTP route: retrying while HTTPS ingress becomes ready")
+                time.sleep(min(interval, remaining))
+    raise SmokeError(f"service HTTP route unavailable after {timeout}s ({last_error})")
 
 
 def main():

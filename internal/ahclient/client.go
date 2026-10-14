@@ -499,6 +499,8 @@ func (c *Client) CancelBuild(serviceID, buildID string) (*StatusResponse, error)
 
 // ---- Database endpoints ----
 
+const databaseCreateClientTimeout = 6*time.Minute + 5*time.Second
+
 // ListDatabases returns all databases for the current tenant.
 func (c *Client) ListDatabases() ([]Database, error) {
 	var resp []Database
@@ -519,8 +521,13 @@ func (c *Client) GetDatabase(dbID string) (*Database, error) {
 
 // CreateDatabase creates a new database.
 func (c *Client) CreateDatabase(req CreateDatabaseRequest) (*Database, error) {
+	// Database creation can include a cold image pull. Match the server's
+	// six-minute operation deadline plus its response-write allowance, while
+	// retaining this client's transport, jar, and redirect settings.
+	httpClient := *c.HTTPClient
+	httpClient.Timeout = databaseCreateClientTimeout
 	var resp Database
-	if err := c.doJSON(http.MethodPost, "/v1/databases", req, &resp, nil); err != nil {
+	if err := c.doJSONWithHTTPClient(&httpClient, http.MethodPost, "/v1/databases", req, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil

@@ -12,8 +12,11 @@ import (
 )
 
 func TestBuildLogDrainerConsumesTerminalBacklogInBoundedPasses(t *testing.T) {
-	const lines = 900
+	const lines = 9000
 	contents := bytes.Repeat([]byte("complete line\n"), lines)
+	if len(contents) <= 64*1024 {
+		t.Fatalf("test backlog is only %d bytes", len(contents))
+	}
 	drainer := &buildLogDrainer{reader: bufio.NewReader(bytes.NewReader(contents))}
 	got := 0
 	for {

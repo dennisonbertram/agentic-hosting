@@ -3,6 +3,7 @@ package ahclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -30,58 +31,56 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(home, ".ah", "config.json"), nil
 }
 
-// LoadConfig loads configuration with the following priority:
-//  1. Flags (not applicable here — callers should override fields after loading)
-//  2. Environment variables: AH_URL, AH_KEY
-//  3. Config file at opts.ConfigPath (or ~/.ah/config.json if empty)
+// ErrNoConfig is returned by LoadConfig when neither the environment nor a
+// config file supplies any value.
+var ErrNoConfig = errors.New("no configuration found — run 'ahc configure' or set AH_URL and AH_KEY environment variables")
+
+// LoadConfig loads configuration, merging per field. For each of URL and Key
+// the priority is:
+//  1. Environment variables AH_URL, AH_KEY
+//  2. Config file at opts.ConfigPath (or ~/.ah/config.json if empty)
 //
-// Returns an error if no configuration is found.
+// (Flags are applied by callers after loading.) A missing file is not an
+// error; an unreadable or malformed file is. Returns ErrNoConfig if nothing
+// is configured.
 func LoadConfig(opts LoadOptions) (*Config, error) {
 	cfg := &Config{}
 
-	// Priority 2: environment variables
-	envURL := os.Getenv("AH_URL")
-	envKey := os.Getenv("AH_KEY")
-	if envURL != "" || envKey != "" {
-		cfg.URL = envURL
-		cfg.Key = envKey
-		return cfg, nil
-	}
-
-	// Priority 3: config file
 	cfgPath := opts.ConfigPath
 	if cfgPath == "" {
-		var err error
-		cfgPath, err = DefaultConfigPath()
-		if err != nil {
-			return nil, errors.New("no configuration found — run 'ahc configure' or set AH_URL and AH_KEY environment variables")
+		cfgPath, _ = DefaultConfigPath() // empty if no home dir: skip the file
+	}
+	if cfgPath != "" {
+		data, err := os.ReadFile(cfgPath)
+		switch {
+		case err == nil:
+			if err := json.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
+			}
+		case !errors.Is(err, os.ErrNotExist):
+			return nil, fmt.Errorf("read %s: %w", cfgPath, err)
 		}
 	}
 
-	f, err := os.Open(cfgPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("no configuration found — run 'ahc configure' or set AH_URL and AH_KEY environment variables")
-		}
-		return nil, err
+	if v := os.Getenv("AH_URL"); v != "" {
+		cfg.URL = v
 	}
-	defer f.Close()
-
-	if err := json.NewDecoder(f).Decode(cfg); err != nil {
-		return nil, err
+	if v := os.Getenv("AH_KEY"); v != "" {
+		cfg.Key = v
 	}
 
 	if cfg.URL == "" && cfg.Key == "" {
-		return nil, errors.New("no configuration found — run 'ahc configure' or set AH_URL and AH_KEY environment variables")
+		return nil, ErrNoConfig
 	}
-
 	return cfg, nil
 }
 
-// Save writes the configuration to cfgPath with 0600 permissions.
+// Save writes the configuration to cfgPath with 0600 permissions, replacing
+// any existing file atomically (temp file in the same directory + rename).
 // Parent directories are created if they do not exist.
 func (c *Config) Save(cfgPath string) error {
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0700); err != nil {
+	dir := filepath.Dir(cfgPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 
@@ -90,5 +89,17 @@ func (c *Config) Save(cfgPath string) error {
 		return err
 	}
 
-	return os.WriteFile(cfgPath, data, 0600)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp") // created 0600
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), cfgPath)
 }

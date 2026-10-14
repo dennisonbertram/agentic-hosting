@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
+	"github.com/dennisonbertram/agentic-hosting/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -32,13 +33,13 @@ func pollUntilRunning(c *ahclient.Client, w io.Writer, serviceID string, maxAtte
 			return fmt.Errorf("polling service status: %w", err)
 		}
 		switch svc.Status {
-		case "running":
+		case status.ServiceRunning:
 			fmt.Fprintln(w) // end the dots line
 			if svc.URL != "" {
 				fmt.Fprintf(w, "  URL: %s\n", svc.URL)
 			}
 			return nil
-		case "error", "crashed":
+		case status.ServiceFailed, status.ServiceError, status.ServiceCrashed:
 			fmt.Fprintln(w)
 			if svc.LastError != "" {
 				return fmt.Errorf("service entered error state: %s", svc.LastError)
@@ -131,6 +132,15 @@ func runDeployGit(c *ahclient.Client, w io.Writer, gitURL, name string, port int
 	}
 	defer logsReader.Close()
 	streamBuildLogs(logsReader, w)
+
+	// The log stream ends when the build does; check how it ended.
+	build, err := c.GetBuild(svc.ID, buildResp.BuildID)
+	if err != nil {
+		return fmt.Errorf("get build status: %w", err)
+	}
+	if build.Status == status.BuildFailed || build.Status == status.BuildCancelled {
+		return fmt.Errorf("build %s %s — see: ahc build logs %s %s", buildResp.BuildID, build.Status, svc.Name, buildResp.BuildID)
+	}
 
 	// Poll until service is running.
 	fmt.Fprint(w, "Waiting for service to start")

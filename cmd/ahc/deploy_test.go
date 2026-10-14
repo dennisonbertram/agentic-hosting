@@ -185,6 +185,8 @@ func TestRunDeployGit_CreatesBuildAndStreamsLogs(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain")
 			// Simulate build log lines
 			w.Write([]byte("Step 1: cloning repository\nStep 2: running nixpacks\nBuild complete\n"))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/builds/build-001"):
+			json.NewEncoder(w).Encode(ahclient.Build{ID: "build-001", Status: "succeeded"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/services/") && !strings.Contains(r.URL.Path, "/builds"):
 			pollCount++
 			status := "pending"
@@ -293,7 +295,7 @@ func TestRunDeployImage_ServiceNeverRunning_ReturnsError(t *testing.T) {
 		"error message must mention timeout when service never starts")
 }
 
-// REG-004: runDeployImage returns error when service enters "error" state.
+// REG-004: runDeployImage returns error when service enters "failed" state.
 func TestRunDeployImage_ServiceEntersErrorState_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -304,7 +306,7 @@ func TestRunDeployImage_ServiceEntersErrorState_ReturnsError(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/services/"):
 			json.NewEncoder(w).Encode(ahclient.Service{
-				ID: "aabbccdd11223344aabbccdd11223344", Name: "bad-svc", Status: "error",
+				ID: "aabbccdd11223344aabbccdd11223344", Name: "bad-svc", Status: "failed",
 				LastError: "container exited with code 1",
 			})
 		default:

@@ -53,7 +53,7 @@ Status colors: green = succeeded, red = failed, yellow = building.`,
 			if len(args) > 0 {
 				nameOrID = args[0]
 			}
-			return runBuildList(c, nameOrID, allFlag, cmd.OutOrStdout())
+			return runBuildList(c, nameOrID, allFlag, cmd.OutOrStdout(), root.jsonOutput)
 		},
 	}
 
@@ -62,7 +62,7 @@ Status colors: green = succeeded, red = failed, yellow = building.`,
 }
 
 // runBuildList is the testable core of the build list command.
-func runBuildList(c *ahclient.Client, nameOrID string, allFlag bool, w io.Writer) error {
+func runBuildList(c *ahclient.Client, nameOrID string, allFlag bool, w io.Writer, jsonOut bool) error {
 	var builds []ahclient.Build
 	var err error
 
@@ -77,6 +77,13 @@ func runBuildList(c *ahclient.Client, nameOrID string, allFlag bool, w io.Writer
 	}
 	if err != nil {
 		return err
+	}
+
+	if jsonOut {
+		if builds == nil {
+			builds = []ahclient.Build{}
+		}
+		return writeJSON(w, builds)
 	}
 
 	if len(builds) == 0 {

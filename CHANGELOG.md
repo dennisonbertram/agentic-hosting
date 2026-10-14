@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ahc` CLI review fixes** — uses the server's real statuses (db `ready`, service/build `failed`), fails deploys on failed builds, merges env and file config per field and saves it atomically (0600), honors long exec/create timeouts, propagates `env exec` exit codes, and verifies the installer download against `checksums.txt`.
+
 ### Added
 
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)

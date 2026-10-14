@@ -79,6 +79,8 @@ type Manager struct {
 	docker    docker.Client
 	masterKey []byte
 	mu        sync.Mutex // protects port allocation
+	// healthTimeout bounds readiness waits after a (re)start; 0 means 30s.
+	healthTimeout time.Duration
 }
 
 // NewManager creates a database manager.
@@ -447,7 +449,8 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 // but do not abort processing of remaining databases.
 func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, COALESCE(container_id, '') FROM databases WHERE tenant_id = ? AND status NOT IN ('failed', 'stopped')`,
+		`SELECT id, COALESCE(container_id, ''), status FROM databases WHERE tenant_id = ?
+		 AND (status NOT IN ('failed', 'stopped') OR (status = 'failed' AND COALESCE(container_id, '') != ''))`,
 		tenantID,
 	)
 	if err != nil {
@@ -456,10 +459,10 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	}
 	defer rows.Close()
 
-	var dbs []struct{ id, containerID string }
+	var dbs []struct{ id, containerID, status string }
 	for rows.Next() {
-		var d struct{ id, containerID string }
-		if err := rows.Scan(&d.id, &d.containerID); err != nil {
+		var d struct{ id, containerID, status string }
+		if err := rows.Scan(&d.id, &d.containerID, &d.status); err != nil {
 			log.Printf("databases: StopAllForTenant scan failed: %v", err)
 			continue
 		}
@@ -480,6 +483,11 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 					log.Printf("databases: StopAllForTenant remove container %s: %v", d.containerID, err)
 				}
 			}
+		}
+		if d.status == "failed" {
+			// A failed row must not become restartable; just drop its stale container.
+			_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = NULL WHERE id = ?`, d.id)
+			continue
 		}
 		m.updateStatus(ctx, d.id, "stopped")
 	}
@@ -602,6 +610,10 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 	rows.Close()
 
 	for _, d := range dbs {
+		if !m.tenantActive(ctx, tenantID) {
+			log.Printf("databases: StartAllForTenant: tenant %s no longer active, not starting %s", tenantID, d.id)
+			return
+		}
 		pw, err := crypto.Decrypt(d.passEnc, m.masterKey)
 		if err != nil {
 			log.Printf("databases: StartAllForTenant decrypt password for %s: %v", d.id, err)
@@ -617,19 +629,42 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 		}
 		_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
 			containerID, time.Now().Unix(), d.id)
+		timeout := m.healthTimeout
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
 		healthy := false
 		if d.typ == "redis" {
-			healthy = m.waitForRedis(d.port, password, 30*time.Second)
+			healthy = m.waitForRedis(d.port, password, timeout)
 		} else {
-			healthy = m.waitForPostgres(d.port, password, 30*time.Second)
+			healthy = m.waitForPostgres(d.port, password, timeout)
 		}
 		if !healthy {
 			log.Printf("databases: StartAllForTenant health check failed for %s", d.id)
 			m.updateStatus(ctx, d.id, "failed")
+			m.removeContainer(ctx, containerID) // volume kept: it holds the data
 			continue
+		}
+		if !m.tenantActive(ctx, tenantID) {
+			// Suspended while starting: undo so the container is not left running.
+			m.removeContainer(ctx, containerID)
+			m.updateStatus(ctx, d.id, "stopped")
+			return
 		}
 		m.updateStatus(ctx, d.id, "ready")
 	}
+}
+
+// tenantActive reports whether the tenant is currently 'active'.
+func (m *Manager) tenantActive(ctx context.Context, tenantID string) bool {
+	var status string
+	err := m.db.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&status)
+	return err == nil && status == "active"
+}
+
+func (m *Manager) removeContainer(ctx context.Context, containerID string) {
+	_ = m.docker.StopContainer(ctx, containerID)
+	_ = m.docker.RemoveContainer(ctx, containerID)
 }
 
 func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password string) (string, error) {

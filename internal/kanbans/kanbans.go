@@ -173,8 +173,31 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 
 	// A failed board's row (UNIQUE tenant_id) would block re-create forever.
-	if _, err := m.db.ExecContext(ctx, `DELETE FROM kanbans WHERE tenant_id = ? AND status = 'failed'`, tenantID); err != nil {
-		return nil, fmt.Errorf("remove failed kanban: %w", err)
+	// Remove its container first so it does not keep running unmanaged. Delete
+	// its volume only if the board never completed setup (no admin credentials
+	// stored); a board that was once ready may hold user data, so keep that volume.
+	var failedID, failedContainer, failedVolume string
+	var hadSetup bool
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id, COALESCE(container_id, ''), volume_name, COALESCE(admin_token_encrypted, '') != ''
+		 FROM kanbans WHERE tenant_id = ? AND status = 'failed'`, tenantID,
+	).Scan(&failedID, &failedContainer, &failedVolume, &hadSetup)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find failed kanban: %w", err)
+	}
+	if err == nil {
+		if failedContainer != "" {
+			_ = m.docker.StopContainer(ctx, failedContainer)
+			_ = m.docker.RemoveContainer(ctx, failedContainer)
+		}
+		if !hadSetup {
+			_ = m.docker.RemoveVolume(ctx, failedVolume)
+		} else {
+			log.Printf("kanbans: keeping volume %s of failed kanban %s (it was previously set up)", failedVolume, failedID)
+		}
+		if _, err := m.db.ExecContext(ctx, `DELETE FROM kanbans WHERE id = ?`, failedID); err != nil {
+			return nil, fmt.Errorf("remove failed kanban: %w", err)
+		}
 	}
 
 	id, err := generateID()
@@ -338,6 +361,10 @@ func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
 		}
 		return
 	}
+	if !m.tenantActive(ctx, tenantID) {
+		log.Printf("kanbans: StartForTenant: tenant %s no longer active, not starting %s", tenantID, id)
+		return
+	}
 	jwtSecret, err := randomHex(32)
 	if err != nil {
 		log.Printf("kanbans: StartForTenant: %v", err)
@@ -359,9 +386,28 @@ func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
 	if !m.waitForHTTP(ctx, port, m.healthCheckTimeout) {
 		log.Printf("kanbans: StartForTenant health check failed for %s", id)
 		m.updateStatus(ctx, id, "failed")
+		m.removeContainer(ctx, containerID) // volume kept: it holds the board data
+		return
+	}
+	if !m.tenantActive(ctx, tenantID) {
+		// Suspended while starting: undo so the container is not left running.
+		m.removeContainer(ctx, containerID)
+		m.updateStatus(ctx, id, "stopped")
 		return
 	}
 	m.updateStatus(ctx, id, "ready")
+}
+
+// tenantActive reports whether the tenant is currently 'active'.
+func (m *Manager) tenantActive(ctx context.Context, tenantID string) bool {
+	var status string
+	err := m.db.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&status)
+	return err == nil && status == "active"
+}
+
+func (m *Manager) removeContainer(ctx context.Context, containerID string) {
+	_ = m.docker.StopContainer(ctx, containerID)
+	_ = m.docker.RemoveContainer(ctx, containerID)
 }
 
 // provision runs in a background goroutine to complete kanban setup after the

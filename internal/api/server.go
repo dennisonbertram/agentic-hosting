@@ -27,20 +27,21 @@ import (
 )
 
 type ServerConfig struct {
-	Store            *db.Store
-	MasterKey        []byte
-	DevMode          bool
-	BootstrapTokens  []string
-	OpenRegistration bool
-	Docker           docker.Client
-	BuildManager     *builds.Manager
-	DeploymentStore  *deployments.Store
-	DatabaseManager  databaseManager
-	KanbanManager    kanbanManager
-	MeteringStore      *metering.Store
-	EnvironmentManager *environments.Manager
-	BaseDomain         string
-	TraefikConfigDir   string
+	Store                 *db.Store
+	MasterKey             []byte
+	DevMode               bool
+	BootstrapTokens       []string
+	OpenRegistration      bool
+	Docker                docker.Client
+	BuildManager          *builds.Manager
+	DeploymentStore       *deployments.Store
+	DatabaseManager       databaseManager
+	KanbanManager         kanbanManager
+	MeteringStore         *metering.Store
+	EnvironmentManager    *environments.Manager
+	BaseDomain            string
+	TraefikConfigDir      string
+	ExternalTLSTerminated bool
 }
 
 type kanbanManager interface {
@@ -100,6 +101,7 @@ func NewServer(cfg ServerConfig) *Server {
 	var snapMgr *snapshots.Manager
 	if cfg.Docker != nil {
 		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir, cfg.DeploymentStore)
+		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 

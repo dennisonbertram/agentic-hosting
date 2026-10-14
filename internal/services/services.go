@@ -219,9 +219,8 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
 
 	var content string
 	if baseDomain != "" {
-		// Production mode: explicit HTTP->HTTPS redirect on the service host plus
-		// the TLS router. Redirects live in the per-service dynamic config so
-		// localhost-mode HTTP routes can coexist without a global entrypoint redirect.
+		// Production mode either terminates TLS locally (default) or uses the plain
+		// HTTP entrypoint when a trusted upstream proxy terminates public TLS.
 		if dnsLabel == "" {
 			return nil
 		}
@@ -229,7 +228,22 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
 			return nil
 		}
 		host := fmt.Sprintf("%s.%s", dnsLabel, baseDomain)
-		content = fmt.Sprintf(`http:
+		if m.externalTLSTerminated {
+			content = fmt.Sprintf(`http:
+  routers:
+    svc-%s:
+      rule: "Host(`+"`%s`"+`)"
+      entryPoints:
+        - web
+      service: svc-%s
+  services:
+    svc-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%s"
+`, serviceID, host, serviceID, serviceID, containerName, portStr)
+		} else {
+			content = fmt.Sprintf(`http:
   routers:
     svc-%s-http:
       rule: "Host(`+"`%s`"+`)"
@@ -256,6 +270,7 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
         servers:
           - url: "http://%s:%s"
 `, serviceID, host, serviceID, serviceID, serviceID, host, serviceID, serviceID, serviceID, containerName, portStr)
+		}
 	} else {
 		// Localhost mode: HTTP-only, {serviceID}.localhost
 		content = fmt.Sprintf(`http:
@@ -301,20 +316,27 @@ func (m *Manager) deleteTraefikRoute(serviceID string) error {
 
 // Manager coordinates service lifecycle between DB and Docker.
 type Manager struct {
-	db               *sql.DB
-	docker           docker.Client
-	masterKey        []byte
-	baseDomain       string
-	traefikConfigDir string             // Traefik file provider directory; empty disables file-based routing
-	deploySem        chan struct{}      // bounded deploy concurrency
-	deployQueue      chan struct{}      // bounded queue for waiting deploys
-	deployStore      *deployments.Store // deployment history tracking (nil-safe: failures are logged, not propagated)
+	db                    *sql.DB
+	docker                docker.Client
+	masterKey             []byte
+	baseDomain            string
+	externalTLSTerminated bool
+	traefikConfigDir      string             // Traefik file provider directory; empty disables file-based routing
+	deploySem             chan struct{}      // bounded deploy concurrency
+	deployQueue           chan struct{}      // bounded queue for waiting deploys
+	deployStore           *deployments.Store // deployment history tracking (nil-safe: failures are logged, not propagated)
 
 	// svcLocks is a 256-slot striped mutex array that serialises per-service destructive
 	// lifecycle operations (Deploy, Restart, ResetCircuitBreaker). Using a fixed-size array
 	// avoids unbounded map growth while providing reasonable parallelism across services.
 	// The slot is chosen by hashing the serviceID modulo 256.
 	svcLocks [256]sync.Mutex
+}
+
+// SetExternalTLSTerminated configures routes for deployments where a trusted
+// upstream proxy terminates public TLS before traffic reaches Traefik.
+func (m *Manager) SetExternalTLSTerminated(enabled bool) {
+	m.externalTLSTerminated = enabled
 }
 
 // NewManager creates a service manager.

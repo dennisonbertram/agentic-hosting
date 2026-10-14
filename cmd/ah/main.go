@@ -182,6 +182,7 @@ func main() {
 	if nixBuilder != nil {
 		// Create service manager early to get DeployImage function
 		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
+		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 
@@ -193,6 +194,7 @@ func main() {
 
 	// Create environment manager with warm pool
 	envMgr := environments.NewManager(store.StateDB, dockerClient, *baseDomain, cfg.TraefikConfigDir)
+	envMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 	envPool := environments.NewPoolManager(store.StateDB, dockerClient, environments.PoolConfig{
 		Enabled:      true,
 		PoolSize:     2,
@@ -208,20 +210,21 @@ func main() {
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
-		Store:              store,
-		MasterKey:          masterKey[:32],
-		DevMode:            *devMode,
-		BootstrapTokens:    bootstrapTokens,
-		OpenRegistration:   *openRegistration,
-		Docker:             dockerClient,
-		BuildManager:       buildMgr,
-		DeploymentStore:    deployStore,
-		DatabaseManager:    dbMgr,
-		KanbanManager:      kanbanMgr,
-		EnvironmentManager: envMgr,
-		MeteringStore:      meteringStore,
-		BaseDomain:         *baseDomain,
-		TraefikConfigDir:   cfg.TraefikConfigDir,
+		Store:                 store,
+		MasterKey:             masterKey[:32],
+		DevMode:               *devMode,
+		BootstrapTokens:       bootstrapTokens,
+		OpenRegistration:      *openRegistration,
+		Docker:                dockerClient,
+		BuildManager:          buildMgr,
+		DeploymentStore:       deployStore,
+		DatabaseManager:       dbMgr,
+		KanbanManager:         kanbanMgr,
+		EnvironmentManager:    envMgr,
+		MeteringStore:         meteringStore,
+		BaseDomain:            *baseDomain,
+		TraefikConfigDir:      cfg.TraefikConfigDir,
+		ExternalTLSTerminated: cfg.ExternalTLSTerminated,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

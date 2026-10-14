@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { createRelayServer, resolvePublicIPv4 } from './relay.mjs';
+import { createPinnedLookup, createRelayServer, resolvePublicIPv4 } from './relay.mjs';
 
 const API_KEY = 'synthetic-upstream-key-never-log';
 const RELAY_TOKEN = 'synthetic-relay-token-0123456789abcdef';
@@ -193,6 +195,69 @@ test('fails closed for private DNS answers and never calls transport', async () 
     resolvePublicIPv4(async () => ['8.8.8.8', '10.0.0.2']),
     /provider DNS did not resolve to public IPv4 addresses/,
   );
+});
+
+test('pinned HTTPS lookup supports Node all-address callbacks and keeps the validated host', async () => {
+  const lookup = createPinnedLookup('8.8.8.8');
+  lookup('openrouter.ai', { all: true }, (error, addresses) => {
+    assert.equal(error, null);
+    assert.deepEqual(addresses, [{ address: '8.8.8.8', family: 4 }]);
+  });
+  lookup('openrouter.ai', {}, (error, address, family) => {
+    assert.equal(error, null);
+    assert.equal(address, '8.8.8.8');
+    assert.equal(family, 4);
+  });
+
+  let seenOptions;
+  await withServer({
+    providerRequest: undefined,
+    resolve4Impl: async () => ['8.8.8.8'],
+    httpsRequestImpl: (options, onResponse) => {
+      seenOptions = options;
+      const request = new EventEmitter();
+      request.setTimeout = () => {};
+      request.end = () => {
+        options.lookup(options.hostname, { all: true }, (error, addresses) => {
+          assert.equal(error, null);
+          assert.deepEqual(addresses, [{ address: '8.8.8.8', family: 4 }]);
+          const response = Readable.from([Buffer.from(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))]);
+          response.statusCode = 200;
+          onResponse(response);
+        });
+      };
+      return request;
+    },
+  }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(basePayload()),
+    });
+    assert.equal(response.status, 200);
+  });
+  assert.equal(seenOptions.hostname, 'openrouter.ai');
+  assert.equal(seenOptions.servername, 'openrouter.ai');
+  assert.equal(seenOptions.port, 443);
+  assert.equal(seenOptions.path, '/api/v1/chat/completions');
+  assert.equal(seenOptions.rejectUnauthorized, true);
+});
+
+test('bounds DNS resolution within the same total provider deadline', async () => {
+  await withServer({
+    providerRequest: undefined,
+    providerTimeoutMs: 25,
+    resolve4Impl: () => new Promise(() => {}),
+    httpsRequestImpl: () => { throw new Error('HTTPS must not start after DNS timeout'); },
+  }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(basePayload()),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'provider request failed' });
+  });
 });
 
 test('hides provider errors and caps provider response size', async () => {

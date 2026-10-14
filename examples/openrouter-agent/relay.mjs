@@ -280,19 +280,45 @@ export async function resolvePublicIPv4(resolve4Impl = resolve4) {
   return addresses[0];
 }
 
-function sendHTTPS({ apiKey, payload, address }) {
+export function createPinnedLookup(address) {
+  if (!isPublicIPv4(address)) throw new Error('provider DNS did not resolve to a public IPv4 address');
+  return (_hostname, options, callback) => {
+    if (options?.all) {
+      callback(null, [{ address, family: 4 }]);
+    } else {
+      callback(null, address, 4);
+    }
+  };
+}
+
+function waitWithSignal(promise, signal) {
+  if (signal.aborted) return Promise.reject(new Error('provider request timed out'));
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('provider request timed out'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+  });
+}
+
+function sendHTTPS({ apiKey, payload, address, signal, httpsRequestImpl = httpsRequest }) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
-    const request = httpsRequest({
+    const request = httpsRequestImpl({
       hostname: PROVIDER_HOST,
       servername: PROVIDER_HOST,
       port: 443,
       path: PROVIDER_PATH,
       method: 'POST',
       rejectUnauthorized: true,
-      lookup(_hostname, _options, callback) {
-        callback(null, address, 4);
-      },
+      lookup: createPinnedLookup(address),
+      signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
@@ -318,9 +344,16 @@ function sendHTTPS({ apiKey, payload, address }) {
   });
 }
 
-async function requestOpenRouter({ apiKey, payload, resolve4Impl }) {
-  const address = await resolvePublicIPv4(resolve4Impl);
-  return sendHTTPS({ apiKey, payload, address });
+async function requestOpenRouter({
+  apiKey,
+  payload,
+  resolve4Impl,
+  httpsRequestImpl = httpsRequest,
+  timeoutMs = PROVIDER_TIMEOUT_MS,
+}) {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const address = await waitWithSignal(resolvePublicIPv4(resolve4Impl), signal);
+  return sendHTTPS({ apiKey, payload, address, signal, httpsRequestImpl });
 }
 
 function validateProviderResponse(result) {
@@ -412,14 +445,33 @@ async function handleRequest(request, response, state) {
   }
 }
 
-export function createRelayServer({ apiKey, authToken, providerRequest = requestOpenRouter, resolve4Impl = resolve4 } = {}) {
+export function createRelayServer({
+  apiKey,
+  authToken,
+  providerRequest,
+  resolve4Impl = resolve4,
+  httpsRequestImpl = httpsRequest,
+  providerTimeoutMs = PROVIDER_TIMEOUT_MS,
+} = {}) {
   if (typeof apiKey !== 'string' || apiKey.trim().length < 20 || /[\r\n]/.test(apiKey)) {
     throw new Error('a valid provider key is required');
   }
   if (typeof authToken !== 'string' || authToken.length < 32 || /[\r\n]/.test(authToken)) {
     throw new Error('RELAY_AUTH_TOKEN must contain at least 32 characters');
   }
-  const state = { apiKey: apiKey.trim(), authToken, providerRequest, resolve4Impl, active: false, requestCount: 0 };
+  const state = {
+    apiKey: apiKey.trim(),
+    authToken,
+    providerRequest: providerRequest ?? ((options) => requestOpenRouter({
+      ...options,
+      resolve4Impl,
+      httpsRequestImpl,
+      timeoutMs: providerTimeoutMs,
+    })),
+    resolve4Impl,
+    active: false,
+    requestCount: 0,
+  };
   const server = createServer((request, response) => {
     void handleRequest(request, response, state);
   });

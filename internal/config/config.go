@@ -11,17 +11,18 @@ import (
 
 // Config holds all configurable paths and addresses for the ah server.
 type Config struct {
-	DataDir          string // root data directory (default: /var/lib/ah)
-	DBPath           string // state database path (default: {DataDir}/ah.db)
-	MeterDBPath      string // metering database path (default: {DataDir}/meter.db)
-	MasterKeyPath    string // master encryption key (default: {DataDir}/master.key)
-	BuildDir         string // nixpacks build work directory (default: {DataDir}/builds)
-	NixpacksPath     string // path to nixpacks binary (default: /usr/local/bin/nixpacks)
-	DockerDataDir    string // Docker data root for disk checks (default: /var/lib/docker)
-	BaseDomain       string // base domain for public service URLs (default: "" = localhost fallback)
-	TraefikConfigDir string // Traefik file provider dynamic config directory (default: /etc/traefik/dynamic)
-	KanbanPortStart  int    // inclusive start of kanban port range (default: 7100)
-	KanbanPortEnd    int    // inclusive end of kanban port range (default: 9100)
+	DataDir               string // root data directory (default: /var/lib/ah)
+	DBPath                string // state database path (default: {DataDir}/ah.db)
+	MeterDBPath           string // metering database path (default: {DataDir}/meter.db)
+	MasterKeyPath         string // master encryption key (default: {DataDir}/master.key)
+	BuildDir              string // nixpacks build work directory (default: {DataDir}/builds)
+	NixpacksPath          string // path to nixpacks binary (default: /usr/local/bin/nixpacks)
+	DockerDataDir         string // Docker data root for disk checks (default: /var/lib/docker)
+	BaseDomain            string // base domain for public service URLs (default: "" = localhost fallback)
+	ExternalTLSTerminated bool   // public TLS terminates before the local proxy (default: false)
+	TraefikConfigDir      string // Traefik file provider dynamic config directory (default: /etc/traefik/dynamic)
+	KanbanPortStart       int    // inclusive start of kanban port range (default: 7100)
+	KanbanPortEnd         int    // inclusive end of kanban port range (default: 9100)
 
 	AdminToken string // AH_ADMIN_TOKEN: operator token for recover/reactivate/quota (comma-separated for rotation; empty = fall back to bootstrap tokens)
 
@@ -47,11 +48,11 @@ const (
 // Default returns a Config with all default values.
 func Default() Config {
 	return Config{
-		DataDir:          defaultDataDir,
-		DBPath:           filepath.Join(defaultDataDir, "ah.db"),
-		MeterDBPath:      filepath.Join(defaultDataDir, "meter.db"),
-		MasterKeyPath:    filepath.Join(defaultDataDir, "master.key"),
-		BuildDir:         filepath.Join(defaultDataDir, "builds"),
+		DataDir:               defaultDataDir,
+		DBPath:                filepath.Join(defaultDataDir, "ah.db"),
+		MeterDBPath:           filepath.Join(defaultDataDir, "meter.db"),
+		MasterKeyPath:         filepath.Join(defaultDataDir, "master.key"),
+		BuildDir:              filepath.Join(defaultDataDir, "builds"),
 		NixpacksPath:          "/usr/local/bin/nixpacks",
 		DockerDataDir:         "/var/lib/docker",
 		TraefikConfigDir:      "/etc/traefik/dynamic",
@@ -78,6 +79,7 @@ func FromEnv() Config {
 		DockerDataDir:         envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
 		BaseDomain:            strings.TrimSpace(os.Getenv("AH_BASE_DOMAIN")),
 		AdminToken:            strings.TrimSpace(os.Getenv("AH_ADMIN_TOKEN")),
+		ExternalTLSTerminated: os.Getenv("AH_EXTERNAL_TLS_TERMINATED") == "true",
 		TraefikConfigDir:      envOr("AH_TRAEFIK_CONFIG_DIR", "/etc/traefik/dynamic"),
 		KanbanPortStart:       envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart),
 		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),

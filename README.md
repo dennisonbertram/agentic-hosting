@@ -62,6 +62,12 @@ Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://denni
 
 ## Installation
 
+For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
+
+### Run the OpenRouter example on the Mac mini
+
+The [OpenRouter agent guide](examples/openrouter-agent/README.md#mac-mini-hosted-example) records one successful local ARM64 hosted-model request (HTTP 200, calculator result `42`) and the manual app/relay setup. It is not a one-command installer; the relay invocation was reconstructed from inspected settings and not replayed verbatim on a fresh VM. The temporary QA VM was deleted, and ngrok, public DNS, and TLS were not tested.
+
 ### 1. Install dependencies
 
 ```bash

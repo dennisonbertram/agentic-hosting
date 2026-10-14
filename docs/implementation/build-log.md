@@ -1,5 +1,7 @@
 # Agentic Hosting — Build Log
 
+> **Historical record:** This document describes the earlier deployment and is not current operational guidance or evidence of production readiness. The former server at `65.21.67.254` is retired and untrusted; do not connect to it or follow its SSH/rsync commands. For current host details and verified operational status, see [the fresh-install runbook](../ops/fresh-install.md) and [the 2026-10-14 recovery session](../sessions/2026-10-14.md).
+
 **Repository**: https://github.com/dennisonbertram/agentic-hosting
 **Production**: https://agentic.hosting
 **Server**: Hetzner, 65.21.67.254 (12 cores / 62GB RAM / 436GB NVMe RAID1, Ubuntu 24.04)

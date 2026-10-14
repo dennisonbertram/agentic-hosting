@@ -1,0 +1,12 @@
+# Copy these endpoint entries into an ngrok agent config after reserving both
+# domains in the account. This template contains no credentials.
+version: 3
+endpoints:
+  - name: ah-api
+    url: https://api.example.com
+    upstream:
+      url: 127.0.0.1:18080
+  - name: ah-services
+    url: https://*.apps.example.com
+    upstream:
+      url: 127.0.0.1:18080

@@ -391,6 +391,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 		assert.Contains(t, content, "letsencrypt")
+		assert.NotContains(t, content, "X-Forwarded-Proto")
 	})
 
 	t.Run("writes localhost route without baseDomain", func(t *testing.T) {
@@ -457,6 +458,54 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, "3000")
 		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc-abc-123"))
 	})
+}
+
+func TestWriteTraefikRouteExternalTLSKeepsPublicHTTPSWithoutLocalTLS(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	dir := t.TempDir()
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "example.com", dir, nil)
+	mgr.SetExternalTLSTerminated(true)
+
+	err := mgr.writeTraefikRoute("svc123", "tenant1", "my-app", "example.com", 8080)
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(dir, "svc123.yml"))
+	require.NoError(t, err)
+	content := string(data)
+	assert.Contains(t, content, "Host(`my-app.example.com`)")
+	assert.Contains(t, content, "- web\n")
+	assert.NotContains(t, content, "websecure")
+	assert.NotContains(t, content, "certResolver")
+	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
+	assert.Contains(t, publicURL("svc123", "my-app", "example.com"), "https://")
+}
+
+func TestStartRestoresExternalTLSRoute(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{InspectContainerFn: func(context.Context, string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running", EffectivePort: 8080}, nil
+	}}
+	dir := t.TempDir()
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "example.com", dir, nil)
+	mgr.SetExternalTLSTerminated(true)
+	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "external-start", Image: "nginx:latest", Port: 8080})
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`UPDATE services SET status = 'stopped', container_id = 'existing-container' WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.Start(context.Background(), "tenant-1", svc.ID))
+	data, err := os.ReadFile(filepath.Join(dir, svc.ID+".yml"))
+	require.NoError(t, err)
+	content := string(data)
+	assert.Contains(t, content, "- web\n")
+	assert.NotContains(t, content, "websecure")
+	assert.NotContains(t, content, "certResolver")
+	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
+	assert.Contains(t, svc.URL, "https://")
 }
 
 func TestDeleteTraefikRoute(t *testing.T) {

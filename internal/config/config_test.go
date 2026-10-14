@@ -28,12 +28,26 @@ func TestFromEnv_Defaults(t *testing.T) {
 		"AH_DATA_DIR", "AH_DB_PATH", "AH_METER_DB_PATH",
 		"AH_MASTER_KEY_PATH", "AH_BUILD_DIR", "AH_NIXPACKS_PATH",
 		"AH_DOCKER_DATA_DIR", "AH_KANBAN_PORT_START", "AH_KANBAN_PORT_END",
+		"AH_EXTERNAL_TLS_TERMINATED",
 	} {
 		t.Setenv(k, "")
 	}
 
 	cfg := FromEnv()
 	assert.Equal(t, Default(), cfg)
+}
+
+func TestFromEnv_ExternalTLSTerminated(t *testing.T) {
+	t.Setenv("AH_EXTERNAL_TLS_TERMINATED", "true")
+	assert.True(t, FromEnv().ExternalTLSTerminated)
+
+	t.Setenv("AH_EXTERNAL_TLS_TERMINATED", "false")
+	assert.False(t, FromEnv().ExternalTLSTerminated)
+
+	for _, value := range []string{"", "TRUE", "1", "yes", "invalid"} {
+		t.Setenv("AH_EXTERNAL_TLS_TERMINATED", value)
+		assert.Falsef(t, FromEnv().ExternalTLSTerminated, "value %q must not enable external TLS mode", value)
+	}
 }
 
 func TestFromEnv_DataDirDerivesPaths(t *testing.T) {

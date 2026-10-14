@@ -4,19 +4,49 @@ IFS=$'\n\t'
 
 # Verified upstream artifacts; review this table when refreshing the installer.
 readonly DOCKER_KEY_FINGERPRINT=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
-readonly GO_VERSION=1.27.2 GO_SHA256=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
-readonly NIXPACKS_VERSION=1.41.0 NIXPACKS_SHA256=0f55de7874507b9cf7502113120bd96f2ab6979f78d10eaf2eb2ade9207b3af6
-readonly TRAEFIK_DIGEST=sha256:5902d68e00708015736416b62faa49d23a2e1d4415649e5831d20b79ba301508
-readonly REGISTRY_DIGEST=sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
-readonly NGINX_DIGEST=sha256:a60ab79b8d1cbc6c0860ca9829908c5e7e83ed887034e778fc7adf0b1bfe5e47
+readonly GO_VERSION=1.27.2
+readonly GO_SHA256_AMD64=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+readonly GO_SHA256_ARM64=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
+readonly NIXPACKS_VERSION=1.41.0
+readonly NIXPACKS_SHA256_AMD64=0f55de7874507b9cf7502113120bd96f2ab6979f78d10eaf2eb2ade9207b3af6
+readonly NIXPACKS_SHA256_ARM64=912bd02dd2bb6f9c3a9ed965fe8a68b4aa318dc7a2546e2eca6f2806a894ba39
+readonly TRAEFIK_DIGEST_AMD64=sha256:5902d68e00708015736416b62faa49d23a2e1d4415649e5831d20b79ba301508
+readonly TRAEFIK_DIGEST_ARM64=sha256:575fa15b135078fe5e50aa847987d96dbddd7b093c172429618404df73f3fa7c
+readonly REGISTRY_DIGEST_AMD64=sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+readonly REGISTRY_DIGEST_ARM64=sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+readonly NGINX_DIGEST_AMD64=sha256:a60ab79b8d1cbc6c0860ca9829908c5e7e83ed887034e778fc7adf0b1bfe5e47
+readonly NGINX_DIGEST_ARM64=sha256:4870c12cd2ca986de501a804b4f506ad3875a0b1874940ba0a2c7f763f1855b2
 readonly INGRESS_SUBNET=172.24.0.0/24 INGRESS_GATEWAY=172.24.0.1 TRAEFIK_IP=172.24.0.2 REGISTRY_IP=172.24.0.3 WEBSITE_IP=172.24.0.4
-domain= email= skip_website=0 dry_run=0 self_test=0
+domain= email= skip_website=0 dry_run=0 self_test=0 external_tls_terminated=0
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+select_architecture() {
+  case "$1" in
+    amd64)
+      go_arch=amd64 nixpacks_arch=x86_64-unknown-linux-musl
+      go_sha256=$GO_SHA256_AMD64 nixpacks_sha256=$NIXPACKS_SHA256_AMD64
+      traefik_digest=$TRAEFIK_DIGEST_AMD64 registry_digest=$REGISTRY_DIGEST_AMD64 nginx_digest=$NGINX_DIGEST_AMD64
+      ;;
+    arm64)
+      go_arch=arm64 nixpacks_arch=aarch64-unknown-linux-musl
+      go_sha256=$GO_SHA256_ARM64 nixpacks_sha256=$NIXPACKS_SHA256_ARM64
+      traefik_digest=$TRAEFIK_DIGEST_ARM64 registry_digest=$REGISTRY_DIGEST_ARM64 nginx_digest=$NGINX_DIGEST_ARM64
+      ;;
+    *) die "unsupported Ubuntu architecture: $1 (supported: amd64, arm64)" ;;
+  esac
+}
+valid_domain() {
+  local domain=$1 label
+  local -a labels
+  [[ ${#domain} -le 253 && $domain =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || return 1
+  IFS=. read -r -a labels <<< "$domain"
+  for label in "${labels[@]}"; do ((${#label} <= 63)) || return 1; done
+}
+
 usage() { cat <<'EOF'
-Usage: sudo scripts/bootstrap-stack.sh --domain DOMAIN --acme-email EMAIL [--skip-website] [--dry-run]
+Usage: sudo scripts/bootstrap-stack.sh --domain DOMAIN [--acme-email EMAIL] [--external-tls-terminated] [--skip-website] [--dry-run]
        scripts/bootstrap-stack.sh --self-test
-Runs on a fresh Ubuntu 24.04 amd64 host from this repository checkout. DNS can be
+Runs on a fresh Ubuntu 24.04 amd64 or arm64 host from this repository checkout. DNS can be
 configured afterward; public ACME certificates issue after DNS points here.
 EOF
 }
@@ -40,12 +70,21 @@ test_preflight() {
   if cidr_overlaps 172.24.0.0/24 172.24.1.0/24; then die 'self-test falsely detected adjacent subnet'; else [[ $? -eq 1 ]] || die 'self-test rejected valid subnet input'; fi
   if cidr_overlaps 172.24.0.0/24 172.16.0.0/12; then :; else die 'self-test missed overlapping supernet'; fi
   log 'CIDR overlap self-test passed (identical, adjacent, overlapping supernet)'
+  select_architecture amd64
+  [[ $go_arch == amd64 && $nixpacks_arch == x86_64-unknown-linux-musl ]] || die 'amd64 artifact selection failed'
+  select_architecture arm64
+  [[ $go_arch == arm64 && $nixpacks_arch == aarch64-unknown-linux-musl ]] || die 'arm64 artifact selection failed'
+  log 'architecture artifact selection self-test passed (amd64, arm64)'
+  valid_domain example.com || die 'valid domain self-test failed'
+  if valid_domain "$(printf 'a%.0s' {1..64}).example"; then die 'invalid label accepted'; fi
+  log 'domain label length self-test passed'
 }
 while (($#)); do
   case "$1" in
     --domain) (($# >= 2)) || die '--domain requires a value'; domain=$2; shift 2 ;;
     --acme-email) (($# >= 2)) || die '--acme-email requires a value'; email=$2; shift 2 ;;
     --skip-website) skip_website=1; shift ;;
+    --external-tls-terminated) external_tls_terminated=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --self-test) self_test=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -54,14 +93,18 @@ while (($#)); do
 done
 if ((self_test)); then test_preflight; exit 0; fi
 [[ $EUID -eq 0 ]] || die 'run as root'
-[[ ${#domain} -le 253 && $domain =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || die 'provide a lowercase DNS domain with valid labels'
+valid_domain "$domain" || die 'provide a lowercase DNS domain with valid labels (each label must be at most 63 characters)'
 email_pattern='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
-[[ $email =~ $email_pattern ]] || die 'provide a simple email address safe for the generated YAML'
+if ((external_tls_terminated == 0)); then
+  [[ $email =~ $email_pattern ]] || die 'provide a simple email address safe for the generated YAML'
+else
+  [[ -z $email ]] || die '--acme-email is not used with --external-tls-terminated'
+fi
 [[ -f $repo_root/go.mod && -f $repo_root/cmd/ah/main.go ]] || die 'run from an agentic-hosting source checkout'
 
 preflight() {
   [[ $(. /etc/os-release; printf '%s %s' "${ID:-}" "${VERSION_ID:-}") == 'ubuntu 24.04' ]] || die 'only Ubuntu 24.04 is supported'
-  [[ $(dpkg --print-architecture) == amd64 ]] || die 'only amd64 is supported'
+  select_architecture "$(dpkg --print-architecture)"
   [[ ! -e /var/lib/ah ]] || die '/var/lib/ah exists; refusing to overwrite persistent state'
   [[ ! -e /var/lib/ah-builds && ! -e /var/lib/traefik && ! -e /etc/traefik ]] || die 'existing ah build or Traefik state/config found'
   [[ ! -e /etc/default/ah && ! -e /etc/default/ah-api-proxy ]] || die 'ah environment file already exists'
@@ -106,7 +149,7 @@ Types: deb
 URIs: https://download.docker.com/linux/ubuntu
 Suites: noble
 Components: stable
-Architectures: amd64
+Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.gpg
 EOF
 apt-get update
@@ -115,16 +158,16 @@ apt-get install -y --no-install-recommends docker-ce=5:29.9.0-1~ubuntu.24.04~nob
 log 'installing gVisor from its signed apt repository'
 curl -fsSL https://gvisor.dev/archive.key -o /tmp/gvisor.asc
 gpg --dearmor --yes -o /etc/apt/keyrings/gvisor.gpg /tmp/gvisor.asc; chmod 0644 /etc/apt/keyrings/gvisor.gpg; rm -f /tmp/gvisor.asc
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/gvisor.gpg] https://storage.googleapis.com/gvisor/releases release main' > /etc/apt/sources.list.d/gvisor.list
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/gvisor.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
 apt-get update; apt-get install -y --no-install-recommends runsc=20261005.0
 
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT
 log 'installing verified Go and Nixpacks binaries'
-curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "$tmpdir/go.tgz"
-echo "$GO_SHA256  $tmpdir/go.tgz" | sha256sum -c - >/dev/null || die 'Go checksum mismatch'
+curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz" -o "$tmpdir/go.tgz"
+echo "$go_sha256  $tmpdir/go.tgz" | sha256sum -c - >/dev/null || die 'Go checksum mismatch'
 tar -C /usr/local -xzf "$tmpdir/go.tgz"
-curl -fsSL "https://github.com/railwayapp/nixpacks/releases/download/v${NIXPACKS_VERSION}/nixpacks-v${NIXPACKS_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o "$tmpdir/nixpacks.tgz"
-echo "$NIXPACKS_SHA256  $tmpdir/nixpacks.tgz" | sha256sum -c - >/dev/null || die 'Nixpacks checksum mismatch'
+curl -fsSL "https://github.com/railwayapp/nixpacks/releases/download/v${NIXPACKS_VERSION}/nixpacks-v${NIXPACKS_VERSION}-${nixpacks_arch}.tar.gz" -o "$tmpdir/nixpacks.tgz"
+echo "$nixpacks_sha256  $tmpdir/nixpacks.tgz" | sha256sum -c - >/dev/null || die 'Nixpacks checksum mismatch'
 tar -tzf "$tmpdir/nixpacks.tgz" | grep -Fxq nixpacks || die 'Nixpacks archive layout mismatch'
 tar -C "$tmpdir" -xzf "$tmpdir/nixpacks.tgz" nixpacks
 install -m 0755 "$tmpdir/nixpacks" /usr/local/bin/nixpacks
@@ -148,6 +191,7 @@ bootstrap_token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$master_key" > /var/lib/ah/master.key
 chown ah:ah /var/lib/ah/master.key; chmod 0600 /var/lib/ah/master.key
 printf 'AH_BOOTSTRAP_TOKEN=%s\nAH_BASE_DOMAIN=apps.%s\nAH_NIXPACKS_PATH=/usr/local/bin/nixpacks\nAH_BUILD_DIR=/var/lib/ah-builds\n' "$bootstrap_token" "$domain" > /etc/default/ah
+if ((external_tls_terminated)); then printf 'AH_EXTERNAL_TLS_TERMINATED=true\n' >> /etc/default/ah; fi
 chmod 0600 /etc/default/ah; unset master_key bootstrap_token
 
 log 'configuring Docker runsc and ingress bridge'
@@ -183,6 +227,9 @@ providers:
 entryPoints:
   web: {address: ":8080"}
   websecure: {address: ":8443"}
+EOF
+if ((external_tls_terminated == 0)); then
+  cat >> /etc/traefik/traefik.yml <<EOF
 certificatesResolvers:
   letsencrypt:
     acme:
@@ -190,7 +237,29 @@ certificatesResolvers:
       storage: /etc/traefik/certs/acme.json
       httpChallenge: {entryPoint: web}
 EOF
+fi
 chown root:ah /etc/traefik/traefik.yml; chmod 0640 /etc/traefik/traefik.yml
+if ((external_tls_terminated)); then
+  cat > /etc/traefik/dynamic/00-platform.yml <<EOF
+http:
+  routers:
+    api-http:
+      rule: "Host(\`api.$domain\`) || (Host(\`$domain\`) && PathPrefix(\`/v1/\`))"
+      priority: 100
+      entryPoints: [web]
+      middlewares: [external-https-proto]
+      service: ah-api
+  middlewares:
+    external-https-proto:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: https
+  services:
+    ah-api:
+      loadBalancer:
+        servers: [{url: "http://ah-api-relay:8081"}]
+EOF
+else
 cat > /etc/traefik/dynamic/00-platform.yml <<EOF
 http:
   routers:
@@ -214,7 +283,22 @@ http:
       loadBalancer:
         servers: [{url: "http://ah-api-relay:8081"}]
 EOF
+fi
 if ((skip_website == 0)); then
+  if ((external_tls_terminated)); then
+    cat > /etc/traefik/dynamic/10-website.yml <<EOF
+http:
+  routers:
+    website-http:
+      rule: "Host(\`$domain\`) || Host(\`www.$domain\`)"
+      entryPoints: [web]
+      service: ah-website
+  services:
+    ah-website:
+      loadBalancer:
+        servers: [{url: "http://ah-website:80"}]
+EOF
+  else
   cat > /etc/traefik/dynamic/10-website.yml <<EOF
 http:
   routers:
@@ -233,6 +317,7 @@ http:
       loadBalancer:
         servers: [{url: "http://ah-website:80"}]
 EOF
+  fi
   chown root:ah /etc/traefik/dynamic/10-website.yml; chmod 0640 /etc/traefik/dynamic/10-website.yml
 fi
 chown root:ah /etc/traefik/dynamic/00-platform.yml; chmod 0640 /etc/traefik/dynamic/00-platform.yml
@@ -240,12 +325,14 @@ install -o 65532 -g 65532 -m 0600 /dev/null /var/lib/traefik/certs/acme.json
 
 if ((skip_website == 0)); then
   grep -qx 'FROM nginx:alpine' "$repo_root/website/Dockerfile" || die 'website Dockerfile base changed; update its pinned digest before retrying'
-  sed 's|^FROM nginx:alpine$|FROM nginx@'"$NGINX_DIGEST"'|' "$repo_root/website/Dockerfile" > "$tmpdir/Dockerfile.website"
+  sed 's|^FROM nginx:alpine$|FROM nginx@'"$nginx_digest"'|' "$repo_root/website/Dockerfile" > "$tmpdir/Dockerfile.website"
   docker build -t ah-website:bootstrap -f "$tmpdir/Dockerfile.website" "$repo_root/website"
   docker run -d --name ah-website --restart unless-stopped --network traefik-public --ip "$WEBSITE_IP" ah-website:bootstrap >/dev/null
 fi
-docker run -d --name ah-registry --restart unless-stopped --network traefik-public --ip "$REGISTRY_IP" -p 127.0.0.1:5000:5000 -v ah-registry:/var/lib/registry registry@${REGISTRY_DIGEST} >/dev/null
-docker run -d --name paas-traefik --restart unless-stopped --network traefik-public --ip "$TRAEFIK_IP" --add-host "ah-api-relay:$INGRESS_GATEWAY" -p 80:8080 -p 443:8443 -v /etc/traefik/traefik.yml:/etc/traefik/traefik.yml:ro -v /etc/traefik/dynamic:/etc/traefik/dynamic:ro -v /var/lib/traefik/certs:/etc/traefik/certs traefik@${TRAEFIK_DIGEST} --configFile=/etc/traefik/traefik.yml >/dev/null
+docker run -d --name ah-registry --restart unless-stopped --network traefik-public --ip "$REGISTRY_IP" -p 127.0.0.1:5000:5000 -v ah-registry:/var/lib/registry registry@${registry_digest} >/dev/null
+traefik_ports=(-p 80:8080)
+if ((external_tls_terminated == 0)); then traefik_ports+=(-p 443:8443); fi
+docker run -d --name paas-traefik --restart unless-stopped --network traefik-public --ip "$TRAEFIK_IP" --add-host "ah-api-relay:$INGRESS_GATEWAY" "${traefik_ports[@]}" -v /etc/traefik/traefik.yml:/etc/traefik/traefik.yml:ro -v /etc/traefik/dynamic:/etc/traefik/dynamic:ro -v /var/lib/traefik/certs:/etc/traefik/certs traefik@${traefik_digest} --configFile=/etc/traefik/traefik.yml >/dev/null
 systemctl enable --now ah.service
 for _ in {1..40}; do curl -fsS -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health >/dev/null && break; sleep 1; done
 curl -fsS -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health >/dev/null || { journalctl -u ah.service -n 80 --no-pager; die 'API health check failed'; }

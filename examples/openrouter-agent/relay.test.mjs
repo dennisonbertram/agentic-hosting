@@ -325,6 +325,43 @@ test('logs only sanitized upstream status, never provider body, key, relay token
   assert.doesNotMatch(diagnostics.join(''), /private provider detail|provider-key-sentinel|relay-token-sentinel|prompt-sentinel/);
 });
 
+test('logs a fixed continuation validation reason without reasoning details or arguments', async () => {
+  const diagnostics = [];
+  let providerCalls = 0;
+  await withServer({
+    writeDiagnostic: (line) => diagnostics.push(line),
+    providerRequest: async () => {
+      providerCalls += 1;
+      return { statusCode: 200, body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) };
+    },
+  }, async (baseURL) => {
+    const payload = basePayload();
+    payload.tool_choice = 'none';
+    payload.messages.push(
+      {
+        role: 'assistant',
+        content: null,
+        reasoning_details: [{ type: 'reasoning.text', text: 'reasoning-sentinel-' + 'x'.repeat(4300) }],
+        tool_calls: [{
+          id: 'call_1',
+          type: 'function',
+          function: { name: 'add_numbers', arguments: '{"a":19,"b":23,"secret":"arguments-sentinel"}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: '42' },
+    );
+    const response = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 400);
+  });
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(diagnostics, ['relay_validation_rejected phase=continuation reason=reasoning_details_limit\n']);
+  assert.doesNotMatch(diagnostics.join(''), /reasoning-sentinel|arguments-sentinel|synthetic-relay-token|synthetic-upstream-key/);
+});
+
 test('hides provider errors and caps provider response size', async () => {
   const providerResponses = [
     { statusCode: 503, body: 'synthetic private provider error synthetic-upstream-key-never-log' },

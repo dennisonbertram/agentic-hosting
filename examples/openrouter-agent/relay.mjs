@@ -78,6 +78,42 @@ function writeFailureDiagnostic(error, writer) {
   }
 }
 
+const VALIDATION_REASON_CODES = new Map([
+  ['request body too large', 'request_body_too_large'],
+  ['request body must be valid JSON', 'request_body_invalid'],
+  ['could not read request body', 'request_body_invalid'],
+  ['request was interrupted', 'request_body_invalid'],
+  ['only one add_numbers tool call is allowed', 'tool_call_count_invalid'],
+  ['unsupported tool call', 'tool_call_invalid'],
+  ['invalid tool arguments', 'tool_arguments_invalid'],
+  ['invalid message count', 'message_count_invalid'],
+  ['invalid system message', 'system_message_invalid'],
+  ['invalid user message', 'user_message_invalid'],
+  ['invalid assistant tool message', 'assistant_message_invalid'],
+  ['reasoning details too large', 'reasoning_details_limit'],
+  ['invalid tool result message', 'tool_result_invalid'],
+  ['unsupported completion request', 'request_shape_invalid'],
+  ['only add_numbers is supported', 'tool_schema_invalid'],
+  ['unsupported tool choice', 'tool_choice_invalid'],
+  ['invalid completion limits', 'request_limits_invalid'],
+]);
+
+function writeValidationDiagnostic(error, body, writer) {
+  const phase = Array.isArray(body?.messages) && body.messages.length === 2
+    ? 'initial'
+    : Array.isArray(body?.messages) && body.messages.length === 4
+      ? 'continuation'
+      : 'unknown';
+  const reason = error instanceof RelayError
+    ? VALIDATION_REASON_CODES.get(error.message) ?? 'request_invalid'
+    : 'request_invalid';
+  try {
+    writer(`relay_validation_rejected phase=${phase} reason=${reason}\n`);
+  } catch {
+    // Diagnostics must not alter the existing validation response.
+  }
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -447,10 +483,13 @@ async function handleRequest(request, response, state) {
   state.active = true;
   try {
     let payload;
+    let requestBody;
     try {
-      payload = validatePayload(await readJsonBody(request));
+      requestBody = await readJsonBody(request);
+      payload = validatePayload(requestBody);
     } catch (error) {
       if (error instanceof RelayError) {
+        writeValidationDiagnostic(error, requestBody, state.writeDiagnostic);
         writeJson(response, error.status, { error: error.message });
       } else {
         writeJson(response, 400, { error: 'invalid request' });

@@ -63,9 +63,10 @@ Lima/ARM64 setup. The app image ran as `node` under `runsc`; the relay also ran
 under `runsc` with a read-only root filesystem and no added capabilities. The
 authenticated request returned HTTP 200 in 2.60 seconds, answered “19 + 23 =
 42,” and recorded the `add_numbers` result `42`. The request used the pinned
-model ID above and the fixed OpenRouter Chat Completions endpoint. See the
-[Mac mini guide](../../docs/ops/macmini.md#run-the-openrouter-agent) for the
-operator setup and local request.
+model ID above and the fixed OpenRouter Chat Completions endpoint. The
+[Mac mini guide](../../docs/ops/macmini.md) covers the Lima VM and platform
+setup; the manual recipe below covers this separately managed app/relay setup
+and the local request.
 
 This is one successful local request, not evidence of a public ngrok URL,
 arbitrary agent compatibility, or a managed app-and-relay lifecycle. The relay
@@ -108,22 +109,24 @@ a provider request.
    `/root/ah-openrouter-demo/provider-key`, owned by UID 1000 and mode `0400`.
    The relay mounts that file read-only at `/run/secrets/openrouter-key`.
 3. Create separate 32-byte random hex files for `DEMO_AUTH_TOKEN` and
-   `PROVIDER_RELAY_TOKEN` in the guest's root-only runtime directory. If a
-   generator adds a final newline, strip exactly that one newline when reading
-   each file into the app service environment and relay env file. Keep both
-   files private and never echo values or print request bodies.
+   `PROVIDER_RELAY_TOKEN` in the guest's root-only runtime directory. Put the
+   latter in the relay env file as `RELAY_AUTH_TOKEN`; its value must match the
+   app's `PROVIDER_RELAY_TOKEN`. Keep the provider key only in its mounted file.
+   If a generator adds a final newline, strip exactly that one newline when
+   loading each token. Keep files private and never print values or request bodies.
 4. Inspect existing Docker networks before choosing two unused `/24` subnets
    from the configured `172.20.0.0/14` tenant pool. The QA run used
    `172.20.7.0/24` for an internal app-relay link and `172.20.8.0/24` for a
    normal outbound bridge. It used relay addresses `172.20.7.3` and
    `172.20.8.2`, respectively. Those addresses are examples from that VM and
    may conflict elsewhere.
-5. Create the relay with `--runtime=runsc --user=node --read-only
-   --cap-drop=ALL --security-opt=no-new-privileges:true`, 256 MiB memory, and
-   a 128 process limit. Mount the provider key and resolver file read-only;
-   publish no host ports and mount no Docker socket. Attach it first to the
-   internal link, then to the outbound bridge with gateway priority 1. Attach
-   no other container to the outbound bridge.
+5. Use `docker create` for the relay with `--runtime=runsc --user=node
+   --read-only --cap-drop=ALL --security-opt=no-new-privileges:true`, 256 MiB
+   memory, 128 PIDs, its `RELAY_AUTH_TOKEN` env file, and read-only key and
+   resolver mounts. Publish no ports and mount no Docker socket. Attach the
+   stopped relay to both networks before starting it: connect it to the
+   internal link, then the outbound bridge with gateway priority 1. Attach no
+   other container to the outbound bridge, then run `docker start` on relay.
 6. The tested resolver file contained `nameserver 1.1.1.1`,
    `nameserver 1.0.0.1`, and `options timeout:2 attempts:1`. Bind it read-only
    at `/etc/resolv.conf` in the relay. This fixed DNS for the tested gVisor
@@ -139,8 +142,8 @@ a provider request.
    container. The app can retain stale network state until restarted after
    the relay is attached. From inside the app, request
    `http://<relay-ip>:8080/health`; continue only after HTTP 200.
-9. From the Mac, call the local routed URL through
-   `127.0.0.1:18080` with `Host: calculator-agent.apps.<base-domain>`, an
+9. From the Mac, send `POST http://127.0.0.1:18080/chat` with
+   `Host: calculator-agent.apps.<base-domain>`, an
    `Authorization: Bearer <DEMO_AUTH_TOKEN>` header from a mode-`0600` curl
    config file, and body `{"message":"Add 19 and 23, then explain the result."}`.
    The QA request returned HTTP 200 and the calculator result 42. This local

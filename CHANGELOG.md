@@ -38,6 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 
+### Fixed (services)
+
+- `/redeploy` now deploys services with no container (after a failed deploy, failed restart or circuit reset); deleting a service with snapshots works; snapshot restore skips the registry pull when the image is local; failed restarts no longer leave deployments stuck as `deploying`; rename keeps the `PORT` override in the Traefik route; Docker not-found detection uses typed errors instead of matching "404".
+
 ## [0.5.0] - 2026-03-30
 
 ### Added

@@ -157,12 +157,14 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 	return nil
 }
 
-// cancelRow flips a pending/deploying deployment to cancelled atomically.
+// cancelRow flips a pending deployment to cancelled atomically. Deploying rows
+// are excluded: their work has started and cannot be stopped, so a cancelled
+// record must always mean nothing ran.
 // It reports false when the row was not in a cancellable state.
 func (s *Store) cancelRow(ctx context.Context, deploymentID string, now int64) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ? AND status IN (?, ?)`,
-		StatusCancelled, now, now, deploymentID, StatusPending, StatusDeploying,
+		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ? AND status = ?`,
+		StatusCancelled, now, now, deploymentID, StatusPending,
 	)
 	if err != nil {
 		return false, err
@@ -171,18 +173,17 @@ func (s *Store) cancelRow(ctx context.Context, deploymentID string, now int64) (
 	return n > 0, nil
 }
 
-// Cancel transitions a deployment to cancelled status. Only deployments with
-// status "pending" or "deploying" can be cancelled. Returns a Conflict error
-// if the deployment is already in a terminal state (running, failed, crashed,
-// stopped, or cancelled).
+// Cancel transitions a deployment to cancelled status. Only "pending"
+// deployments (before any work starts) can be cancelled. Returns a Conflict
+// error otherwise, including for "deploying", where the work cannot be stopped.
 func (s *Store) Cancel(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
 	d, err := s.Get(ctx, tenantID, deploymentID)
 	if err != nil {
 		return nil, err
 	}
 
-	if d.Status != StatusPending && d.Status != StatusDeploying {
-		return nil, apierr.Conflict(fmt.Sprintf("deployment cannot be cancelled (status: %s)", d.Status))
+	if d.Status != StatusPending {
+		return nil, apierr.Conflict(fmt.Sprintf("deployment cannot be cancelled (status: %s); only pending deployments can be cancelled", d.Status))
 	}
 
 	now := time.Now().Unix()

@@ -164,3 +164,22 @@ func TestRestart_FailureIsDeployFailedError(t *testing.T) {
 		})
 	}
 }
+
+// Redeploying a service with no container goes through Deploy; a failed start
+// there must also reach the client as a 502 with the reason (seen in a live smoke
+// test as a bare 500 "internal error").
+func TestRedeploy_NoContainer_FailureIsDeployFailedError(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mock.RunContainerFn = func(context.Context, string, string, string, int, map[string]string, map[string]string, *docker.ResourceLimits) (string, error) {
+		return "", errors.New("unknown or invalid runtime name: runsc")
+	}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.Error(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+
+	err := mgr.Restart(ctx, "tenant-1", svc.ID)
+	var apiErr *apierr.APIError
+	require.True(t, errors.As(err, &apiErr), "got %v", err)
+	assert.Equal(t, http.StatusBadGateway, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "runsc")
+}

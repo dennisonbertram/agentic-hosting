@@ -589,7 +589,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		defer func() { <-m.deployQueue }()
 	default:
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "deploy queue full; try again later")
-		return fmt.Errorf("deploy queue full; try again later")
+		return apierr.Conflict("deploy queue full; try again later")
 	}
 
 	// Acquire deploy slot (bounded concurrency)
@@ -611,7 +611,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	if svc.CircuitOpen {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "circuit breaker is open")
-		return fmt.Errorf("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
+		return apierr.Conflict("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
 	}
 
 	// Check disk space before deploy
@@ -638,7 +638,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("network setup failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
-		return fmt.Errorf("ensure tenant network: %w", err)
+		return apierr.DeployFailed(fmt.Errorf("ensure tenant network: %w", err))
 	}
 
 	// Always try to pull so mutable tags get refreshed. Snapshot images exist only in
@@ -651,7 +651,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		if err != nil {
 			m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
 			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("image pull failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
-			return fmt.Errorf("pull image: %w", err)
+			return apierr.DeployFailed(fmt.Errorf("pull image: %w", err))
 		}
 	}
 
@@ -705,7 +705,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container start failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
-		return fmt.Errorf("run container: %w", err)
+		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
 	}
 
 	{

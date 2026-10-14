@@ -512,11 +512,42 @@ func TestCreatePreview_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(route), docker.EnvironmentIngressAlias(testTenantID, env.ID),
 		"preview routes must use the ingress-only DNS alias")
+	assert.NotContains(t, string(route), "X-Forwarded-Proto", "default ACME mode must retain Traefik's forwarded-protocol behavior")
 
 	// Verify Traefik route file was written
 	files, _ := os.ReadDir(dir)
 	assert.Len(t, files, 1)
 	assert.Contains(t, files[0].Name(), "env-preview-")
+}
+
+func TestPreviewExternalTLSRouteSurvivesEnvironmentRecovery(t *testing.T) {
+	dir := t.TempDir()
+	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+	mgr.SetExternalTLSTerminated(true)
+
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "external-tls-preview"})
+	require.NoError(t, err)
+	preview, err := mgr.CreatePreview(context.Background(), testTenantID, env.ID, CreatePreviewRequest{Name: "api", Port: 8080})
+	require.NoError(t, err)
+	assert.Contains(t, preview.URL, "https://")
+	assertExternalTLSPreviewRoute(t, dir, preview.ID)
+
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+	assert.NoFileExists(t, filepath.Join(dir, "env-preview-"+preview.ID+".yml"))
+	require.NoError(t, mgr.Start(context.Background(), testTenantID, env.ID))
+	assertExternalTLSPreviewRoute(t, dir, preview.ID)
+}
+
+func assertExternalTLSPreviewRoute(t *testing.T, dir, previewID string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "env-preview-"+previewID+".yml"))
+	require.NoError(t, err)
+	content := string(data)
+	assert.Contains(t, content, "- web\n")
+	assert.NotContains(t, content, "websecure")
+	assert.NotContains(t, content, "certResolver")
+	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
 }
 
 func TestCreatePreview_DuplicateName(t *testing.T) {

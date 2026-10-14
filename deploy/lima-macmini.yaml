@@ -1,0 +1,38 @@
+# Lima profile for the agentic-hosting stack on an Apple Silicon Mac mini.
+# The VM uses native ARM64 Ubuntu under Apple's Virtualization.framework.
+arch: aarch64
+vmType: vz
+images:
+  - location: https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:1d6bffe64b848468ac97f821d369a4846d983de1800ccf6b5ec8853e85cefc55
+cpus: 4
+memory: 8GiB
+disk: 80GiB
+mounts: []
+containerd:
+  system: false
+  user: false
+portForwards:
+  # Keep guest loopback listeners private, including API and registry ports.
+  - guestIP: 127.0.0.1
+    guestIPMustBeZero: false
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+    static: true
+  # Docker's port 80 ingress is available only at host loopback for ngrok.
+  - guestIP: 0.0.0.0
+    guestIPMustBeZero: true
+    guestPort: 80
+    hostIP: 127.0.0.1
+    hostPort: 18080
+    proto: tcp
+    static: true
+  # Do not apply Lima's default forwarding to any other guest listener.
+  - guestIP: 0.0.0.0
+    guestIPMustBeZero: false
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+    static: true

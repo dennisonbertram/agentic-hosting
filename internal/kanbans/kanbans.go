@@ -297,6 +297,9 @@ func vikunjaConfig(containerName, volumeName, publicURL, jwtSecret string, port 
 		Image:         "vikunja/vikunja:0.24.6",
 		HostPort:      port,
 		ContainerPort: 3456,
+		// The image runs as uid 1000 but has no /app/vikunja/files dir, so the
+		// fresh named volume is root-owned and Vikunja cannot create its DB.
+		User: "0:0",
 		Env: map[string]string{
 			"VIKUNJA_SERVICE_JWTSECRET":   jwtSecret,
 			"VIKUNJA_SERVICE_FRONTENDURL": fmt.Sprintf("https://%s", publicURL),
@@ -671,7 +674,7 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 	projBody, _ := json.Marshal(map[string]interface{}{
 		"title": fmt.Sprintf("%s Kanban", tenantID),
 	})
-	req, _ := http.NewRequest("POST", base+"/projects", bytes.NewReader(projBody))
+	req, _ := http.NewRequest("PUT", base+"/projects", bytes.NewReader(projBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = client.Do(req)
@@ -702,13 +705,19 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 		{"In Review", 2},
 		{"Done", 3},
 	}
-	bucketsURL := fmt.Sprintf("%s/projects/%d/buckets", base, int(projectID))
+	// Vikunja 0.24 buckets belong to a project view; create them on the kanban view.
+	viewID, err := kanbanViewID(client, base, token, int(projectID))
+	if err != nil {
+		log.Printf("kanbans: find kanban view: %v", err)
+		return token, nil
+	}
+	bucketsURL := fmt.Sprintf("%s/projects/%d/views/%d/buckets", base, int(projectID), viewID)
 	for _, b := range buckets {
 		bucketBody, _ := json.Marshal(map[string]interface{}{
 			"title":    b.Title,
 			"position": b.Position,
 		})
-		req, _ := http.NewRequest("POST", bucketsURL, bytes.NewReader(bucketBody))
+		req, _ := http.NewRequest("PUT", bucketsURL, bytes.NewReader(bucketBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
@@ -724,6 +733,29 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 	}
 
 	return token, nil
+}
+
+func kanbanViewID(client *http.Client, base, token string, projectID int) (int, error) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/projects/%d/views", base, projectID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var views []struct {
+		ID       int    `json:"id"`
+		ViewKind string `json:"view_kind"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+		return 0, err
+	}
+	for _, v := range views {
+		if v.ViewKind == "kanban" {
+			return v.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("no kanban view")
 }
 
 // dnsLabelRe matches a valid DNS label: lowercase alphanumeric, hyphens allowed

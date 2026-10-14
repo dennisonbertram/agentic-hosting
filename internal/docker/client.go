@@ -537,6 +537,7 @@ type RunDatabaseConfig struct {
 	VolumeName    string
 	MountPath     string
 	Labels        map[string]string // optional: overrides default labels when set
+	User          string            // optional: container user (e.g. "0:0")
 }
 
 // CreateVolume creates a named Docker volume.
@@ -698,6 +699,7 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 
 	containerCfg := &container.Config{
 		Image: cfg.Image,
+		User:  cfg.User,
 		Env:   env,
 		ExposedPorts: nat.PortSet{
 			nat.Port(portStr): struct{}{},

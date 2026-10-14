@@ -57,6 +57,7 @@ type Client interface {
 	ExecRun(ctx context.Context, execID string, timeout time.Duration) (stdout []byte, stderr []byte, exitCode int, err error)
 	RenameContainer(ctx context.Context, containerID, newName string) error
 	CopyToContainer(ctx context.Context, containerID string, dstPath string, content io.Reader) error
+	ContainerStats(ctx context.Context, containerID string) (*ContainerStats, error)
 }
 
 // NetworkInfo holds metadata about a Docker network.

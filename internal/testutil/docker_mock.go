@@ -139,6 +139,9 @@ type MockDockerClient struct {
 	// CopyToContainer
 	CopyToContainerFn    func(ctx context.Context, containerID string, dstPath string, content io.Reader) error
 	CopyToContainerCalls []string // containerIDs
+
+	// ContainerStats
+	ContainerStatsFn func(ctx context.Context, containerID string) (*docker.ContainerStats, error)
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -398,4 +401,11 @@ func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID stri
 		return m.CopyToContainerFn(ctx, containerID, dstPath, content)
 	}
 	return nil
+}
+
+func (m *MockDockerClient) ContainerStats(ctx context.Context, containerID string) (*docker.ContainerStats, error) {
+	if m.ContainerStatsFn != nil {
+		return m.ContainerStatsFn(ctx, containerID)
+	}
+	return &docker.ContainerStats{}, nil
 }

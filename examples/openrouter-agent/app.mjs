@@ -188,15 +188,12 @@ async function runCalculatorAgent(message, { providerURL, providerToken, fetchIm
   const messages = [
     {
       role: 'system',
-      content: 'You are a calculator assistant. Use the add_numbers tool to add the two numbers requested by the user, then explain the result briefly. Do not claim a result before using the tool.',
+      content: 'You are a calculator assistant. When asked to add two numbers, you must call add_numbers exactly once, then explain the result briefly. Do not calculate the sum mentally or claim a result before using the tool.',
     },
     { role: 'user', content: message },
   ];
 
-  const firstChoice = await requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, {
-    type: 'function',
-    function: { name: 'add_numbers' },
-  });
+  const firstChoice = await requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, 'auto');
   if (firstChoice?.finish_reason !== 'tool_calls' || !firstChoice.message) {
     throw new Error('provider did not request the required tool');
   }

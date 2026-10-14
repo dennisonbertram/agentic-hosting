@@ -1,6 +1,7 @@
 [Unit]
 Description=agentic-hosting daemon
-After=docker.service
+After=docker.service ah-build-broker.service
+Wants=ah-build-broker.service
 Requires=docker.service
 
 [Service]

@@ -31,14 +31,14 @@ The API listens only on `127.0.0.1:8080`. The `traefik-public` bridge uses `172.
 
 Traefik has no Docker provider, Docker socket, public dashboard, or dashboard port. Tenant containers remain on their per-tenant networks; the API joins `paas-traefik` to those networks for service reachability and writes file-provider routes. The shared `traefik-public` network contains ingress and platform containers. The registry is published on host loopback port 5000 only. The website container is optional. Docker's `runsc` runtime is configured and the application uses it for tenant containers.
 
-The installer stores the generated master key at `/var/lib/ah/master.key` (owned by `ah`, mode `0600`) and the bootstrap token in `/etc/default/ah` (owned by root, mode `0600`). Do not copy either value into a terminal transcript or ticket. Retrieve the bootstrap token only through an approved secure access channel. The ah daemon's membership in the Docker group grants host-level Docker control; protect root access and the Docker socket accordingly. Build artifacts live under `/var/lib/ah-builds`, group `ah-build`, mode `2770`; this is separate from the API database and key directory.
+The installer stores the generated master key at `/var/lib/ah/master.key` (owned by `ah`, mode `0600`) and the bootstrap token in `/etc/default/ah` (owned by root, mode `0600`). Do not copy either value into a terminal transcript or ticket. Retrieve the bootstrap token only through an approved secure access channel. The ah daemon's membership in the Docker group grants host-level Docker control; protect root access and the Docker socket accordingly. Build artifacts live under `/var/lib/ah-builds`, owned by `ah:ah-build`, mode `0710`; workers can traverse this root but cannot list or create sibling builds. Each individual build directory has mode `2770` and is shared only by the daemon and its worker. The root-owned broker accepts requests from ah for fixed `ah-build@<id>.service` units at `/run/ah-build-broker/broker.sock`; it does not read the bootstrap-token environment file.
 
 ## Verify startup
 
 The installer checks the local API health endpoint with the trusted forwarded-protocol header and fails if the API does not return a successful response. On the host, inspect service and container state without printing the environment file:
 
 ```sh
-sudo systemctl --no-pager --full status ah ah-api-proxy
+sudo systemctl --no-pager --full status ah ah-api-proxy ah-build-broker
 sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 sudo ss -lntp
 ```
@@ -59,8 +59,8 @@ The TCP relay allowlist can be checked locally by requesting the API route throu
 The installer is deliberately one-shot and refuses a second run after it creates ah state. If it stops partway through, preserve all files and volumes. Record the failing command and inspect only the relevant service journal and nonsecret config:
 
 ```sh
-sudo journalctl -u ah -u ah-api-proxy --no-pager -n 100
-sudo systemctl --no-pager status docker ah ah-api-proxy
+sudo journalctl -u ah -u ah-api-proxy -u ah-build-broker --no-pager -n 100
+sudo systemctl --no-pager status docker ah ah-api-proxy ah-build-broker
 sudo docker ps -a --format 'table {{.Names}}\t{{.Status}}'
 ```
 
@@ -74,4 +74,4 @@ The script's Go compiler pin is Go 1.27.2; `go.mod` declares Go 1.25.0. Keep bot
 
 ## Known limitation
 
-Fresh-stack health and website routing do not prove the git build path. The builder privilege transition has a separate broker/service change in progress. Do not claim git deployments work until the broker change lands and a real sequential smoke deployment proves build, gVisor container startup, environment execution, and database provisioning on the new host.
+The installer starts the build broker and installs its per-build worker template, but this configuration has not been exercised on Ubuntu. Do not claim git deployments work until a real sequential smoke deployment proves the build, gVisor container startup, environment execution, and database provisioning on the new host.

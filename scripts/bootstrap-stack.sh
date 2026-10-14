@@ -65,7 +65,7 @@ preflight() {
   [[ ! -e /var/lib/ah ]] || die '/var/lib/ah exists; refusing to overwrite persistent state'
   [[ ! -e /var/lib/ah-builds && ! -e /var/lib/traefik && ! -e /etc/traefik ]] || die 'existing ah build or Traefik state/config found'
   [[ ! -e /etc/default/ah && ! -e /etc/default/ah-api-proxy ]] || die 'ah environment file already exists'
-  [[ ! -e /etc/systemd/system/ah.service && ! -e /etc/systemd/system/ah-api-proxy.service ]] || die 'ah systemd unit already exists'
+  [[ ! -e /etc/systemd/system/ah.service && ! -e /etc/systemd/system/ah-api-proxy.service && ! -e /etc/systemd/system/ah-build-broker.service && ! -e /etc/systemd/system/ah-build@.service ]] || die 'ah systemd unit already exists'
   [[ ! -e /etc/docker/daemon.json ]] || die 'Docker daemon config exists; refusing unsafe replacement'
   [[ ! -e /usr/local/go && ! -e /usr/local/bin/ah && ! -e /usr/local/bin/nixpacks ]] || die 'existing Go, ah, or Nixpacks installation found'
   [[ ! -e /etc/apt/sources.list.d/docker.sources && ! -e /etc/apt/sources.list.d/gvisor.list ]] || die 'existing Docker or gVisor apt source found'
@@ -137,7 +137,7 @@ id ah-builder >/dev/null 2>&1 || useradd --system --gid ah-builder --groups dock
 id ah-proxy >/dev/null 2>&1 || useradd --system --gid ah-proxy --no-create-home --shell /usr/sbin/nologin ah-proxy
 usermod -aG docker,ah-build ah
 install -d -o ah -g ah -m 0750 /var/lib/ah /var/lib/ah/backups /etc/traefik/dynamic
-install -d -o ah -g ah-build -m 2770 /var/lib/ah-builds
+install -d -o ah -g ah-build -m 0710 /var/lib/ah-builds
 install -d -o root -g root -m 0755 /etc/traefik
 install -d -o 65532 -g 65532 -m 0700 /var/lib/traefik/certs
 umask 077
@@ -162,9 +162,11 @@ PATH=/usr/local/go/bin:$PATH CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -
 install -o root -g root -m 0755 "$tmpdir/ah" /usr/local/bin/ah
 install -o root -g root -m 0644 "$repo_root/deploy/ah.service" /etc/systemd/system/ah.service
 install -o root -g root -m 0644 "$repo_root/deploy/ah-api-proxy.service" /etc/systemd/system/ah-api-proxy.service
+install -o root -g root -m 0644 "$repo_root/deploy/ah-build-broker.service" /etc/systemd/system/ah-build-broker.service
+install -o root -g root -m 0644 "$repo_root/deploy/ah-build@.service" /etc/systemd/system/ah-build@.service
 printf 'AH_PROXY_BIND=%s\nAH_PROXY_PORT=8081\nAH_TRAEFIK_IP=%s\n' "$INGRESS_GATEWAY" "$TRAEFIK_IP" > /etc/default/ah-api-proxy
 chmod 0644 /etc/default/ah-api-proxy
-systemctl daemon-reload; systemctl enable --now ah-api-proxy.service
+systemctl daemon-reload; systemctl enable --now ah-api-proxy.service ah-build-broker.service
 
 log 'writing Traefik config with dashboard and Docker provider disabled'
 cat > /etc/traefik/traefik.yml <<EOF
@@ -249,4 +251,4 @@ curl -fsS -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health >
 log 'stack installed; public certificates require DNS pointing at this host'
 log 'bootstrap token is stored in root-only /etc/default/ah; retrieve it through an approved secure channel'
 log "after DNS and ACME certificate issuance, verify: curl --fail --show-error https://api.$domain/v1/system/health"
-log 'git-based service builds remain pending validation of the ah-builder privilege contract'
+log 'build broker and worker template are installed; git-based service builds still need a live smoke test'

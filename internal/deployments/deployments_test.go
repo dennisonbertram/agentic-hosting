@@ -639,3 +639,43 @@ func TestCancel_WrongTenant(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, apierr.ErrNotFound))
 }
+
+func TestUpdateStatus_DoesNotOverwriteCancelled(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{ServiceID: "svc-1", TenantID: "tenant-1", Image: "nginx:latest",
+		Status: StatusDeploying, Trigger: TriggerManual, StartedAt: time.Now().Unix()}
+	require.NoError(t, store.Create(ctx, d))
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+
+	err = store.UpdateStatus(ctx, d.ID, StatusRunning, WithContainerID("c1"))
+	require.Error(t, err)
+
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, got.Status)
+	assert.Empty(t, got.ContainerID)
+}
+
+func TestCancelRow_RefusesNonCancellable(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{ServiceID: "svc-1", TenantID: "tenant-1", Image: "nginx:latest",
+		Status: StatusRunning, Trigger: TriggerManual, StartedAt: time.Now().Unix()}
+	require.NoError(t, store.Create(ctx, d))
+
+	// The UPDATE itself must refuse a row that changed after Cancel's read.
+	ok, err := store.cancelRow(ctx, d.ID, time.Now().Unix())
+	require.NoError(t, err)
+	assert.False(t, ok)
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, got.Status)
+}

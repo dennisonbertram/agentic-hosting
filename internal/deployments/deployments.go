@@ -138,8 +138,9 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 		args = append(args, *o.completedAt)
 	}
 
-	query += ` WHERE id = ?`
-	args = append(args, deploymentID)
+	// A cancelled deployment must stay cancelled even if the deploy goroutine finishes later.
+	query += ` WHERE id = ? AND status != ?`
+	args = append(args, deploymentID, StatusCancelled)
 
 	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -147,9 +148,27 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
+		var cur string
+		if err := s.db.QueryRowContext(ctx, `SELECT status FROM deployments WHERE id = ?`, deploymentID).Scan(&cur); err == nil {
+			return apierr.Conflict(fmt.Sprintf("deployment is %s", cur))
+		}
 		return apierr.NotFound("deployment not found")
 	}
 	return nil
+}
+
+// cancelRow flips a pending/deploying deployment to cancelled atomically.
+// It reports false when the row was not in a cancellable state.
+func (s *Store) cancelRow(ctx context.Context, deploymentID string, now int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ? AND status IN (?, ?)`,
+		StatusCancelled, now, now, deploymentID, StatusPending, StatusDeploying,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // Cancel transitions a deployment to cancelled status. Only deployments with
@@ -167,12 +186,12 @@ func (s *Store) Cancel(ctx context.Context, tenantID, deploymentID string) (*Dep
 	}
 
 	now := time.Now().Unix()
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ?`,
-		StatusCancelled, now, now, deploymentID,
-	)
+	ok, err := s.cancelRow(ctx, deploymentID, now)
 	if err != nil {
 		return nil, fmt.Errorf("cancel deployment: %w", err)
+	}
+	if !ok {
+		return nil, apierr.Conflict("deployment cannot be cancelled (status changed)")
 	}
 
 	d.Status = StatusCancelled

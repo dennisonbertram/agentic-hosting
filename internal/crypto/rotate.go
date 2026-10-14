@@ -21,7 +21,7 @@ type RotateResult struct {
 
 // Total returns the total number of fields that were (or would be) re-encrypted.
 func (r RotateResult) Total() int {
-	return r.ServiceEnvVars + r.DatabasePasswords + r.DatabaseConnStrs + r.KanbanTokens + r.SnapshotEnvs
+	return r.ServiceEnvVars + r.DatabasePasswords + r.DatabaseConnStrs + r.KanbanTokens + r.SnapshotEnvs + r.HashKeys
 }
 
 // RotateKeys re-encrypts every encrypted field in the database from oldKey to

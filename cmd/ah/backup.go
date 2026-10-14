@@ -90,6 +90,10 @@ func enforceRetention(dir string, keep int) {
 // backupDSN returns a read-only SQLite URI for path. The file: prefix is
 // required; without it the driver ignores mode=ro.
 func backupDSN(path string) string {
+	// A relative path would be parsed as a URI authority (file://data/ah.db).
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
 }
 

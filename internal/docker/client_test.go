@@ -350,6 +350,12 @@ func TestWipeConfigs(t *testing.T) {
 	if len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" {
 		t.Errorf("CapDrop = %v, want [ALL]", host.CapDrop)
 	}
+	if !host.AutoRemove {
+		t.Error("AutoRemove must be set so a crash cannot strand the container on the volume")
+	}
+	if cfg.Labels["ah.managed"] != "true" || cfg.Labels["ah.type"] != "wipe" {
+		t.Errorf("labels = %v, want ah.managed=true ah.type=wipe", cfg.Labels)
+	}
 	if host.Memory == 0 || host.PidsLimit == nil {
 		t.Error("memory and pids limits must be set")
 	}

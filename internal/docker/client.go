@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
@@ -37,6 +38,7 @@ type Client interface {
 	LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
 	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
 	PullImage(ctx context.Context, img string) error
+	ImageExists(ctx context.Context, img string) (bool, error)
 	TagImage(ctx context.Context, source, target string) error
 	RemoveImage(ctx context.Context, imageRef string) error
 	ListContainersByLabel(ctx context.Context, label, value string) ([]string, error)
@@ -397,6 +399,18 @@ func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 	defer reader.Close()
 	_, _ = io.Copy(io.Discard, reader)
 	return nil
+}
+
+// ImageExists reports whether the image is present in the local Docker image store.
+func (c *DockerClient) ImageExists(ctx context.Context, img string) (bool, error) {
+	_, _, err := c.cli.ImageInspectWithRaw(ctx, img)
+	if err == nil {
+		return true, nil
+	}
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // TagImage adds a new tag to an existing image.

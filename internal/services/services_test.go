@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/docker/docker/errdefs"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -549,4 +552,112 @@ func seedTenantWithQuota(t *testing.T, db *sql.DB, maxServices int) {
 	if err != nil {
 		t.Fatalf("seed quota: %v", err)
 	}
+}
+
+// --- W2-A regression tests ---
+
+func newTestMgr(t *testing.T, mock *testutil.MockDockerClient, traefikDir string) (*Manager, *deployments.Store, *Service) {
+	t.Helper()
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	store := deployments.NewStore(stateDB)
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "example.com", traefikDir, store)
+	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "my-service", Image: "nginx:latest", Port: 8080})
+	require.NoError(t, err)
+	return mgr, store, svc
+}
+
+func TestRestart_RedeploysWhenContainerIDEmpty_AfterFailedPull(t *testing.T) {
+	pulls := 0
+	mock := &testutil.MockDockerClient{PullImageFn: func(ctx context.Context, img string) error {
+		pulls++
+		if pulls == 1 {
+			return errors.New("registry unreachable")
+		}
+		return nil
+	}}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+
+	require.Error(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	require.NoError(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	got, err := mgr.Get(ctx, "tenant-1", svc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	assert.NotEmpty(t, got.ContainerID)
+}
+
+func TestRestart_RedeploysAfterCircuitReset(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	_, err := mgr.db.Exec(`UPDATE services SET circuit_open = 1, status = 'failed' WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.ResetCircuitBreaker(ctx, "tenant-1", svc.ID))
+	require.NoError(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	got, err := mgr.Get(ctx, "tenant-1", svc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	assert.NotEmpty(t, got.ContainerID)
+}
+
+func TestDelete_WithSnapshot(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	_, err := mgr.db.Exec(`INSERT INTO snapshots (id, tenant_id, service_id, name, image_ref, created_at) VALUES ('snap1', 'tenant-1', ?, 's', '127.0.0.1:5000/snapshots/tenant-1:snap1', 1)`, svc.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.Delete(context.Background(), "tenant-1", svc.ID))
+
+	var n int
+	require.NoError(t, mgr.db.QueryRow(`SELECT COUNT(*) FROM snapshots WHERE service_id = ?`, svc.ID).Scan(&n))
+	assert.Equal(t, 0, n)
+	assert.Contains(t, mock.RemoveImageCalls, "127.0.0.1:5000/snapshots/tenant-1:snap1")
+}
+
+func TestDeploy_SkipsPullWhenImageLocal(t *testing.T) {
+	mock := &testutil.MockDockerClient{ImageExistsFn: func(ctx context.Context, img string) (bool, error) { return true, nil }}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+	assert.Empty(t, mock.PullImageCalls)
+}
+
+func TestRestart_EarlyReturnMarksDeploymentFailed(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, store, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	mock.StopContainerFn = func(ctx context.Context, id string) error { return errors.New("daemon exploded") }
+
+	require.Error(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	d, err := store.LatestForService(ctx, svc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, deployments.StatusFailed, d.Status)
+}
+
+func TestUpdateName_KeepsPortEnvOverride(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	dir := t.TempDir()
+	mgr, _, svc := newTestMgr(t, mock, dir)
+	ctx := context.Background()
+	require.NoError(t, mgr.SetEnv(ctx, "tenant-1", svc.ID, map[string]string{"PORT": "9999"}))
+
+	_, err := mgr.UpdateName(ctx, "tenant-1", svc.ID, "renamed")
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(dir + "/" + svc.ID + ".yml")
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "9999")
+	assert.NotContains(t, string(data), "8080")
+}
+
+func TestIsNotFoundError(t *testing.T) {
+	assert.False(t, isNotFoundError(nil))
+	assert.False(t, isNotFoundError(errors.New("context deadline exceeded while inspecting container 404abc")))
+	assert.True(t, isNotFoundError(fmt.Errorf("wrap: %w", errdefs.NotFound(errors.New("No such container: x")))))
 }

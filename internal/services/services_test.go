@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
@@ -680,4 +682,52 @@ func TestIsNotFoundError(t *testing.T) {
 	assert.False(t, isNotFoundError(nil))
 	assert.False(t, isNotFoundError(errors.New("context deadline exceeded while inspecting container 404abc")))
 	assert.True(t, isNotFoundError(fmt.Errorf("wrap: %w", errdefs.NotFound(errors.New("No such container: x")))))
+}
+
+// --- W3-C: DeployImage locking ---
+
+func TestDeployImage_BlocksWhileServiceLocked(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	unlock := mgr.lockService(svc.ID)
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.DeployImage(context.Background(), "tenant-1", svc.ID, "img:1", "") }()
+
+	select {
+	case <-done:
+		t.Fatal("DeployImage ran while the service lock was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeployImage did not proceed after unlock")
+	}
+}
+
+func TestDeployImage_CircuitOpenIsConflict(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	_, err := mgr.db.Exec(`UPDATE services SET circuit_open = 1 WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+
+	err = mgr.DeployImage(context.Background(), "tenant-1", svc.ID, "img:1", "")
+	var ae *apierr.APIError
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, http.StatusConflict, ae.Code)
+	assert.Zero(t, mock.RunContainerCalls)
+}
+
+func TestDeployImage_RemoveFailureFallsBackToNameCleanup(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	mock.RemoveContainerFn = func(ctx context.Context, id string) error { return errors.New("device busy") }
+
+	require.NoError(t, mgr.DeployImage(ctx, "tenant-1", svc.ID, "img:2", ""))
+	assert.Equal(t, []string{"ah-tenant-1-" + svc.ID}, mock.StopAndRemoveByNameCalls)
 }

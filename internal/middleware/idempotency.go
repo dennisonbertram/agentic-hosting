@@ -27,6 +27,8 @@ type idempotencyEntry struct {
 	bodyHash    string // SHA-256 hex of request body for mismatch detection
 	createdAt   time.Time
 	expiresAt   time.Time
+	done        chan struct{} // closed when the owning request finishes
+	pending     bool          // true while the first request is still running
 }
 
 type IdempotencyStore struct {
@@ -182,32 +184,52 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		s.mu.RLock()
-		entry, exists := s.entries[fullKey]
-		s.mu.RUnlock()
-
-		if exists && time.Now().Before(entry.expiresAt) {
-			// Detect payload mismatch: same idempotency key but different body
-			if entry.bodyHash != reqBodyHash {
+		var entry *idempotencyEntry
+		for {
+			s.mu.Lock()
+			existing, exists := s.entries[fullKey]
+			if exists && !time.Now().Before(existing.expiresAt) {
+				delete(s.entries, fullKey)
+				exists = false
+			}
+			if !exists {
+				entry = s.reserve(tenantID, fullKey, reqBodyHash)
+				s.mu.Unlock()
+				break
+			}
+			if existing.bodyHash != reqBodyHash {
+				s.mu.Unlock()
 				writeJSONError(w, http.StatusConflict, "idempotency key reused with different request body")
 				return
 			}
-			w.Header().Set("Idempotency-Replayed", "true")
-			// Always set security header for consistency with httpx helpers
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			if len(entry.body) > 0 {
-				if entry.contentType != "" {
-					w.Header().Set("Content-Type", entry.contentType)
-				} else {
-					w.Header().Set("Content-Type", "application/json")
-				}
+			if !existing.pending {
+				s.mu.Unlock()
+				replay(w, existing)
+				return
 			}
-			w.WriteHeader(entry.statusCode)
-			if len(entry.body) > 0 {
-				w.Write(entry.body)
+			done := existing.done
+			s.mu.Unlock()
+			// Another request with this key is in flight: wait for it, then replay
+			// (or run ourselves if it produced nothing cacheable).
+			select {
+			case <-done:
+			case <-r.Context().Done():
+				writeJSONError(w, http.StatusConflict, "a request with this idempotency key is still in progress")
+				return
 			}
-			return
 		}
+
+		// Always release waiters and drop the pending entry unless a response was stored
+		// (also covers handler panics).
+		stored := false
+		defer func() {
+			s.mu.Lock()
+			if !stored && s.entries[fullKey] == entry {
+				delete(s.entries, fullKey)
+			}
+			s.mu.Unlock()
+			close(entry.done)
+		}()
 
 		rec := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
@@ -221,40 +243,68 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		// Error responses are not cached to prevent "sticky failure" attacks.
 		if rec.statusCode >= 200 && rec.statusCode < 300 && !rec.overflow && len(rec.body) <= maxIdempotencyBodyLen {
 			s.mu.Lock()
-			// Enforce per-tenant limit to prevent single-tenant memory abuse
-			tenantPrefix := tenantID + ":"
-			tenantEntryCount := 0
-			for k := range s.entries {
-				if len(k) > len(tenantPrefix) && k[:len(tenantPrefix)] == tenantPrefix {
-					tenantEntryCount++
-				}
-			}
-			if tenantEntryCount < maxIdempotencyPerTenant {
-				// Enforce global max entries - evict oldest if at capacity
-				if len(s.entries) >= maxIdempotencyEntries {
-					var oldestKey string
-					var oldestTime time.Time
-					for k, v := range s.entries {
-						if oldestKey == "" || v.createdAt.Before(oldestTime) {
-							oldestKey = k
-							oldestTime = v.createdAt
-						}
-					}
-					if oldestKey != "" {
-						delete(s.entries, oldestKey)
-					}
-				}
-				now := time.Now()
-				s.entries[fullKey] = &idempotencyEntry{
-					statusCode:  rec.statusCode,
-					contentType: rec.Header().Get("Content-Type"),
-					body:        rec.body,
-					bodyHash:    reqBodyHash,
-					createdAt:   now,
-					expiresAt:   now.Add(idempotencyTTL),
-				}
+			if s.entries[fullKey] == entry {
+				entry.statusCode = rec.statusCode
+				entry.contentType = rec.Header().Get("Content-Type")
+				entry.body = rec.body
+				entry.pending = false
+				stored = true
 			}
 			s.mu.Unlock()
 		}
 	})
+}
+
+func replay(w http.ResponseWriter, entry *idempotencyEntry) {
+	w.Header().Set("Idempotency-Replayed", "true")
+	// Always set security header for consistency with httpx helpers
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if len(entry.body) > 0 {
+		if entry.contentType != "" {
+			w.Header().Set("Content-Type", entry.contentType)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+	}
+	w.WriteHeader(entry.statusCode)
+	if len(entry.body) > 0 {
+		w.Write(entry.body)
+	}
+}
+
+// reserve inserts a pending entry for fullKey, evicting the tenant's oldest
+// completed entry at the per-tenant cap and the globally oldest at the global cap.
+// Caller must hold s.mu.
+func (s *IdempotencyStore) reserve(tenantID, fullKey, bodyHash string) *idempotencyEntry {
+	tenantPrefix := tenantID + ":"
+	count := 0
+	var oldestTenantKey string
+	var oldestTenantTime time.Time
+	for k, v := range s.entries {
+		if strings.HasPrefix(k, tenantPrefix) {
+			count++
+			if !v.pending && (oldestTenantKey == "" || v.createdAt.Before(oldestTenantTime)) {
+				oldestTenantKey, oldestTenantTime = k, v.createdAt
+			}
+		}
+	}
+	if count >= maxIdempotencyPerTenant && oldestTenantKey != "" {
+		delete(s.entries, oldestTenantKey)
+	}
+	if len(s.entries) >= maxIdempotencyEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range s.entries {
+			if !v.pending && (oldestKey == "" || v.createdAt.Before(oldestTime)) {
+				oldestKey, oldestTime = k, v.createdAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.entries, oldestKey)
+		}
+	}
+	now := time.Now()
+	e := &idempotencyEntry{bodyHash: bodyHash, createdAt: now, expiresAt: now.Add(idempotencyTTL), done: make(chan struct{}), pending: true}
+	s.entries[fullKey] = e
+	return e
 }

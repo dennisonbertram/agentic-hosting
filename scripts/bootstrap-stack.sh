@@ -145,10 +145,11 @@ install -d -o 65532 -g 65532 -m 0700 /var/lib/traefik/certs
 umask 077
 master_key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 bootstrap_token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+admin_token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$master_key" > /var/lib/ah/master.key
 chown ah:ah /var/lib/ah/master.key; chmod 0600 /var/lib/ah/master.key
-printf 'AH_BOOTSTRAP_TOKEN=%s\nAH_BASE_DOMAIN=apps.%s\nAH_NIXPACKS_PATH=/usr/local/bin/nixpacks\nAH_BUILD_DIR=/var/lib/ah-builds\n' "$bootstrap_token" "$domain" > /etc/default/ah
-chmod 0600 /etc/default/ah; unset master_key bootstrap_token
+printf 'AH_BOOTSTRAP_TOKEN=%s\nAH_ADMIN_TOKEN=%s\nAH_BASE_DOMAIN=apps.%s\nAH_NIXPACKS_PATH=/usr/local/bin/nixpacks\nAH_BUILD_DIR=/var/lib/ah-builds\n' "$bootstrap_token" "$admin_token" "$domain" > /etc/default/ah
+chmod 0600 /etc/default/ah; unset master_key bootstrap_token admin_token
 
 log 'configuring Docker runsc and ingress bridge'
 cat > /etc/docker/daemon.json <<'EOF'

@@ -33,7 +33,7 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 ```
 
 - **ah** — control plane (single Go binary, systemd service)
-- **Traefik** — reverse proxy, discovers services via Docker labels, handles TLS
+- **Traefik** — reverse proxy and TLS. Service routes are written as file-provider config (`traefik.enable=false` on containers so image labels cannot hijack routing)
 - **gVisor (runsc)** — container runtime, syscall interception for tenant isolation
 - **Nixpacks** — zero-config source-to-image builds
 - **SQLite** — two databases: `ah.db` (state) and `ah-metering.db` (metering), WAL mode
@@ -42,7 +42,7 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 
 - Linux (Ubuntu 22.04+ recommended)
 - Docker 29+ with gVisor runtime configured
-- Go 1.21+ with CGO enabled
+- Go 1.25+ with CGO enabled
 - Nixpacks installed
 - Traefik running as Docker container
 - `AH_BOOTSTRAP_TOKEN` environment variable (min 32 chars)
@@ -156,7 +156,7 @@ curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 
 ### Authentication
 
-All endpoints except `GET /v1/system/health` and `POST /v1/tenants/register` require:
+Tenant routes require a Bearer key. Public (no API key): `GET /v1/system/health`, `POST /v1/tenants/register`, `POST /v1/auth/recover`, `POST /v1/tenants/{tenantID}/reactivate`, `POST /v1/system/bootstrap-token/validate`, `PATCH /v1/tenants/{tenantID}/quotas`. Register, recover, reactivate, and quota patch send `X-Bootstrap-Token`. Bootstrap validate takes `{"token":"…"}` in the JSON body and always returns `200 {"valid":true|false}`.
 
 ```
 Authorization: Bearer <api_key>
@@ -311,14 +311,15 @@ ah backup
 - **CapDrop=ALL**: No Linux capabilities
 - **no-new-privileges**: Containers cannot escalate privileges
 - **Encrypted secrets**: Env vars and database credentials encrypted with AES-256-GCM using tenant-derived keys
-- **API keys**: bcrypt-hashed, prefix-indexed for performance
+- **API keys**: HMAC-SHA256 of `keyID.secret` using the master key (constant-time compare). bcrypt is used for passwords, not API keys.
 - **Rate limiting**: Per-tenant (100 req/s burst 200) + global (500 req/s burst 1000)
-- **Idempotency**: POST/PUT/DELETE accept `Idempotency-Key` header (stored per tenant+method+path)
+- **Idempotency**: Authenticated mutating routes accept `Idempotency-Key` (tenant + method + path + body hash). TTL is **10 minutes**. `POST /v1/environments/{id}/exec` is excluded.
 
 ### Networking
 
-- Services are accessible via Traefik at `http://<service-name>.<tenant-subdomain>.<domain>`
-- Traefik discovers services via Docker labels set by ah
+- Without `--base-domain`: `http://{serviceID}.localhost`
+- With `--base-domain example.com`: `https://{dns_label}.example.com`
+- Traefik file-provider config is written by `ah`; containers set `traefik.enable=false`
 - ah API is loopback-only by default (Traefik reverse proxies it)
 
 ## Development
@@ -346,33 +347,34 @@ agentic-hosting ships with a Claude Code skill, slash commands, and bash scripts
 Copy the skill to your Claude Code skills directory:
 
 ```bash
+curl -fsSL https://agentic.hosting/install-skill.sh | bash
+# or copy from the repo:
 mkdir -p ~/.claude/skills/agentic-hosting
 cp .claude/skills/agentic-hosting/SKILL.md ~/.claude/skills/agentic-hosting/SKILL.md
+cp .claude/commands/ah-*.md ~/.claude/commands/
 ```
 
 Claude will automatically load the skill and know how to operate agentic-hosting: authentication, deployment flows, database provisioning, error handling, and all API limits.
 
 ### Slash Commands
 
-Copy the commands to your project:
-
-```bash
-cp -r .claude/commands/ /your/project/.claude/commands/
-```
+Files in `.claude/commands/` are named `ah-*.md`. There are no `/deploy` `/status` `/db` `/logs` command files.
 
 | Command | Description |
 |---------|-------------|
-| `/deploy <git-url-or-image> <name> [port]` | Deploy from a git URL (Nixpacks build) or Docker image |
-| `/status` | Full dashboard — disk, services, databases, circuit breakers |
-| `/db <service> <postgres\|redis> [name]` | Provision a database and wire it to a service |
-| `/logs <service> [build-id]` | Stream build logs for a service |
+| `/ah-deploy <git-url-or-image> <name> [port]` | Deploy from a git URL (Nixpacks build) or Docker image |
+| `/ah-status` | Full dashboard — disk, services, databases, circuit breakers |
+| `/ah-db <service> <postgres\|redis> [name]` | Provision a database and wire it to a service |
+| `/ah-logs <service> [build-id]` | Stream runtime logs, or build logs when a build-id is given |
+| `/ah-register <name> <email>` | Register a tenant (needs bootstrap token) |
+| `/ah-snapshot <service> [name]` | Snapshot a service for forking |
 
 **Example usage in Claude Code:**
 ```
-/deploy https://github.com/org/my-app web 3000
-/status
-/db web postgres
-/logs web
+/ah-deploy https://github.com/org/my-app web 3000
+/ah-status
+/ah-db web postgres
+/ah-logs web
 ```
 
 ### Bash Scripts
@@ -410,7 +412,7 @@ See [`scripts/README.md`](scripts/README.md) for full documentation.
 
 ## Documentation site
 
-The public docs match the [agentic.hosting](https://agentic.hosting) landing page (Instrument Serif + Inter, stone palette) and are generated from `docs-site/` (Astro). They describe **only what the Go API actually implements** — see `internal/api/server.go`.
+The public docs match the [agentic.hosting](https://agentic.hosting) landing page (Instrument Serif + Inter, stone palette) and are generated from `docs-site/` (Astro). They describe **only what the Go API actually implements** — see `internal/api/server.go`. Stale-vs-correct claims from the alignment pass are listed in [`docs-site/CORRECTIONS.md`](docs-site/CORRECTIONS.md).
 
 ```bash
 cd docs-site

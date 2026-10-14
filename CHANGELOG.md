@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Docs alignment** — README, homepage, Claude skill/commands, `website/install.sh`, and `scripts/deploy.sh` now match the live API: `/ah-*` slash commands, build fields `source_type`/`source_url`/`source_ref`, `POST /v1/system/bootstrap-token/validate`, `POST /v1/tenants/{id}/reactivate`, 90% disk block, 10-minute idempotency TTL, and `GET /v1/services/{id}/logs`. Audit list: `docs-site/CORRECTIONS.md`.
+
 ### Fixed
 
 - **`ahc register --save`** — config was written to `~/.ahc/config.json` with wrong field names (`api_key`/`server_url`), making it unreadable by `ahclient.LoadConfig`; now writes to `~/.ah/config.json` with the correct `url`/`key` fields matching the standard config format

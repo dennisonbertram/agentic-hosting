@@ -202,7 +202,7 @@ Restart recreates the container (env changes apply).
 GET /v1/services/{id}/logs?follow=true&tail=100
 ```
 
-`text/plain`. `tail` default 100, max 10000. Long-running (no 30s timeout). This **is** implemented (`handleServiceLogs` → Docker logs). Older skill text that says runtime logs are unavailable is stale.
+`text/plain`. `tail` default 100, max 10000. Implemented (`handleServiceLogs` → Docker logs).
 
 ### Env
 

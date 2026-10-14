@@ -7,7 +7,7 @@ order: 4
 
 # Install & quickstart
 
-These steps match `cmd/ah`, `deploy/ah.service`, and `internal/config`. Older docs that say `paasd` or `/var/lib/paasd` are stale.
+These steps match `cmd/ah`, `deploy/ah.service`, and `internal/config`. Paths are `/var/lib/ah` and `/etc/default/ah` (not `paasd`).
 
 ## Requirements
 

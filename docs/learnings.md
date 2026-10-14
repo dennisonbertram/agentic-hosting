@@ -10,7 +10,8 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | Disk block at 95% (0.1.0 changelog) | Every `diskcheck` call site is **80 / 90** |
 | API keys bcrypt-hashed (README security section) | HMAC-SHA256 with master key; bcrypt is for passwords |
 | Build body `git_url` / `branch` | `source_type`, `source_url`, `source_ref` |
-| `POST /v1/auth/bootstrap/validate` | `POST /v1/system/bootstrap-token/validate` |
+| `POST /v1/auth/bootstrap/validate` + `X-Bootstrap-Token` → 401 | `POST /v1/system/bootstrap-token/validate` body `{"token"}` → always 200 `{"valid":bool}` |
+| Create service with no `image` for git | `image` is required; `ahc` sends `"pending"` |
 | `POST /v1/tenant/reactivate` | `POST /v1/tenants/{tenantID}/reactivate` |
 | Idempotency TTL 24h (skill operations.md) | `10 * time.Minute` |
 | Activity `since` is RFC3339 | Unix timestamp |
@@ -19,7 +20,7 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | Global build concurrency 3 | Channel buffer **10**; quota column default is 3 |
 | `GET/PUT .../environments/{id}/files` | Not routed; sync is `POST .../sync` |
 | PATCH tenant email | PATCH only accepts `name` |
-| Homepage `/deploy` commands | Repo files are `/ah-*`; `install.sh` downloads missing names |
+| Homepage `/deploy` commands | Repo files are `/ah-*`; `install.sh` now installs those same files |
 
 ## Build constraints
 

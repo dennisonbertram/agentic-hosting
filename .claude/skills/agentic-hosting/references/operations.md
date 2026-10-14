@@ -12,7 +12,8 @@ Rules:
 - Same key + same tenant + same endpoint = same result, no duplicate resource created
 - Most important for: database creation and build triggers (the two slowest operations)
 - Key scope: per-tenant, per-endpoint, per HTTP method
-- Expiry: keys expire after 24 hours
+- Expiry: keys expire after **10 minutes** (`idempotencyTTL` in `internal/middleware/idempotency.go`)
+- `POST /v1/environments/{id}/exec` is excluded from idempotency
 
 ## Rate Limits
 
@@ -31,7 +32,7 @@ On `429 Too Many Requests`: read the `Retry-After` header. If absent, back off e
 |----------|-------|
 | Databases per tenant | 3 |
 | API keys per tenant | 20 |
-| Env vars per service | 100 |
+| Env vars per service | Schema default **50** (`max_env_vars_per_service`); a single POST may set at most **100** keys |
 | Request body | 1 MB |
 | Build log max size | 5 MB |
 | Deploy timeout | 10 minutes |
@@ -98,7 +99,7 @@ Deletion via the API is soft-delete — the GC handles actual container/volume c
 | `409 Conflict` | Duplicate name or idempotency conflict | Check if resource already exists |
 | `422 Unprocessable Entity` | Validation failed | Read error message; common: name already taken, bad email format |
 | `429 Too Many Requests` | Rate limited | Respect `Retry-After` header; exponential backoff |
-| `500 Internal Server Error` | Server bug | Check server logs: `journalctl -u paasd -n 50` |
+| `500 Internal Server Error` | Server bug | Check server logs: `journalctl -u ah -n 50` |
 | `503 Service Unavailable` | Disk >90% or Docker/gVisor unavailable | Check `/v1/system/health/detailed` |
 
 ## Pagination
@@ -113,7 +114,7 @@ curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/services?limit=20&offset=
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/services?limit=20&offset=20"
 ```
 
-Default limit is 50; max is 200 per request.
+Default limit is **100** (`parsePagination`); max is 200 per request. Activity feed defaults to **50**.
 
 ## Activity Feed
 
@@ -134,7 +135,7 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/tenant | python3 -m json.t
 # Get usage stats
 curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/tenant/usage | python3 -m json.tool
 
-# Update tenant name/email
+# Update tenant name (email is not updatable)
 curl -s -X PATCH $AH_URL/v1/tenant \
   -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
   -d '{"name":"new-name"}'
@@ -146,28 +147,28 @@ curl -s -X DELETE $AH_URL/v1/tenant -H "Authorization: Bearer $AH_KEY"
 ## Server Maintenance (requires SSH)
 
 ```bash
-# Restart paasd daemon
-ssh root@<server> "systemctl restart paasd"
+# Restart ah daemon
+ssh root@<server> "systemctl restart ah"
 
 # Watch live logs
-ssh root@<server> "journalctl -u paasd -f"
+ssh root@<server> "journalctl -u ah -f"
 
 # Check what's running
 ssh root@<server> "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 
 # Check migrations applied
-ssh root@<server> "sqlite3 /var/lib/paasd/paasd.db 'SELECT name FROM schema_migrations ORDER BY name;'"
+ssh root@<server> "sqlite3 /var/lib/ah/ah.db 'SELECT name FROM schema_migrations ORDER BY name;'"
 ```
 
 ## Backup
 
 ```bash
-# Backup the state database (contains all tenant/service/database metadata)
-ssh root@<server> "/agentic-hosting/bin/paasd backup /var/lib/paasd/paasd.db"
-# Output: /var/lib/paasd/backups/paasd-<timestamp>.db
+# Backup the state + metering databases (VACUUM INTO, gzip, keep last 10)
+ssh root@<server> "ah backup"
+# Output: /var/lib/ah/backups/ah-<timestamp>.db.gz (and metering sibling)
 
 # The master key must also be backed up separately — without it, all
 # encrypted database credentials become unrecoverable
-ssh root@<server> "cat /var/lib/paasd/master.key"
+ssh root@<server> "cat /var/lib/ah/master.key"
 # Store this securely off-server
 ```

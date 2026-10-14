@@ -10,7 +10,7 @@ order: 6
 Two deploy paths exist:
 
 1. **Image** — `POST /v1/services` with `"image"` (Docker Hub name or `127.0.0.1:5000/...` / `localhost:5000/...`). Deploy starts asynchronously (10 minute timeout).
-2. **Git** — create a service (image optional), then `POST /v1/services/{id}/builds` with `source_type: "git"`.
+2. **Git** — create a service with a placeholder image (`ahc` sends `"pending"` — `image` is required), then `POST /v1/services/{id}/builds` with `source_type: "git"`.
 
 There is no `git_url` / `branch` field on the build API. The struct is:
 
@@ -46,12 +46,12 @@ This is SSRF / DNS-rebinding protection, not a preference list.
 ## Sequence
 
 ```bash
-# 1. Create the service (no image yet is fine)
+# 1. Create the service (`image` is required; "pending" is the ahc placeholder)
 curl -s -X POST "$AH_URL/v1/services" \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"name":"web","port":3000}'
+  -d '{"name":"web","image":"pending","port":3000}'
 
 # 2. Start the build
 curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/builds" \

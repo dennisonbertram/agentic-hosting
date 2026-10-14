@@ -32,7 +32,7 @@ Six slash commands are available when the Claude Code skill is installed:
 | `/ah-deploy <git-url-or-image> <name> [port]` | Deploy a service from git URL or Docker image |
 | `/ah-status` | Full health dashboard — disk, services, databases, circuits |
 | `/ah-db <service-name> <postgres\|redis> [db-name]` | Provision a database and wire it to a service |
-| `/ah-logs <service-name> [build-id]` | Stream build logs for a service |
+| `/ah-logs <service-name> [build-id]` | Stream runtime logs, or build logs when a build-id is given |
 | `/ah-register <tenant-name> <email>` | Register a new tenant and get an API key |
 | `/ah-snapshot <service-name> [snapshot-name]` | Take a snapshot for instant environment forking |
 
@@ -47,7 +47,7 @@ ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah"
 
 Multiple bootstrap tokens are supported — set `AH_BOOTSTRAP_TOKEN` to a comma-separated list (e.g. `token1,token2`). Any valid token in the list is accepted.
 
-To verify a bootstrap token without registering, use `POST /v1/auth/bootstrap/validate` with the `X-Bootstrap-Token` header — returns `200` if valid.
+To verify a bootstrap token without registering, use `POST /v1/system/bootstrap-token/validate` with body `{"token":"..."}` — always returns `200` with `{"valid":true}` or `{"valid":false}`. Invalid tokens are not a 401.
 
 ```bash
 curl -s -X POST $AH_URL/v1/tenants/register \
@@ -81,7 +81,7 @@ curl -s -X POST $AH_URL/v1/auth/recover \
 SVC=$(curl -s -X POST $AH_URL/v1/services \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"my-app","image":"nginx:alpine","port":80,"memory_mb":256,"cpu_count":1}')
+  -d '{"name":"my-app","image":"nginx:alpine","port":80}')
 SERVICE_ID=$(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 echo "Service ID: $SERVICE_ID"
 echo "URL: $(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["url"])')"
@@ -102,18 +102,20 @@ SVC=$(curl -s -X POST "$AH_URL/v1/services?from_snapshot=$SNAPSHOT_ID" \
 Supported: GitHub, GitLab, Bitbucket, sr.ht, Codeberg (HTTPS URLs only). Supports branch names and full SHA commit refs.
 
 ```bash
-# 1. Create service
+# 1. Create service (`image` is required; `pending` is the placeholder ahc uses
+#    for git deploys — create always kicks off an async Deploy that will fail
+#    the pull, then the build replaces the image)
 SVC=$(curl -s -X POST $AH_URL/v1/services \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"my-app","port":3000}')
+  -d '{"name":"my-app","image":"pending","port":3000}')
 SERVICE_ID=$(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 
-# 2. Start build (branch or SHA ref)
+# 2. Start build (branch name or SHA). There is no git_url / branch field.
 BUILD=$(curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/builds \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"git_url":"https://github.com/org/repo","branch":"main"}')
+  -d '{"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}')
 BUILD_ID=$(echo $BUILD | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 
 # 3. Stream build logs (blocks until done)
@@ -126,7 +128,7 @@ curl -sN -H "Authorization: Bearer $AH_KEY" \
 ```bash
 curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/redeploy \
   -H "Authorization: Bearer $AH_KEY"
-# Triggers a new build from the same git URL/branch as the last build
+# Triggers a new build from the same source_url / source_ref as the last build
 ```
 
 ### Poll until running
@@ -272,9 +274,14 @@ curl -s -X PATCH $AH_URL/v1/tenant \
 # Activity feed (synthetic event log across all resources)
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/activity?limit=50" | python3 -m json.tool
 
-# Reactivate a suspended tenant (requires bootstrap token)
-curl -s -X POST $AH_URL/v1/tenant/reactivate \
+# Stream runtime logs (container stdout/stderr)
+curl -sN -H "Authorization: Bearer $AH_KEY" \
+  "$AH_URL/v1/services/$SERVICE_ID/logs?follow=true&tail=100"
+
+# Reactivate a suspended tenant (requires bootstrap token + tenant ID)
+curl -s -X POST $AH_URL/v1/tenants/$TENANT_ID/reactivate \
   -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN"
+# → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
 ```
 
 ---
@@ -349,13 +356,7 @@ ah rotate-key --new-key-file /path/to/new.key
 | Build `failed` | Stream build logs with `?follow=true` for the error |
 | All API keys lost | Use `POST /v1/auth/recover` with bootstrap token + tenant email |
 
-For idempotency, limits, and advanced operations see `references/operations.md`.
-
----
-
-## Known Gaps
-
-- No runtime log streaming (#11) — build logs work; container stdout/stderr via API not yet available
+For idempotency (10-minute TTL), limits, and advanced operations see `references/operations.md`.
 
 ---
 

@@ -8,7 +8,7 @@ The landing page is hand-written HTML + Tailwind CDN. Docs need markdown, a side
 
 ## Canonical source of truth
 
-`internal/api/server.go` and the handler structs. Older skill files (`git_url`/`branch`, `/v1/auth/bootstrap/validate`, `/v1/tenant/reactivate`, `paasd` paths) are called out where they diverge.
+`internal/api/server.go` and the handler structs. README, homepage, skill, and slash commands were aligned to the same facts. The before/after list is `docs-site/CORRECTIONS.md`.
 
 ## Commands
 

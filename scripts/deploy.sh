@@ -14,7 +14,7 @@ echo "Deploying '$NAME'..."
 
 # Create service
 if is_git_url "$SOURCE"; then
-  IMAGE="placeholder:latest"
+  IMAGE="pending"  # required field; ahc uses this placeholder for git deploys
 else
   IMAGE="$SOURCE"
 fi
@@ -25,7 +25,7 @@ SVC=$(curl -sf -X POST "$URL/v1/services" \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $IDEM_KEY" \
-  -d "{\"name\":\"$NAME\",\"image\":\"$IMAGE\",\"port\":$PORT,\"memory_mb\":512,\"cpu_count\":1}")
+  -d "{\"name\":\"$NAME\",\"image\":\"$IMAGE\",\"port\":$PORT}")
 
 SERVICE_ID=$(echo "$SVC" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "  Service ID: $SERVICE_ID"
@@ -36,7 +36,7 @@ if is_git_url "$SOURCE"; then
   BUILD=$(curl -sf -X POST "$URL/v1/services/$SERVICE_ID/builds" \
     -H "Authorization: Bearer $KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"git_url\":\"$SOURCE\",\"branch\":\"main\"}")
+    -d "{\"source_type\":\"git\",\"source_url\":\"$SOURCE\",\"source_ref\":\"main\"}")
   BUILD_ID=$(echo "$BUILD" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   echo "  Build ID  : $BUILD_ID"
   echo "  Streaming build logs..."

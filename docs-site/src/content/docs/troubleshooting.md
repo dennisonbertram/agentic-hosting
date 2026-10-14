@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: Common ah failures — HTTPS required, circuit open, disk 90%, gVisor missing, CGO builds, and stale skill paths.
+description: Common ah failures — HTTPS required, circuit open, disk 90%, gVisor missing, CGO builds, and wrong slash-command names.
 section: Reference
 order: 16
 ---
@@ -93,7 +93,7 @@ Name or email already taken. The message is intentionally vague.
 
 ## Skill commands 404
 
-Use `/ah-deploy` not `/deploy`. Use `install-skill.sh` not `install.sh` if you want the current command files.
+Use `/ah-deploy` not `/deploy`. Both `install-skill.sh` and `install.sh` now download the `/ah-*` command files.
 
 ## Logs die at ~30 seconds
 

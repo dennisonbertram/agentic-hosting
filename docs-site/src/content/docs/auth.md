@@ -24,10 +24,12 @@ Validate without registering:
 
 ```bash
 curl -s -X POST "$AH_URL/v1/system/bootstrap-token/validate" \
-  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN"
+  -H "Content-Type: application/json" \
+  -d "{\"token\":\"$AH_BOOTSTRAP_TOKEN\"}"
+# → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
 ```
 
-(The skill file still mentions `/v1/auth/bootstrap/validate`. That path is **not** registered. The router mounts `POST /v1/system/bootstrap-token/validate`.)
+The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register / recover / reactivate / quota patch).
 
 ## Register
 
@@ -105,9 +107,7 @@ POST /v1/tenants/{tenantID}/reactivate
 X-Bootstrap-Token: <token>
 ```
 
-(The skill's `POST /v1/tenant/reactivate` is **not** a route.)
-
-Returns a new API key. Rate-limited like registration.
+Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
 
 ## Tenant self-service
 

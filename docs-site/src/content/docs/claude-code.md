@@ -7,9 +7,7 @@ order: 14
 
 # Claude Code skill and slash commands
 
-The repo ships a skill at `.claude/skills/agentic-hosting/SKILL.md` and commands under `.claude/commands/`.
-
-The **homepage** still shows `/deploy`, `/status`, `/db`, `/logs`. Those names are what `website/install.sh` tried to download — that script looks for `deploy.md` etc., which **do not exist**. Use `website/install-skill.sh` (or copy the `ah-*` files).
+The repo ships a skill at `.claude/skills/agentic-hosting/SKILL.md` and commands under `.claude/commands/`. The homepage, `install.sh`, and `install-skill.sh` all install the six `/ah-*` commands.
 
 ## Install
 
@@ -45,7 +43,7 @@ export AH_KEY=keyid.secret
 | `/ah-deploy <git-or-image> <name> [port]` | `ah-deploy.md` | Health + disk check, create service or build, poll 10 minutes |
 | `/ah-status` | `ah-status.md` | Detailed health, list services and databases, surface circuits |
 | `/ah-db <service> <postgres\|redis> [name]` | `ah-db.md` | Create DB, fetch connection string, set env, restart |
-| `/ah-logs <service> [build-id]` | `ah-logs.md` | Stream build logs |
+| `/ah-logs <service> [build-id]` | `ah-logs.md` | Runtime logs, or build logs when a build-id is given |
 | `/ah-register <name> <email>` | `ah-register.md` | `POST /v1/tenants/register` |
 | `/ah-snapshot <service> [name]` | `ah-snapshot.md` | `POST /v1/services/{id}/snapshots` |
 
@@ -57,6 +55,4 @@ There is also `.claude/commands/security-review.md` — a four-pass code audit c
 
 ## Skill vs this site
 
-The skill’s `references/*.md` still contain some pre-rename or pre-route-change text (`paasd`, `/v1/auth/bootstrap/validate`, `POST /v1/tenant/reactivate`, `git_url`/`branch` on builds, RFC3339 `since` on activity). **This documentation site follows `internal/api/server.go`.** Prefer the [REST API](./api/) page when the skill and the router disagree.
-
-`/ah-register` still contains a host-specific `ssh … grep AH_BOOTSTRAP_TOKEN /etc/default/paasd` example. The live unit file is `/etc/default/ah`.
+The skill, slash commands, homepage, and this site are aligned with `internal/api/server.go`. The audit of older wording is in [`docs-site/CORRECTIONS.md`](https://github.com/dennisonbertram/agentic-hosting/blob/main/docs-site/CORRECTIONS.md). Prefer the [REST API](./api/) page if anything still disagrees.

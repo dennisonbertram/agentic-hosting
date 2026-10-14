@@ -118,9 +118,9 @@
             <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -fsSL https://agentic.hosting/install.sh | bash</span></div>
             <div><span class="text-green-400">✓</span> <span class="text-stone-300">Your platform is live. Starts at $4/mo on Hetzner.</span></div>
             <div class="mt-4 text-stone-500"># Step 2 — now ANY of your agents can deploy projects to it</div>
-            <div><span class="text-stone-500">blog-agent: </span><span class="text-stone-200">/deploy github.com/me/my-blog blog</span></div>
+            <div><span class="text-stone-500">blog-agent: </span><span class="text-stone-200">/ah-deploy github.com/me/my-blog blog</span></div>
             <div class="pl-12"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://blog.your-server.traefik.me</span></span></div>
-            <div class="mt-1"><span class="text-stone-500">api-agent: &nbsp;</span><span class="text-stone-200">/deploy github.com/me/my-api backend</span></div>
+            <div class="mt-1"><span class="text-stone-500">api-agent: &nbsp;</span><span class="text-stone-200">/ah-deploy github.com/me/my-api backend</span></div>
             <div class="pl-12"><span class="text-green-400">✓</span> <span class="text-stone-300">live at <span class="text-blue-400">https://backend.your-server.traefik.me</span></span></div>
           </div>
         </div>
@@ -146,13 +146,13 @@
         <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
           <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(91,155,213,0.1); color: #3b82f6">JSON-only responses</div>
           <h3 class="font-medium text-stone-900 mb-2">No more HTML error pages.</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">Standard platforms return HTML 500 pages that break LLM parsers. Every response from agentic.hosting — including errors — is strict JSON with a machine-readable <code class="text-xs bg-stone-200 px-1 rounded">code</code> field. Your agent always knows exactly what happened.</p>
+          <p class="text-sm text-stone-500 leading-relaxed">Standard platforms return HTML 500 pages that break LLM parsers. Every response from agentic.hosting — including errors — is JSON. Errors are <code class="text-xs bg-stone-200 px-1 rounded">{"error":"..."}</code>. Your agent always gets a parseable body.</p>
         </div>
 
         <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
           <div class="inline-flex px-2.5 py-1 rounded-full text-xs font-mono-stack mb-4" style="background: rgba(77,184,144,0.1); color: #10b981">Idempotency keys</div>
           <h3 class="font-medium text-stone-900 mb-2">Retries don't create duplicates.</h3>
-          <p class="text-sm text-stone-500 leading-relaxed">Agents hallucinate, timeout, and retry. Every write endpoint accepts an idempotency key — the same request twice produces the same result once. No duplicate deployments from a stuck loop.</p>
+          <p class="text-sm text-stone-500 leading-relaxed">Agents hallucinate, timeout, and retry. Authenticated write endpoints accept an <code class="text-xs bg-stone-200 px-1 rounded">Idempotency-Key</code> — same tenant + method + path + body hash returns the cached result. Keys expire after 10 minutes. <code class="text-xs bg-stone-200 px-1 rounded">POST /v1/environments/{id}/exec</code> is excluded.</p>
         </div>
 
         <div class="bg-stone-50 rounded-xl p-6 border border-stone-200">
@@ -242,7 +242,7 @@
           <div><span class="text-blue-400">ReadonlyRootfs</span>: <span class="text-green-400">true</span></div>
           <div><span class="text-blue-400">NoNewPrivileges</span>: <span class="text-green-400">true</span></div>
           <div><span class="text-blue-400">NetworkMode</span>: tenant-isolated</div>
-          <div><span class="text-blue-400">PidsLimit</span>: 100</div>
+          <div><span class="text-blue-400">PidsLimit</span>: 256</div>
           <div class="mt-3 text-stone-500">// circuit breaker</div>
           <div><span class="text-amber-400">!</span> <span class="text-stone-300">web: 5 crashes in 10m → circuit open</span></div>
           <div><span class="text-stone-400">→ paused · auto-retry in 30m</span></div>
@@ -272,26 +272,26 @@
       <div>
         <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-3">Claude Code</p>
         <h2 class="font-instrument-serif italic text-4xl text-stone-900 mb-5 leading-snug">
-          Or just say /deploy.
+          Or just say /ah-deploy.
         </h2>
         <p class="text-stone-600 text-base leading-relaxed mb-6">
-          Install the skill once. Your agent gets four slash commands that know exactly how to use the API — no curl to construct, no JSON to format. Point it at your server and it takes over.
+          Install the skill once (<code class="text-xs bg-stone-200 px-1 rounded">install-skill.sh</code>). Your agent gets six <code class="text-xs bg-stone-200 px-1 rounded">/ah-*</code> slash commands that know how to use the API — no curl to construct, no JSON to format.
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-white rounded-lg p-4 border border-stone-200">
-            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/deploy</div>
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/ah-deploy</div>
             <p class="text-xs text-stone-500">Docker image or git repo. Streams progress.</p>
           </div>
           <div class="bg-white rounded-lg p-4 border border-stone-200">
-            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/status</div>
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/ah-status</div>
             <p class="text-xs text-stone-500">Full health dashboard — disk, services, circuits.</p>
           </div>
           <div class="bg-white rounded-lg p-4 border border-stone-200">
-            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/db</div>
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/ah-db</div>
             <p class="text-xs text-stone-500">Provision Postgres or Redis, auto-wire to service.</p>
           </div>
           <div class="bg-white rounded-lg p-4 border border-stone-200">
-            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/logs</div>
+            <div class="font-mono-stack text-sm font-medium text-stone-900 mb-1">/ah-logs</div>
             <p class="text-xs text-stone-500">Stream build logs for any service by name.</p>
           </div>
         </div>
@@ -305,13 +305,13 @@
           <span class="ml-4 text-xs text-stone-400 font-mono-stack">Claude Code</span>
         </div>
         <div class="bg-stone-900 p-5 font-mono-stack text-[12px] leading-relaxed space-y-1 text-stone-300">
-          <div><span class="text-stone-500">you  </span><span class="text-stone-200">/deploy github.com/me/my-blog blog</span></div>
+          <div><span class="text-stone-500">you  </span><span class="text-stone-200">/ah-deploy github.com/me/my-blog blog</span></div>
           <div class="text-stone-400 pl-5">→ Cloning · Building · Starting...</div>
           <div class="pl-5"><span class="text-green-400">✓</span> live at <span class="text-blue-400">https://blog.65.21.x.x.traefik.me</span></div>
-          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/db blog postgres</span></div>
+          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/ah-db blog postgres</span></div>
           <div class="text-stone-400 pl-5">→ Creating database...</div>
           <div class="pl-5"><span class="text-green-400">✓</span> database wired up · blog restarted</div>
-          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/status</span></div>
+          <div class="mt-3"><span class="text-stone-500">you  </span><span class="text-stone-200">/ah-status</span></div>
           <div class="text-stone-400 pl-5">Disk: 24% · all systems ok</div>
           <div class="pl-5"><span class="text-green-400">✓</span> blog — running · 0 crashes</div>
           <div class="pl-5"><span class="text-green-400">✓</span> blog-db — running</div>

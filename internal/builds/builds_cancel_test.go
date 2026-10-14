@@ -77,7 +77,7 @@ func TestCancelActive_DoesNotOverwriteSucceeded(t *testing.T) {
 	mgr := NewManager(stateDB, &stubBuilder{}, nil)
 	insertBuild(t, mgr, "b-done", "succeeded")
 
-	ok := mgr.cancelActive(context.Background(), "b-done", "failed", "[ah] Build cancelled by user")
+	ok, _ := mgr.cancelActive(context.Background(), "b-done", "failed", "[ah] Build cancelled by user")
 	assert.False(t, ok)
 	assert.Equal(t, "succeeded", getBuildStatus(t, stateDB, "b-done"))
 	logs, err := mgr.GetBuildLogs(context.Background(), "tenant-1", "b-done")

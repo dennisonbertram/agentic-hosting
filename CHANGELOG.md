@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Redis create no longer fails (readiness check now AUTHs); NULL `container_id` no longer 500s Get/Delete/reconcile; failed kanban can be re-created; kanban setup failure is `failed`, not `ready`.
 - Tenant reactivation now restarts databases and kanban from their stored volumes/credentials. Database containers are pulled first and get memory/pids limits, no-new-privileges and a reduced capability set.
 
+- **`ahc` CLI review fixes** — uses the server's real statuses (db `ready`, service/build `failed`), fails deploys on failed builds, merges env and file config per field and saves it atomically (0600), honors long exec/create timeouts, propagates `env exec` exit codes, and verifies the installer download against `checksums.txt`.
+
 ### Added
 
 - **Usage metering collector**: samples CPU and memory of running services every 60s into the metering DB. `memory_mb_avg` is now a real average (it was a sum). `AH_METER_DB_PATH` is honored when set.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -80,8 +81,10 @@ func newPlaceholderCmd(use, short string) *cobra.Command {
 // Commands should call this to get an authenticated client.
 func getClient(state *rootState) (*ahclient.Client, error) {
 	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{})
-	if err != nil {
-		cfg = &ahclient.Config{}
+	if errors.Is(err, ahclient.ErrNoConfig) {
+		cfg = &ahclient.Config{} // flags may still supply everything
+	} else if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	// Apply flag overrides
@@ -103,7 +106,21 @@ func getClient(state *rootState) (*ahclient.Client, error) {
 func Execute() {
 	cmd := newRootCmd()
 	if err := cmd.Execute(); err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			os.Exit(ec.code) // the command's own output was already shown
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
+
+// exitCodeError makes Execute exit with a specific process exit code, used to
+// propagate the exit code of a command run by `ahc env exec`.
+type exitCodeError struct {
+	code int
+	msg  string
+}
+
+func (e *exitCodeError) Error() string { return e.msg }
+func (e *exitCodeError) ExitCode() int { return e.code }

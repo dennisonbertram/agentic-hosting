@@ -19,6 +19,22 @@ func saveAPIKey(path, apiKey, serverURL string) error {
 	return cfg.Save(path)
 }
 
+// saveResolvedConfig saves the API key together with the URL the client
+// actually used (flag, env or config file) to the default config path.
+// Failures only warn: the key was already issued and printed.
+func saveResolvedConfig(cmd *cobra.Command, c *ahclient.Client, apiKey string, jsonOutput bool) {
+	cfgPath := defaultConfigPath()
+	if err := saveAPIKey(cfgPath, apiKey, c.BaseURL); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
+		return
+	}
+	if jsonOutput {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Saved to: %s\n", cfgPath)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
+	}
+}
+
 // resolveBootstrapToken returns the bootstrap token from the flag value (preferred)
 // or the named environment variable. Returns an error if neither is available.
 func resolveBootstrapToken(flagVal, envVar string) (string, error) {
@@ -86,6 +102,10 @@ Set the AH_BOOTSTRAP_TOKEN environment variable or pass --bootstrap-token.`,
 				return fmt.Errorf("registration failed: %w", err)
 			}
 
+			if saveFlag {
+				saveResolvedConfig(cmd, c, result.APIKey, root.jsonOutput)
+			}
+
 			if root.jsonOutput {
 				return printJSON(cmd.OutOrStdout(), result)
 			}
@@ -98,24 +118,11 @@ Set the AH_BOOTSTRAP_TOKEN environment variable or pass --bootstrap-token.`,
 			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
 			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.APIKey)
 
-			if saveFlag {
-				cfgPath := defaultConfigPath()
-				serverURL := root.urlFlag
-				if serverURL == "" {
-					serverURL = os.Getenv("AH_URL")
-				}
-				if err := saveAPIKey(cfgPath, result.APIKey, serverURL); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
-				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
-				}
-			}
-
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&bootstrapToken, "bootstrap-token", "", "Bootstrap token (overrides $AH_BOOTSTRAP_TOKEN)")
-	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save API key to ~/.ahc/config.json")
+	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save API key to ~/.ah/config.json")
 	return cmd
 }

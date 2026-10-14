@@ -1,9 +1,89 @@
 package builder
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+func validBuildRequest() BuildRequest {
+	tenantID := strings.Repeat("a", 32)
+	serviceID := strings.Repeat("b", 32)
+	buildID := strings.Repeat("c", 32)
+	return BuildRequest{
+		BuildID: buildID, TenantID: tenantID, ServiceID: serviceID,
+		SourceType: "git", SourceURL: "https://github.com/example/repo.git",
+		SourceRef: "main", ImageTag: fmt.Sprintf("127.0.0.1:5000/ah/%s-%s:%s", tenantID, serviceID, buildID),
+	}
+}
+
+func TestValidateBuildRequest(t *testing.T) {
+	valid := validBuildRequest()
+	if err := validateBuildRequest(valid); err != nil {
+		t.Fatalf("valid request rejected: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*BuildRequest)
+	}{
+		{"invalid build ID", func(r *BuildRequest) { r.BuildID = "../../etc" }},
+		{"unsupported source", func(r *BuildRequest) { r.SourceType = "archive" }},
+		{"http source", func(r *BuildRequest) { r.SourceURL = "http://github.com/example/repo" }},
+		{"userinfo source", func(r *BuildRequest) { r.SourceURL = "https://token@github.com/example/repo" }},
+		{"untrusted source host", func(r *BuildRequest) { r.SourceURL = "https://github.evil.test/example/repo" }},
+		{"unsafe ref", func(r *BuildRequest) { r.SourceRef = "main;id" }},
+		{"unrelated image target", func(r *BuildRequest) { r.ImageTag = "attacker.invalid/example:latest" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid
+			test.edit(&request)
+			if err := validateBuildRequest(request); err == nil {
+				t.Fatal("expected request to be rejected")
+			}
+		})
+	}
+}
+
+func TestBuildIDValidation(t *testing.T) {
+	for _, id := range []string{strings.Repeat("0", 32), strings.Repeat("f", 32)} {
+		if !validBuildID(id) {
+			t.Errorf("valid generated build ID rejected: %q", id)
+		}
+	}
+	for _, id := range []string{"", "../" + strings.Repeat("a", 32), strings.Repeat("A", 32), strings.Repeat("a", 31), strings.Repeat("a", 33)} {
+		if validBuildID(id) {
+			t.Errorf("invalid build ID accepted: %q", id)
+		}
+	}
+}
+
+func TestBuildArtifactsRemainGroupReadableUnderServiceUmask(t *testing.T) {
+	dir := t.TempDir()
+	old := syscall.Umask(0077)
+	defer syscall.Umask(old)
+	manifest := filepath.Join(dir, "request.json")
+	if err := writePrivateJSON(manifest, validBuildRequest(), 0640); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "build.log")
+	if err := createBuildLog(logPath); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{manifest: 0640, logPath: 0660} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %04o, want %04o", filepath.Base(path), got, want)
+		}
+	}
+}
 
 func TestIsGitSHA(t *testing.T) {
 	tests := []struct {
@@ -27,8 +107,8 @@ func TestIsGitSHA(t *testing.T) {
 		{strings.Repeat("a", 41), false},
 
 		// Contains non-hex chars — false
-		{"abc123g", false},   // 'g' is not hex
-		{"abc123G", false},   // uppercase G, but also: uppercase letters are not valid hex lower
+		{"abc123g", false}, // 'g' is not hex
+		{"abc123G", false}, // uppercase G, but also: uppercase letters are not valid hex lower
 		{"abcdefg1234567", false},
 		{"ABCDEF1234567", false}, // uppercase hex — our helper requires lowercase
 

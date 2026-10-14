@@ -1,0 +1,31 @@
+[Unit]
+Description=Agentic Hosting build unit broker
+After=dbus.service systemd-logind.service
+Requires=dbus.service
+
+[Service]
+Type=simple
+User=root
+Group=ah
+RuntimeDirectory=ah-build-broker
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/ah build-broker
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+ProtectKernelLogs=yes
+ReadWritePaths=/run/ah-build-broker
+
+[Install]
+WantedBy=multi-user.target

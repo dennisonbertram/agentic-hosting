@@ -1,9 +1,11 @@
-// Package builder runs Nixpacks builds with resource limits.
+// Package builder runs source-to-image builds in the ah-builder systemd unit.
 package builder
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,128 +13,192 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 )
 
+const (
+	DefaultBuildDir = "/var/lib/ah-builds"
+	BrokerSocket    = "/run/ah-build-broker/broker.sock"
+)
+
+var (
+	buildIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+	refPattern     = regexp.MustCompile(`^[A-Za-z0-9._/\-]+$`)
+	allowedGitHost = map[string]bool{
+		"github.com": true, "gitlab.com": true, "bitbucket.org": true,
+		"sr.ht": true, "codeberg.org": true,
+	}
+)
+
 // BuildRequest describes a build to execute.
 type BuildRequest struct {
-	BuildID    string
-	ServiceID  string
-	TenantID   string
-	SourceType string // "git"
-	SourceURL  string // git clone URL
-	SourceRef  string // branch/tag/sha
-	ImageTag   string // e.g. 127.0.0.1:5000/ah/abc-def:12345678
+	BuildID    string `json:"build_id"`
+	ServiceID  string `json:"service_id"`
+	TenantID   string `json:"tenant_id"`
+	SourceType string `json:"source_type"`
+	SourceURL  string `json:"source_url"`
+	SourceRef  string `json:"source_ref"`
+	ImageTag   string `json:"image_tag"`
 }
 
-// Builder runs Nixpacks builds with resource limits.
+// Builder coordinates builds in the ah-builder systemd service.
 type Builder struct {
-	workDir  string // /var/lib/ah/builds
-	nixpacks string // path to nixpacks binary
-
-	// Global concurrency: max 3 concurrent builds
-	buildSem chan struct{}
-
-	// Per-tenant concurrency: max 1 concurrent build per tenant
+	workDir      string
+	nixpacks     string
+	buildSem     chan struct{}
 	tenantMu     sync.Mutex
 	tenantBuilds map[string]struct{}
-
-	// Active build processes for cancellation (keyed by buildID)
-	procMu  sync.Mutex
-	procMap map[string]string // buildID -> systemd unit name
 }
 
 // NewBuilder creates a builder.
 func NewBuilder(workDir, nixpacksPath string) (*Builder, error) {
-	if err := os.MkdirAll(workDir, 0700); err != nil {
+	if err := os.MkdirAll(workDir, 0770); err != nil {
 		return nil, fmt.Errorf("create work dir: %w", err)
 	}
-	// Verify nixpacks exists
 	if _, err := exec.LookPath(nixpacksPath); err != nil {
 		return nil, fmt.Errorf("nixpacks binary not found at %s: %w", nixpacksPath, err)
 	}
-	return &Builder{
-		workDir:      workDir,
-		nixpacks:     nixpacksPath,
-		buildSem:     make(chan struct{}, 3),
-		tenantBuilds: make(map[string]struct{}),
-		procMap:      make(map[string]string),
-	}, nil
+	return &Builder{workDir: workDir, nixpacks: nixpacksPath, buildSem: make(chan struct{}, 3), tenantBuilds: make(map[string]struct{})}, nil
 }
 
-// Build clones, builds, tags, and pushes an image.
+// Build asks the narrow systemd broker to start a fixed ah-build@ unit, then
+// streams its secret-free log file until the worker exits or the request is cancelled.
 func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string)) error {
-	// Per-tenant concurrency check
+	if err := validateBuildRequest(req); err != nil {
+		return err
+	}
 	if !b.acquireTenant(req.TenantID) {
 		return fmt.Errorf("a build is already running for this tenant")
 	}
 	defer b.releaseTenant(req.TenantID)
-
-	// Global concurrency
 	select {
 	case b.buildSem <- struct{}{}:
 		defer func() { <-b.buildSem }()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	if !filepath.IsAbs(b.workDir) || filepath.Clean(b.workDir) != b.workDir {
+		return fmt.Errorf("build worker root must be an absolute clean path")
+	}
 
 	buildDir := filepath.Join(b.workDir, req.BuildID)
+	if err := os.Mkdir(buildDir, 0770); err != nil {
+		return fmt.Errorf("create build directory: %w", err)
+	}
+	if err := setBuildGroup(buildDir); err != nil {
+		_ = os.Remove(buildDir)
+		return fmt.Errorf("set build directory group: %w", err)
+	}
+	if err := os.Chmod(buildDir, os.ModeSetgid|0770); err != nil {
+		_ = os.RemoveAll(buildDir)
+		return fmt.Errorf("set build directory mode: %w", err)
+	}
+	cleanBuildDir := true
 	defer func() {
-		if err := os.RemoveAll(buildDir); err != nil {
-			log.Printf("builder: failed to cleanup build dir %s: %v", buildDir, err)
+		if cleanBuildDir {
+			for _, name := range []string{"request.json", "build.log"} {
+				if err := os.Remove(filepath.Join(buildDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					log.Printf("builder: failed to remove build artifact %s: %v", name, err)
+					return
+				}
+			}
+			if err := os.Remove(buildDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("builder: failed to clean build directory %s: %v", buildDir, err)
+			}
 		}
 	}()
 
-	if err := os.MkdirAll(buildDir, 0755); err != nil {
-		return fmt.Errorf("create build dir: %w", err)
+	manifestPath := filepath.Join(buildDir, "request.json")
+	if err := writePrivateJSON(manifestPath, req, 0640); err != nil {
+		return fmt.Errorf("write build request: %w", err)
 	}
-	// Make buildDir writable by ah-builder
-	if err := exec.Command("chown", "-R", "ah-builder:ah-builder", buildDir).Run(); err != nil {
-		return fmt.Errorf("chown build dir: %w", err)
+	logPath := filepath.Join(buildDir, "build.log")
+	if err := createBuildLog(logPath); err != nil {
+		return fmt.Errorf("create build log: %w", err)
 	}
 
-	logCb("[ah] Starting build " + req.BuildID)
-
-	// Step 1: Clone
-	if req.SourceType == "git" {
-		if err := b.gitClone(ctx, req, buildDir, logCb); err != nil {
-			return fmt.Errorf("git clone: %w", err)
+	if err := brokerCall(ctx, brokerRequest{Operation: "start", BuildID: req.BuildID}); err != nil {
+		// A timeout may race with systemd accepting the start request. Stop the
+		// fixed unit with a fresh bounded context before deciding whether cleanup is safe.
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopErr := brokerCall(stopCtx, brokerRequest{Operation: "stop", BuildID: req.BuildID})
+		cancel()
+		if stopErr != nil {
+			cleanBuildDir = false
+			return fmt.Errorf("start build worker: %w (worker stop also failed)", err)
 		}
-	} else {
-		return fmt.Errorf("unsupported source type: %s", req.SourceType)
+		return fmt.Errorf("start build worker: %w", err)
 	}
 
-	// Step 2: Nixpacks build
-	if err := b.nixpacksBuild(ctx, req, buildDir, logCb); err != nil {
-		return fmt.Errorf("nixpacks build: %w", err)
+	readLog, err := openWorkerArtifact(b.workDir, req.BuildID, "build.log", os.O_RDONLY, 0)
+	if err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = brokerCall(stopCtx, brokerRequest{Operation: "stop", BuildID: req.BuildID})
+		cancel()
+		cleanBuildDir = false
+		return fmt.Errorf("open build log: %w", err)
 	}
-
-	// Step 3: Push to local registry
-	if err := b.pushImage(ctx, req, logCb); err != nil {
-		return fmt.Errorf("push image: %w", err)
+	defer readLog.Close()
+	drainer := &buildLogDrainer{reader: bufio.NewReader(readLog)}
+	for {
+		if err := drainer.drain(logCb); err != nil {
+			cleanBuildDir = false
+			stopBuildWorker(req.BuildID)
+			return fmt.Errorf("read build log: %w", err)
+		}
+		if ctx.Err() != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			stopErr := brokerCall(stopCtx, brokerRequest{Operation: "stop", BuildID: req.BuildID})
+			cancel()
+			if stopErr != nil {
+				cleanBuildDir = false
+				return fmt.Errorf("build cancelled: %w (worker stop failed)", ctx.Err())
+			}
+			_ = drainer.drain(logCb)
+			return ctx.Err()
+		}
+		status, err := brokerStatus(ctx, req.BuildID)
+		if ctx.Err() != nil {
+			continue
+		}
+		if err != nil {
+			stopErr := stopBuildWorker(req.BuildID)
+			cleanBuildDir = false
+			if stopErr != nil {
+				return fmt.Errorf("check build worker: %w (worker stop failed)", err)
+			}
+			return fmt.Errorf("check build worker: %w", err)
+		}
+		finished := status.ActiveState == "inactive" || status.ActiveState == "failed" ||
+			(status.ActiveState == "active" && status.MainPID == 0)
+		if finished {
+			_ = drainer.drain(logCb)
+			if stopErr := stopBuildWorker(req.BuildID); stopErr != nil {
+				cleanBuildDir = false
+				return fmt.Errorf("stop completed build worker: %w", stopErr)
+			}
+			if status.Result != "success" || status.ExecMainStatus != 0 {
+				return fmt.Errorf("build worker failed (result=%s exit_status=%d)", status.Result, status.ExecMainStatus)
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
-
-	logCb("[ah] Build succeeded: " + req.ImageTag)
-	return nil
 }
 
-// CancelBuild stops a running build by stopping its systemd scope unit.
+// CancelBuild stops only the fixed unit associated with a generated build ID.
 func (b *Builder) CancelBuild(buildID string) error {
-	b.procMu.Lock()
-	unitName, ok := b.procMap[buildID]
-	b.procMu.Unlock()
-	if !ok {
-		return fmt.Errorf("build not found or not running")
+	if !validBuildID(buildID) {
+		return fmt.Errorf("invalid build ID")
 	}
-	// Stop the systemd scope unit, which kills all processes in it
-	cmd := exec.Command("systemctl", "stop", unitName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("stop unit %s: %w", unitName, err)
-	}
-	return nil
+	return brokerCall(context.Background(), brokerRequest{Operation: "stop", BuildID: buildID})
 }
 
 func (b *Builder) acquireTenant(tenantID string) bool {
@@ -151,30 +217,224 @@ func (b *Builder) releaseTenant(tenantID string) {
 	delete(b.tenantBuilds, tenantID)
 }
 
-func (b *Builder) trackUnit(buildID, unitName string) {
-	b.procMu.Lock()
-	b.procMap[buildID] = unitName
-	b.procMu.Unlock()
+func validateBuildRequest(req BuildRequest) error {
+	if !validBuildID(req.BuildID) {
+		return fmt.Errorf("invalid build ID")
+	}
+	if !validBuildID(req.TenantID) || !validBuildID(req.ServiceID) {
+		return fmt.Errorf("invalid tenant or service ID")
+	}
+	if req.SourceType != "git" {
+		return fmt.Errorf("unsupported source type")
+	}
+	if len(req.SourceURL) > 2048 {
+		return fmt.Errorf("source URL too long")
+	}
+	u, err := url.Parse(req.SourceURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Hostname() == "" || !allowedGitHost[strings.ToLower(u.Hostname())] {
+		return fmt.Errorf("source URL must use HTTPS without credentials and a supported Git host")
+	}
+	if len(req.SourceRef) > 256 || !refPattern.MatchString(req.SourceRef) {
+		return fmt.Errorf("invalid source ref")
+	}
+	wantImage := fmt.Sprintf("127.0.0.1:5000/ah/%s-%s:%s", req.TenantID, req.ServiceID, req.BuildID)
+	if req.ImageTag != wantImage {
+		return fmt.Errorf("invalid image tag")
+	}
+	return nil
 }
 
-func (b *Builder) untrackUnit(buildID string) {
-	b.procMu.Lock()
-	delete(b.procMap, buildID)
-	b.procMu.Unlock()
+func validBuildID(id string) bool { return buildIDPattern.MatchString(id) }
+
+func writePrivateJSON(path string, value any, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	encErr := json.NewEncoder(f).Encode(value)
+	closeErr := f.Close()
+	if encErr != nil {
+		_ = os.Remove(path)
+		return encErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return closeErr
+	}
+	return os.Chmod(path, mode)
 }
 
-// cleanupUnit stops a systemd scope unit if the context was cancelled.
-// Called in defer to ensure no orphaned processes on timeout.
-func (b *Builder) cleanupUnit(ctx context.Context, unitName string) {
-	if ctx.Err() != nil {
-		cmd := exec.Command("systemctl", "stop", unitName)
-		if err := cmd.Run(); err != nil {
-			log.Printf("builder: failed to stop unit %s on cleanup: %v", unitName, err)
+func createBuildLog(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0660)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0660)
+}
+
+type buildLogDrainer struct {
+	reader  *bufio.Reader
+	pending []byte
+	discard bool
+}
+
+// drain reads at most 64 KiB per call and retains at most 16 KiB of any one
+// line. This keeps log streaming from starving cancellation and unit polling.
+func (d *buildLogDrainer) drain(logCb func(string)) error {
+	const maxPass, maxLine = 64 * 1024, 16 * 1024
+	read := 0
+	for read < maxPass {
+		b, err := d.reader.ReadByte()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if len(d.pending) > 0 && logCb != nil {
+					logCb(sanitizeLogLine(string(d.pending)))
+					d.pending = d.pending[:0]
+				}
+				return nil
+			}
+			return err
+		}
+		read++
+		if b == '\n' {
+			line := strings.TrimSuffix(string(d.pending), "\r")
+			if logCb != nil {
+				logCb(sanitizeLogLine(line))
+			}
+			d.pending = d.pending[:0]
+			d.discard = false
+			continue
+		}
+		if !d.discard {
+			if len(d.pending) < maxLine {
+				d.pending = append(d.pending, b)
+			} else {
+				d.discard = true
+			}
 		}
 	}
+	return nil
 }
 
-// sanitizeURL strips credentials from a URL for logging.
+// RunWorker executes one manifest. It is only called by ah-build@.service,
+// which runs as ah-builder inside a bounded cgroup with no daemon secrets.
+func RunWorker(workDir, nixpacksPath, buildID string) error {
+	if !validBuildID(buildID) {
+		return fmt.Errorf("invalid build ID")
+	}
+	if !filepath.IsAbs(workDir) || filepath.Clean(workDir) != workDir {
+		return fmt.Errorf("worker build root must be an absolute clean path")
+	}
+	buildDir := filepath.Join(workDir, buildID)
+	manifest, err := openWorkerArtifact(workDir, buildID, "request.json", os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open build request: %w", err)
+	}
+	var req BuildRequest
+	dec := json.NewDecoder(io.LimitReader(manifest, 8*1024))
+	dec.DisallowUnknownFields()
+	decodeErr := dec.Decode(&req)
+	var extra any
+	extraErr := dec.Decode(&extra)
+	closeErr := manifest.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("invalid build request")
+	}
+	if !errors.Is(extraErr, io.EOF) {
+		return fmt.Errorf("invalid build request")
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := validateBuildRequest(req); err != nil {
+		return fmt.Errorf("invalid build request: %w", err)
+	}
+	if req.BuildID != buildID {
+		return fmt.Errorf("build request ID does not match unit")
+	}
+	if !pathWithin(workDir, buildDir) {
+		return fmt.Errorf("build directory escapes worker root")
+	}
+
+	logFile, err := openWorkerArtifact(workDir, buildID, "build.log", os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open build log: %w", err)
+	}
+	var logMu sync.Mutex
+	logCb := func(line string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		_, _ = fmt.Fprintln(logFile, sanitizeLogLine(line))
+	}
+	logCb("[ah] Starting build " + req.BuildID)
+	b := &Builder{workDir: workDir, nixpacks: nixpacksPath}
+	err = b.executeBuild(context.Background(), req, buildDir, logCb)
+	if cleanupErr := os.RemoveAll(filepath.Join(buildDir, "source")); cleanupErr != nil {
+		logCb("[ah] Build source cleanup failed; operator cleanup may be required")
+	}
+	if err != nil {
+		logCb("[ah] Build failed: " + err.Error())
+	}
+	if closeErr := logFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func pathWithin(root, path string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func (b *Builder) executeBuild(ctx context.Context, req BuildRequest, buildDir string, logCb func(string)) error {
+	sourceDir := filepath.Join(buildDir, "source")
+	if !pathWithin(b.workDir, sourceDir) {
+		return fmt.Errorf("source directory escapes build root")
+	}
+	if err := os.Mkdir(sourceDir, 0770); err != nil {
+		return fmt.Errorf("create source directory: %w", err)
+	}
+	if err := setBuildGroup(sourceDir); err != nil {
+		_ = os.Remove(sourceDir)
+		return fmt.Errorf("set source directory group: %w", err)
+	}
+	if err := os.Chmod(sourceDir, os.ModeSetgid|0770); err != nil {
+		return fmt.Errorf("set source directory mode: %w", err)
+	}
+	if req.SourceType != "git" {
+		return fmt.Errorf("unsupported source type")
+	}
+	if err := b.gitClone(ctx, req, sourceDir, logCb); err != nil {
+		return fmt.Errorf("git clone: %w", err)
+	}
+	if err := b.nixpacksBuild(ctx, req, sourceDir, logCb); err != nil {
+		return fmt.Errorf("nixpacks build: %w", err)
+	}
+	if err := b.pushImage(ctx, req, logCb); err != nil {
+		return fmt.Errorf("push image: %w", err)
+	}
+	logCb("[ah] Build succeeded: " + req.ImageTag)
+	return nil
+}
+
+func stopBuildWorker(buildID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return brokerCall(ctx, brokerRequest{Operation: "stop", BuildID: buildID})
+}
+
+// sanitizeURL strips credentials from a URL for logs.
 func sanitizeURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -184,21 +444,19 @@ func sanitizeURL(rawURL string) string {
 	return u.String()
 }
 
-// sanitizeLogLine strips control characters from build output (preserving tabs).
+// sanitizeLogLine strips control characters while preserving tabs.
 func sanitizeLogLine(line string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' {
 			return r
 		}
 		if unicode.IsControl(r) {
-			return -1 // drop
+			return -1
 		}
 		return r
 	}, line)
 }
 
-// isGitSHA returns true if ref looks like a full (40-char) or abbreviated (7+ char)
-// git commit SHA — i.e. 7 to 40 lowercase hex characters.
 func isGitSHA(ref string) bool {
 	if len(ref) < 7 || len(ref) > 40 {
 		return false
@@ -209,254 +467,4 @@ func isGitSHA(ref string) bool {
 		}
 	}
 	return true
-}
-
-func (b *Builder) gitClone(ctx context.Context, req BuildRequest, buildDir string, logCb func(string)) error {
-	ref := req.SourceRef
-	if ref == "" {
-		ref = "main"
-	}
-
-	logCb(fmt.Sprintf("[ah] Cloning %s (ref: %s)", sanitizeURL(req.SourceURL), ref))
-
-	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	unitName := fmt.Sprintf("ah-clone-%s.scope", req.BuildID[:16])
-
-	if isGitSHA(ref) {
-		// Two-phase clone for SHA refs: git clone does not support --branch <sha>,
-		// so we do a full clone first and then checkout the specific commit.
-		logCb("[ah] Ref looks like a SHA — performing full clone then checkout")
-
-		// Phase 1: full clone (no --depth, no --branch)
-		cmd := exec.CommandContext(cloneCtx,
-			"systemd-run", "--scope", "--quiet",
-			"--unit="+unitName,
-			"-p", "MemoryMax=512M",
-			"/usr/sbin/runuser", "-u", "ah-builder", "--",
-			"git", "clone",
-			"--config", "http.followRedirects=false",
-			req.SourceURL, buildDir,
-		)
-		cmd.Dir = b.workDir
-		cmd.Env = []string{
-			"HOME=/tmp",
-			"PATH=/usr/local/bin:/usr/bin:/bin",
-			"GIT_TERMINAL_PROMPT=0",
-		}
-
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return err
-		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return err
-		}
-
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start git clone: %w", err)
-		}
-		b.trackUnit(req.BuildID, unitName)
-		defer b.untrackUnit(req.BuildID)
-
-		go streamLines(stdout, logCb)
-		go streamLines(stderr, logCb)
-
-		if err := cmd.Wait(); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
-		}
-
-		// Phase 2: checkout the specific commit SHA
-		checkoutUnitName := fmt.Sprintf("ah-checkout-%s.scope", req.BuildID[:16])
-		checkoutCmd := exec.CommandContext(cloneCtx,
-			"systemd-run", "--scope", "--quiet",
-			"--unit="+checkoutUnitName,
-			"-p", "MemoryMax=512M",
-			"/usr/sbin/runuser", "-u", "ah-builder", "--",
-			"git", "-C", buildDir, "checkout", ref,
-		)
-		checkoutCmd.Dir = b.workDir
-		checkoutCmd.Env = []string{
-			"HOME=/tmp",
-			"PATH=/usr/local/bin:/usr/bin:/bin",
-			"GIT_TERMINAL_PROMPT=0",
-		}
-
-		checkoutStderr, err := checkoutCmd.StderrPipe()
-		if err != nil {
-			return err
-		}
-		checkoutStdout, err := checkoutCmd.StdoutPipe()
-		if err != nil {
-			return err
-		}
-
-		if err := checkoutCmd.Start(); err != nil {
-			return fmt.Errorf("start git checkout: %w", err)
-		}
-
-		go streamLines(checkoutStdout, logCb)
-		go streamLines(checkoutStderr, logCb)
-
-		if err := checkoutCmd.Wait(); err != nil {
-			return fmt.Errorf("git checkout %s failed: %w", ref, err)
-		}
-	} else {
-		// Branch/tag ref: shallow clone directly to the ref (fast path).
-		cmd := exec.CommandContext(cloneCtx,
-			"systemd-run", "--scope", "--quiet",
-			"--unit="+unitName,
-			"-p", "MemoryMax=512M",
-			"/usr/sbin/runuser", "-u", "ah-builder", "--",
-			"git", "clone", "--depth=1", "--branch", ref,
-			"--config", "http.followRedirects=false",
-			req.SourceURL, buildDir,
-		)
-		cmd.Dir = b.workDir
-		cmd.Env = []string{
-			"HOME=/tmp",
-			"PATH=/usr/local/bin:/usr/bin:/bin",
-			"GIT_TERMINAL_PROMPT=0",
-		}
-
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return err
-		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return err
-		}
-
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start git clone: %w", err)
-		}
-		b.trackUnit(req.BuildID, unitName)
-		defer b.untrackUnit(req.BuildID)
-
-		go streamLines(stdout, logCb)
-		go streamLines(stderr, logCb)
-
-		if err := cmd.Wait(); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
-		}
-	}
-
-	logCb("[ah] Clone complete")
-	return nil
-}
-
-func (b *Builder) nixpacksBuild(ctx context.Context, req BuildRequest, buildDir string, logCb func(string)) error {
-	logCb("[ah] Running nixpacks build...")
-
-	buildCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	// Run nixpacks via systemd-run with resource limits and sandboxing.
-	// Nixpacks needs Docker socket access to build images (it runs docker build internally).
-	// We run as ah-builder (member of docker group) instead of root.
-	unitName := fmt.Sprintf("ah-build-%s.scope", req.BuildID[:16])
-	cmd := exec.CommandContext(buildCtx,
-		"systemd-run", "--scope", "--quiet",
-		"--unit="+unitName,
-		"-p", "MemoryMax=2G",
-		"-p", "CPUQuota=200%",
-		"/usr/sbin/runuser", "-u", "ah-builder", "--",
-		b.nixpacks, "build", buildDir, "--name", req.ImageTag,
-	)
-
-	cmd.Env = []string{
-		"HOME=/tmp",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"DOCKER_HOST=unix:///var/run/docker.sock",
-		"NIXPACKS_NO_CACHE=1",
-		"DOCKER_CONFIG=/tmp/.docker",
-	}
-	// Create new process group for killable tree
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start nixpacks: %w", err)
-	}
-	b.trackUnit(req.BuildID, unitName)
-	defer b.untrackUnit(req.BuildID)
-	defer b.cleanupUnit(buildCtx, unitName)
-
-	go streamLines(stdout, logCb)
-	go streamLines(stderr, logCb)
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("nixpacks build failed: %w", err)
-	}
-
-	logCb("[ah] Nixpacks build complete")
-	return nil
-}
-
-func (b *Builder) pushImage(ctx context.Context, req BuildRequest, logCb func(string)) error {
-	logCb("[ah] Pushing image to local registry...")
-
-	pushCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	unitName := fmt.Sprintf("ah-push-%s.scope", req.BuildID[:16])
-	cmd := exec.CommandContext(pushCtx,
-		"systemd-run", "--scope", "--quiet",
-		"--unit="+unitName,
-		"docker", "push", req.ImageTag,
-	)
-	cmd.Env = []string{
-		"HOME=/tmp",
-		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"DOCKER_HOST=unix:///var/run/docker.sock",
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start docker push: %w", err)
-	}
-	b.trackUnit(req.BuildID, unitName)
-	defer b.untrackUnit(req.BuildID)
-	defer b.cleanupUnit(pushCtx, unitName)
-
-	go streamLines(stdout, logCb)
-	go streamLines(stderr, logCb)
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("docker push failed: %w", err)
-	}
-
-	logCb("[ah] Push complete")
-	return nil
-}
-
-func streamLines(r io.Reader, logCb func(string)) {
-	scanner := bufio.NewScanner(r)
-	// Allow larger lines for build output
-	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-	for scanner.Scan() {
-		line := sanitizeLogLine(scanner.Text())
-		logCb(line)
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("builder: stream scan error: %v", err)
-	}
 }

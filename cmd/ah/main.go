@@ -46,6 +46,12 @@ func main() {
 		case "rotate-key":
 			runRotateKey(os.Args[2:])
 			return
+		case "build-broker":
+			runBuildBroker()
+			return
+		case "build-worker":
+			runBuildWorker(os.Args[2:], cfg)
+			return
 		case "serve":
 			// Remove "serve" from args so flag.Parse works
 			os.Args = append(os.Args[:1], os.Args[2:]...)
@@ -202,20 +208,20 @@ func main() {
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
-		Store:            store,
-		MasterKey:        masterKey[:32],
-		DevMode:          *devMode,
-		BootstrapTokens:  bootstrapTokens,
-		OpenRegistration: *openRegistration,
-		Docker:           dockerClient,
-		BuildManager:     buildMgr,
-		DeploymentStore:  deployStore,
-		DatabaseManager:  dbMgr,
+		Store:              store,
+		MasterKey:          masterKey[:32],
+		DevMode:            *devMode,
+		BootstrapTokens:    bootstrapTokens,
+		OpenRegistration:   *openRegistration,
+		Docker:             dockerClient,
+		BuildManager:       buildMgr,
+		DeploymentStore:    deployStore,
+		DatabaseManager:    dbMgr,
 		KanbanManager:      kanbanMgr,
 		EnvironmentManager: envMgr,
 		MeteringStore:      meteringStore,
-		BaseDomain:       *baseDomain,
-		TraefikConfigDir: cfg.TraefikConfigDir,
+		BaseDomain:         *baseDomain,
+		TraefikConfigDir:   cfg.TraefikConfigDir,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

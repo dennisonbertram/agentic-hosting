@@ -38,6 +38,12 @@ func DefaultConfigPath() (string, error) {
 // Returns an error if no configuration is found.
 func LoadConfig(opts LoadOptions) (*Config, error) {
 	cfg := &Config{}
+	// A complete environment configuration stands on its own, so it must not
+	// depend on the presence or validity of a saved config file.
+	if envURL, envKey := os.Getenv("AH_URL"), os.Getenv("AH_KEY"); envURL != "" && envKey != "" {
+		return &Config{URL: envURL, Key: envKey}, nil
+	}
+
 	// Load the file first so each environment variable can override only its
 	// corresponding field. A partial environment configuration remains useful
 	// with the other value supplied by the saved config.

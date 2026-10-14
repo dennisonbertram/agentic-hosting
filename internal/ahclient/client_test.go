@@ -42,6 +42,18 @@ func TestConfigLoad_FromEnvVars(t *testing.T) {
 	assert.Equal(t, "testkey123", cfg.Key)
 }
 
+func TestConfigLoad_CompleteEnvironmentIgnoresMalformedFile(t *testing.T) {
+	t.Setenv("AH_URL", "https://env.example.com")
+	t.Setenv("AH_KEY", "env-key")
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(path, []byte("{"), 0600))
+
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: path})
+	require.NoError(t, err)
+	assert.Equal(t, "https://env.example.com", cfg.URL)
+	assert.Equal(t, "env-key", cfg.Key)
+}
+
 // BT-003: Config.Load() reads from file when no env vars
 func TestConfigLoad_FromFile(t *testing.T) {
 	t.Setenv("AH_URL", "")

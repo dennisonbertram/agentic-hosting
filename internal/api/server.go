@@ -179,9 +179,13 @@ func (s *Server) setupRoutes() {
 		r.Use(requireHTTPS)
 	}
 
+	// One throttle instance so public and authenticated short routes share a
+	// single pool of shortRouteConcurrency slots.
+	shortThrottle := chimw.Throttle(shortRouteConcurrency)
+
 	// Public routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
-		r.Use(chimw.Throttle(shortRouteConcurrency))
+		r.Use(shortThrottle)
 		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
@@ -202,7 +206,7 @@ func (s *Server) setupRoutes() {
 
 	// Authenticated short-lived routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
-		r.Use(chimw.Throttle(shortRouteConcurrency))
+		r.Use(shortThrottle)
 		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)

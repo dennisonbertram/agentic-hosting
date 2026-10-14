@@ -47,14 +47,19 @@ func NewIdempotencyStore() *IdempotencyStore {
 func (s *IdempotencyStore) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for k, v := range s.entries {
-			if now.After(v.expiresAt) {
-				delete(s.entries, k)
-			}
+		s.sweep(time.Now())
+	}
+}
+
+// sweep drops expired entries. Pending entries stay: the handler is still
+// running and a retry must not start a second run.
+func (s *IdempotencyStore) sweep(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.entries {
+		if !v.pending && now.After(v.expiresAt) {
+			delete(s.entries, k)
 		}
-		s.mu.Unlock()
 	}
 }
 

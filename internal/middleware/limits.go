@@ -68,7 +68,11 @@ func WriteDeadline(d time.Duration) func(http.Handler) http.Handler {
 func IdleWriteDeadline(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(&idleWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: d}, r)
+			rc := http.NewResponseController(w)
+			// Drop any deadline a prior request left on this keep-alive connection
+			// (older net/http versions do not reset it when WriteTimeout is 0).
+			_ = rc.SetWriteDeadline(time.Time{})
+			next.ServeHTTP(&idleWriter{ResponseWriter: w, rc: rc, d: d}, r)
 		})
 	}
 }

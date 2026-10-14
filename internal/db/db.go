@@ -23,8 +23,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open state db: %w", err)
 	}
 
-	meteringPath := strings.TrimSuffix(dbPath, ".db") + "-metering.db"
-	meteringDB, err := openDB(meteringPath)
+	meteringDB, err := openDB(MeteringPath(dbPath))
 	if err != nil {
 		stateDB.Close()
 		return nil, fmt.Errorf("open metering db: %w", err)
@@ -38,6 +37,11 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+// MeteringPath returns the metering database path for a state database path.
+func MeteringPath(dbPath string) string {
+	return strings.TrimSuffix(dbPath, ".db") + "-metering.db"
 }
 
 func openDB(path string) (*sql.DB, error) {

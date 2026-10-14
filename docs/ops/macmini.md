@@ -62,7 +62,7 @@ Check the public API route:
 curl --fail --show-error https://api.demo.example.com/v1/system/health
 ```
 
-It should return the API health response. This command has not been run against a real Mac mini or ngrok account as part of preparing this guide.
+It should return the API health response. During isolated Lima verification, the API returned HTTP 200 with `status=ok` through the host loopback forward using the test Host name. No ngrok account or public DNS endpoint was used, so this command has not been verified against the public ngrok URL.
 
 ## Register a demo tenant and deploy a sample
 
@@ -136,7 +136,7 @@ exit 1
 GUEST
 ```
 
-Open the returned HTTPS URL in a browser. A browser request to the service exercises both ngrok and the service route. Do not treat successful unit tests or a successful VM build as proof of this public path; the public request remains to be run on the demo Mac mini.
+Open the returned HTTPS URL in a browser after the ngrok endpoints and DNS are configured. That public request exercises both ngrok and the service route. The service route itself was verified separately through the host loopback forward: the whoami service returned HTTP 200 and reported `X-Forwarded-Proto: https`. This does not verify public DNS or ngrok ingress.
 
 ## Operate the demo
 
@@ -148,8 +148,12 @@ scripts/bootstrap-macmini.sh start
 
 Stopping the VM leaves its data on disk. Starting it again restores the installed stack. Restart the named ngrok endpoints separately after starting the VM. `create` refuses to replace an existing Lima instance; use `start` to resume an existing VM. The setup does not modify the Mac's Docker Desktop context, ngrok credentials, or ngrok account configuration.
 
-## What has been verified
+## Verification status
 
-The ARM64 setup uses the official [Go 1.27.2 ARM64 archive](https://go.dev/dl/?mode=json) and the `aarch64-unknown-linux-musl` asset from the [Nixpacks v1.41.0 release](https://github.com/railwayapp/nixpacks/releases/tag/v1.41.0), each verified by SHA-256. The installer uses the exact Docker package versions in the [signed Ubuntu Noble ARM64 repository](https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-arm64/Packages.gz) and `runsc=20261005.0` from the [gVisor ARM64 repository](https://storage.googleapis.com/gvisor/releases/dists/release/main/binary-arm64/Packages.gz). The Traefik, Registry, and Nginx pins are multi-architecture image index digests; the indexes were checked for both amd64 and ARM64 manifests in the official Docker Hub registry.
+The ARM64 setup uses the official [Go 1.27.2 ARM64 archive](https://go.dev/dl/?mode=json) and the `aarch64-unknown-linux-musl` asset from the [Nixpacks v1.41.0 release](https://github.com/railwayapp/nixpacks/releases/tag/v1.41.0), each verified by SHA-256. The installer uses the exact Docker package versions in the [signed Ubuntu Noble ARM64 repository](https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-arm64/Packages.gz) and `runsc=20261005.0` from the [gVisor ARM64 repository](https://storage.googleapis.com/gvisor/releases/dists/release/main/binary-arm64/Packages.gz). Container images are selected by pinned digest for each supported architecture. The ARM64 Traefik and Registry images were pulled during the VM test; the optional Nginx website container was skipped and its ARM64 image was not runtime-tested.
 
-Script-level checks cover architecture selection, domain and VM-name validation, Lima instance-list parsing, and mocked create/start/stop/status/bootstrap commands. The Lima profile still needs validation with Lima on the target Mac mini, and the full VM bootstrap, ngrok connection, public API health request, and sample service browser request remain unverified until an operator runs them.
+The profile and bootstrap were exercised on an Apple Silicon Mac running macOS 15.7.7 with Lima 2.2.1. The exact Lima profile validated and booted, and the full Ubuntu ARM64 bootstrap completed after fixing Docker apt source architecture rendering. A `runsc` container ran `hello-world`; the deployed `traefik/whoami:v1.11.0` container reported `linux/arm64` and runtime `runsc`. The API returned HTTP 200 with `status=ok` through host `127.0.0.1:18080`. The demo service returned HTTP 200 through the same loopback ingress and reported `X-Forwarded-Proto: https`. A guest canary listener on port 28177 was unreachable from the host, confirming that the Lima profile did not forward that listener.
+
+After stopping and starting the VM, the API health request and demo service HTTP request passed again with the same results. The temporary QA VM was deleted after verification. `ngrok config check` passed with ngrok 3.39.11 against the credential-free example, without accessing an account or starting a tunnel. The integrated `go test ./... -timeout 180s` and `go build ./...` checks passed; script-level checks cover architecture selection, rendered Docker source entries, domain and VM-name validation, Lima instance-list parsing, and mocked wrapper commands.
+
+Public ngrok DNS and TLS ingress have not been tested. No ngrok account configuration or tunnel was changed. An ARM64 Git-based service build has not been tested, so this setup does not yet have full build-path verification.

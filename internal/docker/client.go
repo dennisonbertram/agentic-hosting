@@ -4,6 +4,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
@@ -53,6 +55,10 @@ type Client interface {
 	RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error)
 	StopAndRemoveByName(ctx context.Context, name string) error
 	PruneDanglingImages(ctx context.Context) (int, error)
+	PruneAnonymousVolumes(ctx context.Context) (int, error)
+	ListImages(ctx context.Context) ([]ImageInfo, error)
+	ListContainerImages(ctx context.Context) ([]string, error)
+	ListNetworkContainers(ctx context.Context, networkName string) ([]string, error)
 	ListVolumes(ctx context.Context, prefix string) ([]string, error)
 	DiskUsage(ctx context.Context) (*StorageUsage, error)
 	RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error)
@@ -68,6 +74,14 @@ type NetworkInfo struct {
 	ID         string
 	Name       string
 	Containers int // number of containers connected to this network
+	Created    time.Time
+}
+
+// ImageInfo describes a local image.
+type ImageInfo struct {
+	ID      string
+	Tags    []string
+	Created time.Time
 }
 
 // StorageUsage holds aggregate Docker storage consumption broken down by type.
@@ -177,6 +191,7 @@ func (c *DockerClient) NetworkList(ctx context.Context) ([]NetworkInfo, error) {
 			ID:         n.ID,
 			Name:       n.Name,
 			Containers: len(n.Containers),
+			Created:    n.Created,
 		})
 	}
 	return result, nil
@@ -356,9 +371,10 @@ func (c *DockerClient) RestartContainer(ctx context.Context, containerID string)
 	return c.cli.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
 }
 
-// RemoveContainer force-removes a container.
+// RemoveContainer force-removes a container and its anonymous volumes.
+// Named volumes (databases, environments) are not affected.
 func (c *DockerClient) RemoveContainer(ctx context.Context, containerID string) error {
-	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 }
 
 // LogsContainer returns a reader for container logs.
@@ -407,8 +423,28 @@ func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 	defer reader.Close()
-	_, _ = io.Copy(io.Discard, reader)
+	if err := drainPullStream(reader); err != nil {
+		return fmt.Errorf("pull image %s: %w", img, err)
+	}
 	return nil
+}
+
+// drainPullStream reads Docker's JSON progress stream to the end and returns
+// the first error message in it, or the read error (including a timeout).
+func drainPullStream(r io.Reader) error {
+	dec := json.NewDecoder(r)
+	for {
+		var msg jsonmessage.JSONMessage
+		if err := dec.Decode(&msg); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if msg.Error != nil {
+			return msg.Error
+		}
+	}
 }
 
 // ImageExists reports whether the image is present in the local Docker image store.
@@ -707,6 +743,58 @@ func (c *DockerClient) PruneDanglingImages(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("prune images: %w", err)
 	}
 	return len(report.ImagesDeleted), nil
+}
+
+// PruneAnonymousVolumes removes unused anonymous volumes (named volumes are kept).
+func (c *DockerClient) PruneAnonymousVolumes(ctx context.Context) (int, error) {
+	report, err := c.cli.VolumesPrune(ctx, filters.NewArgs())
+	if err != nil {
+		return 0, fmt.Errorf("prune volumes: %w", err)
+	}
+	return len(report.VolumesDeleted), nil
+}
+
+// ListImages returns all local images with their tags and creation time.
+func (c *DockerClient) ListImages(ctx context.Context) ([]ImageInfo, error) {
+	imgs, err := c.cli.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list images: %w", err)
+	}
+	out := make([]ImageInfo, 0, len(imgs))
+	for _, i := range imgs {
+		out = append(out, ImageInfo{ID: i.ID, Tags: i.RepoTags, Created: time.Unix(i.Created, 0)})
+	}
+	return out, nil
+}
+
+// ListContainerImages returns the image ref and image ID of every container,
+// running or stopped.
+func (c *DockerClient) ListContainerImages(ctx context.Context) ([]string, error) {
+	ctrs, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	var out []string
+	for _, ct := range ctrs {
+		out = append(out, ct.Image, ct.ImageID)
+	}
+	return out, nil
+}
+
+// ListNetworkContainers returns the names of all containers (running or
+// stopped) attached to the named network.
+func (c *DockerClient) ListNetworkContainers(ctx context.Context, networkName string) ([]string, error) {
+	ctrs, err := c.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(filters.Arg("network", networkName))})
+	if err != nil {
+		return nil, fmt.Errorf("list containers on network %s: %w", networkName, err)
+	}
+	var out []string
+	for _, ct := range ctrs {
+		for _, n := range ct.Names {
+			out = append(out, strings.TrimPrefix(n, "/"))
+		}
+	}
+	return out, nil
 }
 
 // DiskUsage returns aggregate Docker storage consumption by category.

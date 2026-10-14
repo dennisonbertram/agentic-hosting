@@ -771,6 +771,19 @@ type RunEnvironmentConfig struct {
 	EgressAllow bool
 }
 
+// environmentLabels builds container labels; ah.* keys are set last and cannot be overridden.
+func environmentLabels(cfg RunEnvironmentConfig) map[string]string {
+	labels := make(map[string]string, len(cfg.Labels)+4)
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	labels["ah.tenant"] = cfg.TenantID
+	labels["ah.environment"] = cfg.EnvID
+	labels["ah.type"] = "environment"
+	labels["traefik.enable"] = "false"
+	return labels
+}
+
 // RunEnvironment creates and starts an environment container with gVisor runtime.
 // Environments are dev workspaces: writable rootfs, sleep infinity entrypoint,
 // workspace volume at /workspace.
@@ -785,15 +798,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	// Build labels; ah.* keys are set last and cannot be overridden.
-	labels := make(map[string]string, len(cfg.Labels)+4)
-	for k, v := range cfg.Labels {
-		labels[k] = v
-	}
-	labels["ah.tenant"] = cfg.TenantID
-	labels["ah.environment"] = cfg.EnvID
-	labels["ah.type"] = "environment"
-	labels["traefik.enable"] = "false"
+	labels := environmentLabels(cfg)
 
 	containerCfg := &container.Config{
 		Image:      cfg.Image,

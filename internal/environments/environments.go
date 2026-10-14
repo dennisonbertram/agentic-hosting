@@ -169,46 +169,31 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
-	// from both seeing count below the tenant limit.
-	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	// Force write lock with a dummy write (SQLite IMMEDIATE)
-	_, _ = tx.ExecContext(ctx, `UPDATE environments SET updated_at = updated_at WHERE id = 'lock'`)
 	var maxEnvironments int
-	if err := tx.QueryRowContext(ctx,
+	if err := m.db.QueryRowContext(ctx,
 		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxEnvironments); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')`, tenantID,
-	).Scan(&count); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= maxEnvironments {
-		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
 
 	// Insert DB row with status=creating
-	_, err = m.db.ExecContext(ctx,
+	// The quota count is part of the INSERT so concurrent creates cannot both
+	// pass the check. Nothing is claimed from the warm pool until this succeeds.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
 		 lease_duration_seconds, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'creating', ?, ?, ?, ?)`,
-		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now,
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')) < ?`,
+		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now, tenantID, maxEnvironments,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("environment with name %q already exists", req.Name))

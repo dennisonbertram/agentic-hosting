@@ -154,34 +154,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
-	// from both seeing count below the tenant limit.
-	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	// Force write lock with a dummy write (SQLite IMMEDIATE)
-	_, _ = tx.ExecContext(ctx, `UPDATE databases SET updated_at = updated_at WHERE id = 'lock'`)
 	var maxDatabases int
-	if err := tx.QueryRowContext(ctx,
+	if err := m.db.QueryRowContext(ctx,
 		`SELECT max_databases FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxDatabases); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`, tenantID,
-	).Scan(&count); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= maxDatabases {
-		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d databases reached", maxDatabases))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	// Generate password
@@ -225,13 +202,22 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		}
 
 		// Insert DB record — UNIQUE index on port prevents race conditions
-		_, err = m.db.ExecContext(ctx,
+		// The quota count is part of the INSERT so concurrent creates cannot
+		// both pass the check.
+		var res sql.Result
+		res, err = m.db.ExecContext(ctx,
 			`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
 			 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 SELECT ?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?
+			 WHERE (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed') < ?`,
 			id, tenantID, req.Name, req.Type, port, dbName, username,
-			passwordEnc, connStrEnc, volumeName, now, now,
+			passwordEnc, connStrEnc, volumeName, now, now, tenantID, maxDatabases,
 		)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d databases reached", maxDatabases))
+			}
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 				continue // retry with different port

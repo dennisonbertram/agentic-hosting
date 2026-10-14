@@ -480,17 +480,6 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("check quota: %w", err)
 	}
 
-	var currentCount int
-	err = m.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM services WHERE tenant_id = ?`, tenantID,
-	).Scan(&currentCount)
-	if err != nil {
-		return nil, fmt.Errorf("count services: %w", err)
-	}
-	if currentCount >= maxServices {
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d services reached", maxServices))
-	}
-
 	id, err := generateID()
 	if err != nil {
 		return nil, err
@@ -527,11 +516,19 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx,
+	// Count and insert in one statement so concurrent creates cannot both pass
+	// the quota check.
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO services (id, tenant_id, name, dns_label, status, image, port, container_id, url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'created', ?, ?, '', ?, ?, ?)`,
-		id, tenantID, req.Name, dnsLabel, req.Image, port, url, now, now,
+		 SELECT ?, ?, ?, ?, 'created', ?, ?, '', ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM services WHERE tenant_id = ?) < ?`,
+		id, tenantID, req.Name, dnsLabel, req.Image, port, url, now, now, tenantID, maxServices,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d services reached", maxServices))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "dns_label") {
 			return nil, apierr.Conflict("subdomain already taken: " + dnsLabel + " — choose a different service name")

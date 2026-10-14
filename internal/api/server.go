@@ -264,7 +264,6 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/databases", s.handleDatabaseList)
 		r.Get("/v1/databases/{dbID}", s.handleDatabaseGet)
 		r.Get("/v1/databases/{dbID}/connection-string", s.handleDatabaseConnectionString)
-		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
 
 		// Kanban routes (except POST which needs longer timeout)
 		r.Get("/v1/kanban", s.handleKanbanGet)
@@ -299,6 +298,8 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
+		// Delete wipes the volume, which can exceed the 30s short-route timeout.
+		r.Delete("/v1/databases/{dbID}", s.handleDatabaseDelete)
 		r.Post("/v1/kanban", s.handleKanbanCreate)
 		r.Post("/v1/environments", s.handleEnvironmentCreate)
 		r.Post("/v1/environments/{envID}/sync", s.handleEnvironmentSync)

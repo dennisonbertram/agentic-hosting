@@ -42,14 +42,11 @@ Single Go binary PaaS designed for AI agents: deploy, manage, and monitor servic
 - Never mark a task done without verifying `go build ./...` passes
 - Never modify the master key path or bootstrap token logic without a security review
 
-## Ralph Loop
+## Code Review
 
-Use the Ralph Loop (iterative AI review) for:
-
-- New API endpoints
-- Security-sensitive changes (auth, crypto, rate limiting)
-- Reconciler logic changes
-- Any change touching circuit breaker or health probe logic
+- Run `/code-astra-review` once on the final diff before opening a PR. Changes to auth, crypto, rate limiting, the reconciler, the circuit breaker, health probes, the master key path, or bootstrap token logic must have this review before merge.
+- Use `/security-review` for a whole-codebase security audit.
+- Reviewer subagents must not send repository code to external model services (`llm`, OpenAI, OpenRouter, DeepSeek, or similar). Only `/code-astra-review` sends code outside, and only because it is the review the user chose.
 
 ## Key Files
 

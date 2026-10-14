@@ -241,6 +241,12 @@ curl --fail --silent --show-error --write-out '\nHTTP %{http_code}\n' \
 
 Change `DOMAIN` to the same base domain used during bootstrap. The guest prints the service URL returned by the API; compare its hostname with `DOMAIN` before running the final curl. That curl runs on the Mac because Lima forwards host loopback into the guest; it checks the local route without using public DNS. Expect HTTP 200 and `{"body":"Hello world!"}`. After configuring ngrok, open the printed service URL in a browser; the local check does not verify public DNS or TLS.
 
+## Run the OpenRouter agent
+
+The [`examples/openrouter-agent` guide](../../examples/openrouter-agent/README.md#mac-mini-hosted-example) documents the manual local setup using the existing service API and Docker. It builds the committed app and relay images inside the guest, runs the app as a `runsc` service, and gives only the relay an outbound network. The relay is not managed by the platform. If you replace its container or either network, inspect its new private address, update `PROVIDER_RELAY_IP`, reconnect the app to the internal link, and restart the app. Do not connect the app to the relay's outbound network.
+
+One authenticated request succeeded through the local Mac loopback route during QA. Public access to this agent through ngrok has not been tested; its HTTPS service URL is publicly reachable only after the ngrok endpoints, DNS, and TLS work.
+
 ## Operate the demo
 
 ```sh

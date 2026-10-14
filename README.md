@@ -51,6 +51,23 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 
 For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
 
+### Run the OpenRouter example on the Mac mini
+
+The [OpenRouter agent guide](examples/openrouter-agent/README.md#mac-mini-hosted-example) has the full operator sequence. The ARM64 app and relay images, service API, and private network must be set up manually; this is not a one-command installer. The documented relay invocation was reconstructed from inspected container settings and was not replayed verbatim on a fresh VM.
+
+1. In the Lima guest, build the committed app image for `linux/arm64`, push it to the loopback registry, and build the relay image; inspect both images and confirm the app runs as `node`.
+2. Copy the OpenRouter key from the Mac's private config file into a root-owned guest directory with mode `0700`; set the key file owner to UID 1000 and mode `0400`.
+3. Create separate private random tokens for app callers and app-to-relay authentication; strip exactly a trailing line feed when loading generated token files, and never print token values.
+4. Choose unused `/24` Docker subnets from the configured `172.20.0.0/14` pool, then create an internal app-relay network and a separate outbound bridge.
+5. Start the relay first with `runsc`, `node`, a read-only root, `cap-drop=ALL`, no-new-privileges, 256 MiB memory, and 128 PIDs; publish no ports and attach no other container to its outbound bridge.
+6. Mount the key read-only at `/run/secrets/openrouter-key` and a read-only resolver file at `/etc/resolv.conf`; the tested resolver used `1.1.1.1` and `1.0.0.1`.
+7. Attach the relay to the internal link and outbound bridge, assigning gateway priority 1 to the outbound bridge; record its current internal-link IPv4 address.
+8. Create the app service through the API on port `3000` with `DEMO_AUTH_TOKEN`, `PROVIDER_RELAY_TOKEN`, and `PROVIDER_RELAY_IP`; do not pass it the provider key or attach it to the outbound network.
+9. Once the app is running, attach its container to the internal link and restart it so gVisor sees the added link; check relay health at the recorded IP and update that IP after relay replacement.
+10. Send the authenticated calculator chat request through Mac loopback using a protected curl config file; then manage app, relay, and networks separately because the platform does not own the relay lifecycle.
+
+One local authenticated chat returned HTTP 200 and the calculator result `42`. This does not verify public access: ngrok, public DNS, and TLS were not tested.
+
 ### 1. Install dependencies
 
 ```bash

@@ -50,6 +50,9 @@ func (s *Server) handleBootstrapTokenValidate(w http.ResponseWriter, r *http.Req
 
 	provided := strings.TrimSpace(req.Token)
 	valid := len(s.bootstrapTokens) > 0 && validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey)
+	if valid {
+		regLimiter.chargeGlobal()
+	}
 
 	writeJSON(w, http.StatusOK, BootstrapTokenValidateResponse{Valid: valid})
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
+	"github.com/dennisonbertram/agentic-hosting/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -196,7 +197,8 @@ The --name flag controls the database name (defaults to
 				name = serviceName + "-" + dbType
 			}
 
-			progress := io.Writer(os.Stdout)
+			// With --json, stdout carries only the final JSON document.
+			progress := cmd.OutOrStdout()
 			if root.jsonOutput {
 				progress = cmd.ErrOrStderr()
 			}
@@ -263,9 +265,9 @@ func pollDbUntilRunning(c *ahclient.Client, dbID string, progress io.Writer) (*a
 			return nil, fmt.Errorf("poll database: %w", err)
 		}
 		switch db.Status {
-		case "ready", "running":
+		case status.DatabaseReady, "running":
 			return db, nil
-		case "error", "failed":
+		case "error", status.DatabaseFailed:
 			return nil, fmt.Errorf("database provisioning failed with status %q", db.Status)
 		}
 		fmt.Fprint(progress, ".")

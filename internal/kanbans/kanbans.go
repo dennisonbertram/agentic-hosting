@@ -26,17 +26,17 @@ import (
 
 // Kanban represents a provisioned Vikunja kanban board instance.
 type Kanban struct {
-	ID          string          `json:"id"`
-	TenantID    string          `json:"tenant_id"`
-	Status      string          `json:"status"`
-	ContainerID string          `json:"-"`
-	Host        string          `json:"host,omitempty"`
-	Port        int             `json:"port,omitempty"`
-	URL         string          `json:"url,omitempty"`
+	ID          string             `json:"id"`
+	TenantID    string             `json:"tenant_id"`
+	Status      string             `json:"status"`
+	ContainerID string             `json:"-"`
+	Host        string             `json:"host,omitempty"`
+	Port        int                `json:"port,omitempty"`
+	URL         string             `json:"url,omitempty"`
 	Credentials *KanbanCredentials `json:"credentials,omitempty"` // only on create
-	VolumeName  string          `json:"-"`
-	CreatedAt   int64           `json:"created_at"`
-	UpdatedAt   int64           `json:"updated_at"`
+	VolumeName  string             `json:"-"`
+	CreatedAt   int64              `json:"created_at"`
+	UpdatedAt   int64              `json:"updated_at"`
 }
 
 // KanbanCredentials holds the admin credentials returned on create.
@@ -111,7 +111,7 @@ func (m *Manager) ReconcileStale() {
 	defer cancel()
 
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM kanbans WHERE status = 'provisioning'`)
+		`SELECT id, COALESCE(container_id, ''), volume_name FROM kanbans WHERE status = 'provisioning'`)
 	if err != nil {
 		log.Printf("kanbans: reconcile query failed: %v", err)
 		return
@@ -170,6 +170,34 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 	if existingCount > 0 {
 		return nil, apierr.Conflict("tenant already has a kanban board")
+	}
+
+	// A failed board's row (UNIQUE tenant_id) would block re-create forever.
+	// Remove its container first so it does not keep running unmanaged. Delete
+	// its volume only if the board never completed setup (no admin credentials
+	// stored); a board that was once ready may hold user data, so keep that volume.
+	var failedID, failedContainer, failedVolume string
+	var hadSetup bool
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id, COALESCE(container_id, ''), volume_name, COALESCE(admin_token_encrypted, '') != ''
+		 FROM kanbans WHERE tenant_id = ? AND status = 'failed'`, tenantID,
+	).Scan(&failedID, &failedContainer, &failedVolume, &hadSetup)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("find failed kanban: %w", err)
+	}
+	if err == nil {
+		if failedContainer != "" {
+			_ = m.docker.StopContainer(ctx, failedContainer)
+			_ = m.docker.RemoveContainer(ctx, failedContainer)
+		}
+		if !hadSetup {
+			_ = m.docker.RemoveVolume(ctx, failedVolume)
+		} else {
+			log.Printf("kanbans: keeping volume %s of failed kanban %s (it was previously set up)", failedVolume, failedID)
+		}
+		if _, err := m.db.ExecContext(ctx, `DELETE FROM kanbans WHERE id = ?`, failedID); err != nil {
+			return nil, fmt.Errorf("remove failed kanban: %w", err)
+		}
 	}
 
 	id, err := generateID()
@@ -239,31 +267,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 
 	// Run Vikunja container
-	containerID, err := m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
-		Name:          containerName,
-		Image:         "vikunja/vikunja:0.24.6",
-		HostPort:      port,
-		ContainerPort: 3456,
-		Env: map[string]string{
-			"VIKUNJA_SERVICE_JWTSECRET":                       jwtSecret,
-			"VIKUNJA_SERVICE_FRONTENDURL":                     fmt.Sprintf("https://%s", publicURL),
-			"VIKUNJA_DATABASE_TYPE":                           "sqlite",
-			"VIKUNJA_DATABASE_PATH":                           "/app/vikunja/files/vikunja.db",
-			// Registration must be enabled for initial admin user creation.
-			// Container is only accessible on loopback (127.0.0.1 port binding)
-			// so external registration is not possible.
-			"VIKUNJA_SERVICE_ENABLEREGISTRATION":              "true",
-			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_NAME":   "false",
-			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_EMAIL":  "false",
-			"VIKUNJA_MAILER_ENABLED":                          "false",
-		},
-		VolumeName: volumeName,
-		MountPath:  "/app/vikunja/files",
-		Labels: map[string]string{
-			"ah.managed": "true",
-			"ah.type":    "kanban",
-		},
-	})
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerName, volumeName, publicURL, jwtSecret, port))
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
 		_ = m.docker.RemoveVolume(ctx, volumeName)
@@ -297,16 +301,113 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	go m.provision(id, tenantID, containerID, volumeName, publicURL, port, adminPassword)
 
 	return &Kanban{
-		ID:        id,
-		TenantID:  tenantID,
-		Status:    "provisioning",
-		Host:      "127.0.0.1",
-		Port:      port,
-		URL:       publicURL,
+		ID:         id,
+		TenantID:   tenantID,
+		Status:     "provisioning",
+		Host:       "127.0.0.1",
+		Port:       port,
+		URL:        publicURL,
 		VolumeName: volumeName,
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}, nil
+}
+
+// vikunjaConfig builds the container config for a tenant's Vikunja instance.
+func vikunjaConfig(containerName, volumeName, publicURL, jwtSecret string, port int) docker.RunDatabaseConfig {
+	return docker.RunDatabaseConfig{
+		Name:          containerName,
+		Image:         "vikunja/vikunja:0.24.6",
+		HostPort:      port,
+		ContainerPort: 3456,
+		// The image runs as uid 1000 but has no /app/vikunja/files dir, so the
+		// fresh named volume is root-owned and Vikunja cannot create its DB.
+		User: "0:0",
+		Env: map[string]string{
+			"VIKUNJA_SERVICE_JWTSECRET":   jwtSecret,
+			"VIKUNJA_SERVICE_FRONTENDURL": fmt.Sprintf("https://%s", publicURL),
+			"VIKUNJA_DATABASE_TYPE":       "sqlite",
+			"VIKUNJA_DATABASE_PATH":       "/app/vikunja/files/vikunja.db",
+			// Registration must be enabled for initial admin user creation.
+			// Container is only accessible on loopback (127.0.0.1 port binding)
+			// so external registration is not possible.
+			"VIKUNJA_SERVICE_ENABLEREGISTRATION":            "true",
+			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_NAME":  "false",
+			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_EMAIL": "false",
+			"VIKUNJA_MAILER_ENABLED":                        "false",
+		},
+		VolumeName: volumeName,
+		MountPath:  "/app/vikunja/files",
+		Labels: map[string]string{
+			"ah.managed": "true",
+			"ah.type":    "kanban",
+		},
+	}
+}
+
+// StartForTenant recreates the container of a tenant's stopped kanban board
+// (see StopForTenant) on its existing volume and port. Vikunja's data and admin
+// user live in the volume; only the JWT secret is regenerated, which just
+// invalidates old login tokens. Best-effort: failures mark the board "failed".
+func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
+	var id, volume, publicURL string
+	var port int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id, volume_name, port, COALESCE(url, '') FROM kanbans WHERE tenant_id = ? AND status = 'stopped'`, tenantID,
+	).Scan(&id, &volume, &port, &publicURL)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("kanbans: StartForTenant query failed for tenant %s: %v", tenantID, err)
+		}
+		return
+	}
+	if !m.tenantActive(ctx, tenantID) {
+		log.Printf("kanbans: StartForTenant: tenant %s no longer active, not starting %s", tenantID, id)
+		return
+	}
+	jwtSecret, err := randomHex(32)
+	if err != nil {
+		log.Printf("kanbans: StartForTenant: %v", err)
+		return
+	}
+	prefix := tenantID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	name := fmt.Sprintf("ah-kanban-%s-%s", prefix, id[:16])
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(name, volume, publicURL, jwtSecret, port))
+	if err != nil {
+		log.Printf("kanbans: StartForTenant run container for %s: %v", id, err)
+		m.updateStatus(ctx, id, "failed")
+		return
+	}
+	_, _ = m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`,
+		containerID, time.Now().Unix(), id)
+	if !m.waitForHTTP(ctx, port, m.healthCheckTimeout) {
+		log.Printf("kanbans: StartForTenant health check failed for %s", id)
+		m.updateStatus(ctx, id, "failed")
+		m.removeContainer(ctx, containerID) // volume kept: it holds the board data
+		return
+	}
+	if !m.tenantActive(ctx, tenantID) {
+		// Suspended while starting: undo so the container is not left running.
+		m.removeContainer(ctx, containerID)
+		m.updateStatus(ctx, id, "stopped")
+		return
+	}
+	m.updateStatus(ctx, id, "ready")
+}
+
+// tenantActive reports whether the tenant is currently 'active'.
+func (m *Manager) tenantActive(ctx context.Context, tenantID string) bool {
+	var status string
+	err := m.db.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&status)
+	return err == nil && status == "active"
+}
+
+func (m *Manager) removeContainer(ctx context.Context, containerID string) {
+	_ = m.docker.StopContainer(ctx, containerID)
+	_ = m.docker.RemoveContainer(ctx, containerID)
 }
 
 // provision runs in a background goroutine to complete kanban setup after the
@@ -334,12 +435,15 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 		return
 	}
 
-	// Setup Vikunja (create admin user, project, buckets) — non-fatal on failure
+	// Setup Vikunja (create admin user, project, buckets)
 	setupToken, setupErr := m.setupVikunja(port, tenantID, adminPassword)
+	_ = setupToken
 	if setupErr != nil {
-		log.Printf("kanbans: setup failed for %s (non-fatal): %v", id, setupErr)
-	} else {
-		_ = setupToken // JWT stored via admin token below; setup success logged
+		// Without the admin user the stored credentials are useless, so don't report ready.
+		log.Printf("kanbans: setup failed for %s, cleaning up: %v", id, setupErr)
+		m.updateStatus(ctx, id, "failed")
+		cleanup()
+		return
 	}
 
 	// Encrypt admin password for storage — failure is fatal (irrecoverable credentials)
@@ -372,7 +476,7 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 func (m *Manager) Get(ctx context.Context, tenantID string) (*Kanban, error) {
 	k := &Kanban{}
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, status, container_id, host, port, url,
+		`SELECT id, tenant_id, status, COALESCE(container_id, ''), host, port, url,
 		 volume_name, created_at, updated_at
 		 FROM kanbans WHERE tenant_id = ?`, tenantID,
 	).Scan(&k.ID, &k.TenantID, &k.Status, &k.ContainerID, &k.Host, &k.Port, &k.URL,
@@ -616,7 +720,7 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 	projBody, _ := json.Marshal(map[string]interface{}{
 		"title": fmt.Sprintf("%s Kanban", tenantID),
 	})
-	req, _ := http.NewRequest("POST", base+"/projects", bytes.NewReader(projBody))
+	req, _ := http.NewRequest("PUT", base+"/projects", bytes.NewReader(projBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = client.Do(req)
@@ -647,13 +751,19 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 		{"In Review", 2},
 		{"Done", 3},
 	}
-	bucketsURL := fmt.Sprintf("%s/projects/%d/buckets", base, int(projectID))
+	// Vikunja 0.24 buckets belong to a project view; create them on the kanban view.
+	viewID, err := kanbanViewID(client, base, token, int(projectID))
+	if err != nil {
+		log.Printf("kanbans: find kanban view: %v", err)
+		return token, nil
+	}
+	bucketsURL := fmt.Sprintf("%s/projects/%d/views/%d/buckets", base, int(projectID), viewID)
 	for _, b := range buckets {
 		bucketBody, _ := json.Marshal(map[string]interface{}{
 			"title":    b.Title,
 			"position": b.Position,
 		})
-		req, _ := http.NewRequest("POST", bucketsURL, bytes.NewReader(bucketBody))
+		req, _ := http.NewRequest("PUT", bucketsURL, bytes.NewReader(bucketBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
@@ -669,6 +779,29 @@ func (m *Manager) setupVikunja(port int, tenantID, adminPassword string) (string
 	}
 
 	return token, nil
+}
+
+func kanbanViewID(client *http.Client, base, token string, projectID int) (int, error) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/projects/%d/views", base, projectID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var views []struct {
+		ID       int    `json:"id"`
+		ViewKind string `json:"view_kind"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+		return 0, err
+	}
+	for _, v := range views {
+		if v.ViewKind == "kanban" {
+			return v.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("no kanban view")
 }
 
 // dnsLabelRe matches a valid DNS label: lowercase alphanumeric, hyphens allowed

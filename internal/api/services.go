@@ -56,7 +56,7 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate image format and registry allowlist
-	if err := services.ValidateImage(req.Image); err != nil {
+	if err := services.ValidateImage(tenantID, req.Image); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -136,7 +136,7 @@ func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.
 	}
 
 	// Validate snapshot data before creating (defense-in-depth against corrupted snapshots).
-	if err := services.ValidateImage(snap.ImageRef); err != nil {
+	if err := services.ValidateImage(tenantID, snap.ImageRef); err != nil {
 		writeError(w, http.StatusBadRequest, "snapshot contains invalid image: "+err.Error())
 		return
 	}

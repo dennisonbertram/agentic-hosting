@@ -80,6 +80,8 @@ type Manager struct {
 	docker    docker.Client
 	masterKey []byte
 	mu        sync.Mutex // protects port allocation
+	// healthTimeout bounds readiness waits after a (re)start; 0 means 30s.
+	healthTimeout time.Duration
 }
 
 // NewManager creates a database manager.
@@ -103,7 +105,7 @@ func (m *Manager) ReconcileStale() {
 	defer cancel()
 
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM databases WHERE status = 'provisioning'`)
+		`SELECT id, COALESCE(container_id, ''), volume_name FROM databases WHERE status = 'provisioning'`)
 	if err != nil {
 		log.Printf("databases: reconcile query failed: %v", err)
 		return
@@ -164,34 +166,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
-	// from both seeing count below the tenant limit.
-	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	// Force write lock with a dummy write (SQLite IMMEDIATE)
-	_, _ = tx.ExecContext(ctx, `UPDATE databases SET updated_at = updated_at WHERE id = 'lock'`)
 	var maxDatabases int
-	if err := tx.QueryRowContext(ctx,
+	if err := m.db.QueryRowContext(ctx,
 		`SELECT max_databases FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxDatabases); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'`, tenantID,
-	).Scan(&count); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= maxDatabases {
-		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d databases reached", maxDatabases))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	// Generate password
@@ -201,7 +180,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	volumeName := fmt.Sprintf("ah-db-%s", id)
-	containerName := fmt.Sprintf("ah-db-%s-%s", tenantID[:8], id[:16])
+	containerName := containerNameFor(tenantID, id)
 
 	// Encrypt password
 	passwordEnc, err := crypto.Encrypt([]byte(password), m.masterKey)
@@ -235,13 +214,22 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		}
 
 		// Insert DB record — UNIQUE index on port prevents race conditions
-		_, err = m.db.ExecContext(ctx,
+		// The quota count is part of the INSERT so concurrent creates cannot
+		// both pass the check.
+		var res sql.Result
+		res, err = m.db.ExecContext(ctx,
 			`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
 			 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 SELECT ?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?
+			 WHERE (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed') < ?`,
 			id, tenantID, req.Name, req.Type, port, dbName, username,
-			passwordEnc, connStrEnc, volumeName, now, now,
+			passwordEnc, connStrEnc, volumeName, now, now, tenantID, maxDatabases,
 		)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d databases reached", maxDatabases))
+			}
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 				continue // retry with different port
@@ -262,12 +250,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	// Run container
 	var containerID string
-	switch req.Type {
-	case "postgres":
-		containerID, err = m.runPostgres(ctx, containerName, volumeName, port, dbName, username, password)
-	case "redis":
-		containerID, err = m.runRedis(ctx, containerName, volumeName, port, password)
-	}
+	containerID, err = m.runContainer(ctx, req.Type, containerName, volumeName, port, dbName, username, password)
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
 		_ = m.docker.RemoveVolume(ctx, volumeName)
@@ -487,7 +470,8 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 // but do not abort processing of remaining databases.
 func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM databases WHERE tenant_id = ? AND status NOT IN ('failed', 'stopped')`,
+		`SELECT id, COALESCE(container_id, ''), status FROM databases WHERE tenant_id = ?
+		 AND (status NOT IN ('failed', 'stopped') OR (status = 'failed' AND COALESCE(container_id, '') != ''))`,
 		tenantID,
 	)
 	if err != nil {
@@ -496,10 +480,10 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	}
 	defer rows.Close()
 
-	var dbs []struct{ id, containerID string }
+	var dbs []struct{ id, containerID, status string }
 	for rows.Next() {
-		var d struct{ id, containerID string }
-		if err := rows.Scan(&d.id, &d.containerID); err != nil {
+		var d struct{ id, containerID, status string }
+		if err := rows.Scan(&d.id, &d.containerID, &d.status); err != nil {
 			log.Printf("databases: StopAllForTenant scan failed: %v", err)
 			continue
 		}
@@ -520,6 +504,11 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 					log.Printf("databases: StopAllForTenant remove container %s: %v", d.containerID, err)
 				}
 			}
+		}
+		if d.status == "failed" {
+			// A failed row must not become restartable; just drop its stale container.
+			_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = NULL WHERE id = ?`, d.id)
+			continue
 		}
 		m.updateStatus(ctx, d.id, "stopped")
 	}
@@ -598,6 +587,105 @@ func (m *Manager) findFreePort(dbType string) (int, error) {
 		return port, nil
 	}
 	return 0, fmt.Errorf("no free ports available in range %d-%d", minPort, maxPort)
+}
+
+func containerNameFor(tenantID, id string) string {
+	if len(tenantID) > 8 {
+		tenantID = tenantID[:8]
+	}
+	return fmt.Sprintf("ah-db-%s-%s", tenantID, id[:16])
+}
+
+func (m *Manager) runContainer(ctx context.Context, dbType, name, volume string, port int, dbName, user, password string) (string, error) {
+	if dbType == "redis" {
+		return m.runRedis(ctx, name, volume, port, password)
+	}
+	return m.runPostgres(ctx, name, volume, port, dbName, user, password)
+}
+
+// StartAllForTenant recreates the containers of a tenant's stopped databases
+// (see StopAllForTenant) from the stored config, reusing each database's
+// volume, port and password. Failures mark that database "failed" and are
+// logged; the remaining databases are still processed.
+func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, type, port, COALESCE(db_name, ''), COALESCE(username, ''), password_encrypted, volume_name
+		 FROM databases WHERE tenant_id = ? AND status = 'stopped'`, tenantID)
+	if err != nil {
+		log.Printf("databases: StartAllForTenant query failed for tenant %s: %v", tenantID, err)
+		return
+	}
+	type stopped struct {
+		id, typ, dbName, user, passEnc, volume string
+		port                                   int
+	}
+	var dbs []stopped
+	for rows.Next() {
+		var d stopped
+		if err := rows.Scan(&d.id, &d.typ, &d.port, &d.dbName, &d.user, &d.passEnc, &d.volume); err != nil {
+			log.Printf("databases: StartAllForTenant scan failed: %v", err)
+			continue
+		}
+		dbs = append(dbs, d)
+	}
+	rows.Close()
+
+	for _, d := range dbs {
+		if !m.tenantActive(ctx, tenantID) {
+			log.Printf("databases: StartAllForTenant: tenant %s no longer active, not starting %s", tenantID, d.id)
+			return
+		}
+		pw, err := crypto.Decrypt(d.passEnc, m.masterKey)
+		if err != nil {
+			log.Printf("databases: StartAllForTenant decrypt password for %s: %v", d.id, err)
+			m.updateStatus(ctx, d.id, "failed")
+			continue
+		}
+		password := string(pw)
+		containerID, err := m.runContainer(ctx, d.typ, containerNameFor(tenantID, d.id), d.volume, d.port, d.dbName, d.user, password)
+		if err != nil {
+			log.Printf("databases: StartAllForTenant run container for %s: %v", d.id, err)
+			m.updateStatus(ctx, d.id, "failed")
+			continue
+		}
+		_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
+			containerID, time.Now().Unix(), d.id)
+		timeout := m.healthTimeout
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
+		healthy := false
+		if d.typ == "redis" {
+			healthy = m.waitForRedis(d.port, password, timeout)
+		} else {
+			healthy = m.waitForPostgres(d.port, password, timeout)
+		}
+		if !healthy {
+			log.Printf("databases: StartAllForTenant health check failed for %s", d.id)
+			m.updateStatus(ctx, d.id, "failed")
+			m.removeContainer(ctx, containerID) // volume kept: it holds the data
+			continue
+		}
+		if !m.tenantActive(ctx, tenantID) {
+			// Suspended while starting: undo so the container is not left running.
+			m.removeContainer(ctx, containerID)
+			m.updateStatus(ctx, d.id, "stopped")
+			return
+		}
+		m.updateStatus(ctx, d.id, "ready")
+	}
+}
+
+// tenantActive reports whether the tenant is currently 'active'.
+func (m *Manager) tenantActive(ctx context.Context, tenantID string) bool {
+	var status string
+	err := m.db.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&status)
+	return err == nil && status == "active"
+}
+
+func (m *Manager) removeContainer(ctx context.Context, containerID string) {
+	_ = m.docker.StopContainer(ctx, containerID)
+	_ = m.docker.RemoveContainer(ctx, containerID)
 }
 
 func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password string) (string, error) {

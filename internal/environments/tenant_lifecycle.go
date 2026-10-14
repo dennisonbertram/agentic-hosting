@@ -9,8 +9,10 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
-// StopAllForTenant stops active environment containers and removes their
+// StopAllForTenant stops active environment containers (including claimed
+// warm-pool containers, found by DB row rather than label) and removes their
 // Traefik files while keeping workspace and preview records for reactivation.
+// A container that fails to stop keeps its row so the next suspend retries.
 func (m *Manager) StopAllForTenant(_ context.Context, tenantID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -64,6 +66,8 @@ func (m *Manager) removeCreatedEnvironment(containerID, volumeName string) {
 	if containerID != "" {
 		_ = m.docker.StopContainer(ctx, containerID)
 		_ = m.docker.RemoveContainer(ctx, containerID)
+		// A claimed warm-pool container keeps a warm_pool row until its environment is gone.
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, containerID)
 	}
 	if volumeName != "" {
 		_ = m.docker.RemoveVolume(ctx, volumeName)

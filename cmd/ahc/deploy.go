@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
+	"github.com/dennisonbertram/agentic-hosting/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -32,13 +33,13 @@ func pollUntilRunning(c *ahclient.Client, w io.Writer, serviceID string, maxAtte
 			return fmt.Errorf("polling service status: %w", err)
 		}
 		switch svc.Status {
-		case "running":
+		case status.ServiceRunning:
 			fmt.Fprintln(w) // end the dots line
 			if svc.URL != "" {
 				fmt.Fprintf(w, "  URL: %s\n", svc.URL)
 			}
 			return nil
-		case "error", "crashed":
+		case status.ServiceFailed, status.ServiceError, status.ServiceCrashed:
 			fmt.Fprintln(w)
 			if svc.LastError != "" {
 				return fmt.Errorf("service entered error state: %s", svc.LastError)
@@ -139,8 +140,8 @@ func runDeployGit(c *ahclient.Client, w io.Writer, gitURL, name string, port int
 	if err != nil {
 		return err
 	}
-	if build.Status != "succeeded" {
-		return fmt.Errorf("build %s finished with status %q", build.ID, build.Status)
+	if build.Status != status.BuildSucceeded {
+		return fmt.Errorf("build %s finished with status %q — see: ahc build logs %s %s", build.ID, build.Status, svc.Name, buildResp.BuildID)
 	}
 
 	// Poll until service is running.

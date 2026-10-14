@@ -59,12 +59,37 @@ type buildExecutor interface {
 
 // logState tracks per-build log accumulation and tail buffer.
 type logState struct {
-	size      int        // current log size in bytes
-	truncated bool       // whether the log has been truncated
-	tail      []string   // ring buffer of last tailLines lines
-	tailIdx   int        // next write position in tail ring buffer
-	tailCount int        // total lines written to tail (for omission count)
+	size      int             // current log size in bytes
+	truncated bool            // whether the log has been truncated
+	tail      []string        // ring buffer of last tailLines lines
+	tailIdx   int             // next write position in tail ring buffer
+	tailCount int             // total lines written to tail (for omission count)
+	pending   strings.Builder // lines accepted but not yet written to the DB
+	flushMu   sync.Mutex      // serializes DB flushes so chunks stay in order
+	seq       uint64          // sequence of the last accepted line
+	flushed   uint64          // lines with seq <= flushed are in the DB
 }
+
+// logLine is one live line with its per-build sequence number, so a stream can
+// skip lines already covered by its DB snapshot.
+type logLine struct {
+	seq  uint64
+	text string
+}
+
+// Build phases tracked in memory (guarded by logMu) between the build finishing
+// and the deploy, so a cancel and the start of the deploy cannot both win.
+const (
+	phaseCancelled = 1
+	phaseDeploying = 2
+)
+
+var errDeploying = apierr.Conflict("build is deploying; cannot cancel")
+
+const (
+	flushBytes    = 64 * 1024   // flush buffered log lines once this many bytes are pending
+	flushInterval = time.Second // and at least this often while a build runs
+)
 
 // Manager coordinates build lifecycle.
 type Manager struct {
@@ -72,9 +97,11 @@ type Manager struct {
 	builder    buildExecutor
 	deployFn   DeployFunc
 	logMu      sync.Mutex
-	buildQueue chan struct{}            // bounded queue for build goroutines
-	logSubs    map[string][]chan string // buildID -> subscribers
-	logStates  map[string]*logState    // buildID -> log accumulation state
+	buildQueue chan struct{}                 // bounded queue for build goroutines
+	logSubs    map[string][]chan logLine     // buildID -> subscribers
+	phases     map[string]int                // buildID -> phaseCancelled/phaseDeploying (guarded by logMu)
+	logStates  map[string]*logState          // buildID -> log accumulation state
+	cancels    map[string]context.CancelFunc // buildID -> cancel for the running build (guarded by logMu)
 }
 
 // NewManager creates a build manager.
@@ -84,8 +111,10 @@ func NewManager(db *sql.DB, b buildExecutor, deployFn DeployFunc) *Manager {
 		builder:    b,
 		deployFn:   deployFn,
 		buildQueue: make(chan struct{}, 10), // max 10 queued builds
-		logSubs:    make(map[string][]chan string),
+		logSubs:    make(map[string][]chan logLine),
+		phases:     make(map[string]int),
 		logStates:  make(map[string]*logState),
+		cancels:    make(map[string]context.CancelFunc),
 	}
 	// Mark any stale builds from previous process as failed
 	m.reconcileStaleBuilds()
@@ -231,13 +260,39 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	defer func() { <-m.buildQueue }() // release queue slot
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	// Clean up the log state map entry when done.
+	m.logMu.Lock()
+	m.cancels[buildID] = cancel
+	m.logMu.Unlock()
+
+	// cbMu + finished stop late callbacks (the builder's output goroutines can outlive
+	// Build) from recreating log state after cleanup below.
+	var cbMu sync.Mutex
+	finished := false
+	stopFlusher := make(chan struct{})
+	go func() {
+		t := time.NewTicker(flushInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				m.flushPending(context.Background(), buildID)
+			case <-stopFlusher:
+				return
+			}
+		}
+	}()
 	// NOTE: flushTailBuffer is called explicitly before each final status write
 	// (succeeded/failed) so that the DB log is fully flushed before any caller
 	// polling on build status can observe the terminal state.
 	defer func() {
+		close(stopFlusher)
+		cbMu.Lock()
+		finished = true
+		cbMu.Unlock()
 		m.logMu.Lock()
 		delete(m.logStates, buildID)
+		delete(m.cancels, buildID)
+		delete(m.phases, buildID)
 		m.logMu.Unlock()
 	}()
 
@@ -256,8 +311,13 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	}
 
 	logCb := func(line string) {
-		m.appendLog(ctx, buildID, line)
-		m.notifyLogSubs(buildID, line)
+		cbMu.Lock()
+		defer cbMu.Unlock()
+		if finished {
+			return
+		}
+		seq := m.appendLog(context.Background(), buildID, line)
+		m.notifyLogSubs(buildID, seq, line)
 	}
 
 	err := m.builder.Build(ctx, req, logCb)
@@ -279,6 +339,29 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		); dbErr != nil {
 			log.Printf("builds: failed to mark build %s as failed: %v", buildID, dbErr)
 		}
+		m.closeLogSubs(buildID)
+		return
+	}
+
+	// A cancel may have landed while the builder was finishing; do not deploy then.
+	var status string
+	if qErr := m.db.QueryRowContext(finalCtx, `SELECT status FROM builds WHERE id = ?`, buildID).Scan(&status); qErr != nil || status != "running" || ctx.Err() != nil {
+		log.Printf("build %s no longer running (status %q), skipping deploy", buildID, status)
+		m.flushTailBuffer(finalCtx, buildID)
+		m.closeLogSubs(buildID)
+		return
+	}
+	// Enter the deploy phase atomically with cancelActive: after this a cancel is
+	// refused, before it a cancel wins and we do not deploy.
+	m.logMu.Lock()
+	cancelled := m.phases[buildID] == phaseCancelled
+	if !cancelled {
+		m.phases[buildID] = phaseDeploying
+	}
+	m.logMu.Unlock()
+	if cancelled {
+		log.Printf("build %s cancelled before deploy, skipping deploy", buildID)
+		m.flushTailBuffer(finalCtx, buildID)
 		m.closeLogSubs(buildID)
 		return
 	}
@@ -320,7 +403,10 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	m.closeLogSubs(buildID)
 }
 
-func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
+// appendLog accepts a log line. Lines are buffered and written to the DB in batches
+// (flushBytes, or every flushInterval via runBuild's flusher) because appending to a
+// log column of up to 5MB once per line is quadratic.
+func (m *Manager) appendLog(ctx context.Context, buildID, line string) uint64 {
 	m.logMu.Lock()
 	ls := m.logStates[buildID]
 	if ls == nil {
@@ -328,35 +414,63 @@ func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
 		m.logStates[buildID] = ls
 	}
 
+	ls.seq++
+	seq := ls.seq
 	lineBytes := len(line) + 1 // +1 for newline
 
-	if ls.truncated {
-		// Log already exceeded cap — only buffer in the ring buffer
-		ls.tail[ls.tailIdx%tailLines] = line
-		ls.tailIdx++
-		ls.tailCount++
-		m.logMu.Unlock()
-		return
-	}
-
-	if ls.size+lineBytes > maxLogSize {
-		// First time exceeding the cap — switch to ring buffer mode
+	if ls.truncated || ls.size+lineBytes > maxLogSize {
+		// Log exceeded cap — only buffer in the ring buffer
 		ls.truncated = true
 		ls.tail[ls.tailIdx%tailLines] = line
 		ls.tailIdx++
 		ls.tailCount++
 		m.logMu.Unlock()
-		return
+		return seq
 	}
 
 	ls.size += lineBytes
+	ls.pending.WriteString(line)
+	ls.pending.WriteByte('\n')
+	full := ls.pending.Len() >= flushBytes
 	m.logMu.Unlock()
 
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE builds SET log = log || ? || char(10) WHERE id = ?`,
-		line, buildID,
-	)
-	if err != nil {
+	if full {
+		m.flushPending(ctx, buildID)
+	}
+	return seq
+}
+
+// flushPending writes any buffered lines for the build to the DB, in order. It
+// returns the highest line sequence now in the DB (0 if the build has no log state).
+func (m *Manager) flushPending(ctx context.Context, buildID string) uint64 {
+	m.logMu.Lock()
+	ls := m.logStates[buildID]
+	m.logMu.Unlock()
+	if ls == nil {
+		return 0
+	}
+	ls.flushMu.Lock()
+	defer ls.flushMu.Unlock()
+	m.logMu.Lock()
+	chunk := ls.pending.String()
+	ls.pending.Reset()
+	upTo := ls.seq
+	m.logMu.Unlock()
+	if chunk != "" {
+		if _, err := m.db.ExecContext(ctx, `UPDATE builds SET log = log || ? WHERE id = ?`, chunk, buildID); err != nil {
+			log.Printf("builds: failed to append log for %s: %v", buildID, err)
+			return ls.flushed
+		}
+	}
+	ls.flushed = upTo
+	return upTo
+}
+
+// appendLogDirect writes one line straight to the DB. It is for messages written
+// outside runBuild (cancel notices), so it never creates in-memory log state.
+func (m *Manager) appendLogDirect(ctx context.Context, buildID, line string) {
+	m.flushPending(ctx, buildID) // keep ordering with buffered lines
+	if _, err := m.db.ExecContext(ctx, `UPDATE builds SET log = log || ? || char(10) WHERE id = ?`, line, buildID); err != nil {
 		log.Printf("builds: failed to append log for %s: %v", buildID, err)
 	}
 }
@@ -364,6 +478,7 @@ func (m *Manager) appendLog(ctx context.Context, buildID, line string) {
 // flushTailBuffer replaces the DB log with a truncation notice + tail lines
 // if the build log was truncated during accumulation.
 func (m *Manager) flushTailBuffer(ctx context.Context, buildID string) {
+	m.flushPending(ctx, buildID)
 	m.logMu.Lock()
 	ls := m.logStates[buildID]
 	if ls == nil || !ls.truncated {
@@ -407,13 +522,14 @@ func collectTailLines(ls *logState) []string {
 	return lines
 }
 
-func (m *Manager) notifyLogSubs(buildID, line string) {
+// notifyLogSubs does non-blocking sends under logMu so a concurrent closeLogSubs
+// cannot close a channel mid-send.
+func (m *Manager) notifyLogSubs(buildID string, seq uint64, line string) {
 	m.logMu.Lock()
-	subs := m.logSubs[buildID]
-	m.logMu.Unlock()
-	for _, ch := range subs {
+	defer m.logMu.Unlock()
+	for _, ch := range m.logSubs[buildID] {
 		select {
-		case ch <- line:
+		case ch <- logLine{seq, line}:
 		default:
 		}
 	}
@@ -421,20 +537,37 @@ func (m *Manager) notifyLogSubs(buildID, line string) {
 
 func (m *Manager) closeLogSubs(buildID string) {
 	m.logMu.Lock()
-	subs := m.logSubs[buildID]
-	delete(m.logSubs, buildID)
-	m.logMu.Unlock()
-	for _, ch := range subs {
+	defer m.logMu.Unlock()
+	for _, ch := range m.logSubs[buildID] {
 		close(ch)
 	}
+	delete(m.logSubs, buildID)
 }
 
-func (m *Manager) subscribeLogs(buildID string) chan string {
-	ch := make(chan string, 100)
+func (m *Manager) subscribeLogs(buildID string) chan logLine {
+	ch := make(chan logLine, 100)
 	m.logMu.Lock()
 	m.logSubs[buildID] = append(m.logSubs[buildID], ch)
 	m.logMu.Unlock()
 	return ch
+}
+
+// unsubscribeLogs removes ch if closeLogSubs has not already done so.
+func (m *Manager) unsubscribeLogs(buildID string, ch chan logLine) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	subs := m.logSubs[buildID]
+	for i, c := range subs {
+		if c == ch {
+			subs = append(subs[:i:i], subs[i+1:]...)
+			break
+		}
+	}
+	if len(subs) == 0 {
+		delete(m.logSubs, buildID)
+	} else {
+		m.logSubs[buildID] = subs
+	}
 }
 
 // GetBuild returns a build by ID, scoped to tenant.
@@ -532,6 +665,11 @@ func (m *Manager) GetBuildLogs(ctx context.Context, tenantID, buildID string) (s
 
 // StreamBuildLogs writes the existing log then streams new lines.
 func (m *Manager) StreamBuildLogs(ctx context.Context, tenantID, buildID string, w io.Writer) error {
+	// Subscribe before reading so a build that finishes in between still closes our channel.
+	ch := m.subscribeLogs(buildID)
+	defer m.unsubscribeLogs(buildID, ch)
+
+	covered := m.flushPending(ctx, buildID) // buffered lines up to seq covered are now in the DB read below
 	build, err := m.GetBuild(ctx, tenantID, buildID)
 	if err != nil {
 		return err
@@ -543,18 +681,20 @@ func (m *Manager) StreamBuildLogs(ctx context.Context, tenantID, buildID string,
 		}
 	}
 
-	if build.Status == "succeeded" || build.Status == "failed" {
+	if build.Status != "pending" && build.Status != "running" {
 		return nil
 	}
 
-	ch := m.subscribeLogs(buildID)
 	for {
 		select {
 		case line, ok := <-ch:
 			if !ok {
 				return nil
 			}
-			if _, err := io.WriteString(w, line+"\n"); err != nil {
+			if line.seq <= covered {
+				continue // already in the snapshot written above
+			}
+			if _, err := io.WriteString(w, line.text+"\n"); err != nil {
 				return err
 			}
 			if f, ok := w.(interface{ Flush() }); ok {
@@ -566,6 +706,55 @@ func (m *Manager) StreamBuildLogs(ctx context.Context, tenantID, buildID string,
 	}
 }
 
+// cancelActive moves a pending/running build to newStatus and stops its work.
+// It reports false (and changes nothing) if the build already finished.
+func (m *Manager) cancelActive(ctx context.Context, buildID, newStatus, msg string) (bool, error) {
+	m.logMu.Lock()
+	if m.phases[buildID] == phaseDeploying {
+		m.logMu.Unlock()
+		return false, errDeploying
+	}
+	if m.cancels[buildID] != nil { // runBuild is live: record that a cancel won
+		m.phases[buildID] = phaseCancelled
+	}
+	m.logMu.Unlock()
+	undo := func() {
+		m.logMu.Lock()
+		if m.phases[buildID] == phaseCancelled {
+			delete(m.phases, buildID)
+		}
+		m.logMu.Unlock()
+	}
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE builds SET status = ?, finished_at = ? WHERE id = ? AND status IN ('pending', 'running')`,
+		newStatus, time.Now().Unix(), buildID,
+	)
+	if err != nil {
+		log.Printf("builds: cancel build %s: %v", buildID, err)
+		undo()
+		return false, nil
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		undo()
+		return false, nil
+	}
+	// Status is already terminal, so runBuild will not deploy. Now stop the work:
+	// cancel its context (covers waiting on the build slot and gaps between phases)
+	// and the systemd unit (may legitimately be untracked at this moment).
+	m.logMu.Lock()
+	cancel := m.cancels[buildID]
+	m.logMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if err := m.builder.CancelBuild(buildID); err != nil {
+		log.Printf("builds: stop build %s unit: %v", buildID, err)
+	}
+	m.appendLogDirect(ctx, buildID, msg)
+	m.closeLogSubs(buildID)
+	return true, nil
+}
+
 // CancelBuild cancels a running build.
 func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) error {
 	build, err := m.GetBuild(ctx, tenantID, buildID)
@@ -575,18 +764,13 @@ func (m *Manager) CancelBuild(ctx context.Context, tenantID, buildID string) err
 	if build.Status != "pending" && build.Status != "running" {
 		return apierr.Conflict(fmt.Sprintf("build is not in progress (status: %s)", build.Status))
 	}
-
-	if err := m.builder.CancelBuild(buildID); err != nil {
-		log.Printf("builds: cancel build %s: %v", buildID, err)
+	ok, err := m.cancelActive(ctx, buildID, "failed", "[ah] Build cancelled by user")
+	if err != nil {
+		return err
 	}
-
-	now := time.Now().Unix()
-	m.db.ExecContext(ctx,
-		`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ?`,
-		now, buildID,
-	)
-	m.appendLog(ctx, buildID, "[ah] Build cancelled by user")
-	m.closeLogSubs(buildID)
+	if !ok {
+		return apierr.Conflict("build is no longer in progress")
+	}
 	return nil
 }
 
@@ -614,17 +798,10 @@ func (m *Manager) CancelAllForTenant(ctx context.Context, tenantID string) error
 		return fmt.Errorf("iterate active builds: %w", err)
 	}
 
-	now := time.Now().Unix()
 	for _, buildID := range buildIDs {
-		if err := m.builder.CancelBuild(buildID); err != nil {
-			log.Printf("builds: cancel build %s during tenant suspension: %v", buildID, err)
+		if _, err := m.cancelActive(ctx, buildID, "cancelled", "[ah] Build cancelled: tenant suspended"); err != nil {
+			log.Printf("builds: not cancelling build %s on suspend: %v", buildID, err)
 		}
-		m.db.ExecContext(ctx,
-			`UPDATE builds SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('pending', 'running')`,
-			now, buildID,
-		)
-		m.appendLog(ctx, buildID, "[ah] Build cancelled: tenant suspended")
-		m.closeLogSubs(buildID)
 	}
 
 	if len(buildIDs) > 0 {

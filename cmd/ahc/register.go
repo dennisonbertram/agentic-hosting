@@ -19,6 +19,22 @@ func saveAPIKey(path, apiKey, serverURL string) error {
 	return cfg.Save(path)
 }
 
+// saveResolvedConfig saves the API key together with the URL the client
+// actually used (flag, env or config file) to the default config path.
+// Failures only warn: the key was already issued and printed.
+func saveResolvedConfig(cmd *cobra.Command, c *ahclient.Client, apiKey string, jsonOutput bool) {
+	cfgPath := defaultConfigPath()
+	if err := saveAPIKey(cfgPath, apiKey, c.BaseURL); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
+		return
+	}
+	if jsonOutput {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Saved to: %s\n", cfgPath)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
+	}
+}
+
 // resolveBootstrapToken returns the bootstrap token from the flag value (preferred)
 // or the named environment variable. Returns an error if neither is available.
 func resolveBootstrapToken(flagVal, envVar string) (string, error) {
@@ -86,33 +102,27 @@ Set the AH_BOOTSTRAP_TOKEN environment variable or pass --bootstrap-token.`,
 				return fmt.Errorf("registration failed: %w", err)
 			}
 
-			if !root.jsonOutput {
-				fmt.Fprintf(cmd.OutOrStdout(), "Tenant ID : %s\n", result.TenantID)
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
-				fmt.Fprintln(cmd.OutOrStdout(), "║              SAVE THIS API KEY           ║")
-				fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
-				fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
-				fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.APIKey)
+			if saveFlag {
+				saveResolvedConfig(cmd, c, result.APIKey, root.jsonOutput)
 			}
 
-			if saveFlag {
-				cfgPath := defaultConfigPath()
-				if err := saveAPIKey(cfgPath, result.APIKey, c.BaseURL); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
-				} else if !root.jsonOutput {
-					fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
-				}
-			}
 			if root.jsonOutput {
 				return printJSON(cmd.OutOrStdout(), result)
 			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Tenant ID : %s\n", result.TenantID)
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
+			fmt.Fprintln(cmd.OutOrStdout(), "║              SAVE THIS API KEY           ║")
+			fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
+			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
+			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.APIKey)
 
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&bootstrapToken, "bootstrap-token", "", "Bootstrap token (overrides $AH_BOOTSTRAP_TOKEN)")
-	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save API key to ~/.ahc/config.json")
+	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save API key to ~/.ah/config.json")
 	return cmd
 }

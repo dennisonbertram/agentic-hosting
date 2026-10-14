@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -102,7 +103,10 @@ type CreatePreviewRequest struct {
 }
 
 // previewNamePattern matches valid preview names: 1-63 chars, alphanumeric + hyphens.
-var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
+var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,49}$`)
+
+// maxPreviewsPerEnv caps previews per environment; each gets its own TLS host.
+const maxPreviewsPerEnv = 5
 
 // Manager manages environment lifecycle.
 type Manager struct {
@@ -165,46 +169,31 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
-	// from both seeing count below the tenant limit.
-	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	// Force write lock with a dummy write (SQLite IMMEDIATE)
-	_, _ = tx.ExecContext(ctx, `UPDATE environments SET updated_at = updated_at WHERE id = 'lock'`)
 	var maxEnvironments int
-	if err := tx.QueryRowContext(ctx,
+	if err := m.db.QueryRowContext(ctx,
 		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxEnvironments); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')`, tenantID,
-	).Scan(&count); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= maxEnvironments {
-		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
 
 	// Insert DB row with status=creating
-	_, err = m.db.ExecContext(ctx,
+	// The quota count is part of the INSERT so concurrent creates cannot both
+	// pass the check. Nothing is claimed from the warm pool until this succeeds.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
 		 lease_duration_seconds, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'creating', ?, ?, ?, ?)`,
-		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now,
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')) < ?`,
+		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now, tenantID, maxEnvironments,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("environment with name %q already exists", req.Name))
@@ -241,6 +230,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 				_ = m.docker.StopContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveVolume(cleanupCtx, poolVolumeName)
+				_, _ = m.db.ExecContext(cleanupCtx, `DELETE FROM warm_pool WHERE container_id = ?`, poolContainerID)
 				_, resetErr := m.db.ExecContext(cleanupCtx,
 					`UPDATE environments SET container_id = '', volume_name = ? WHERE id = ?`, volumeName, id)
 				cancel()
@@ -285,7 +275,10 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		}
 	}
 
-	// Update DB with container_id, status=running, lease
+	// Update DB with container_id, status=running, lease. The update only
+	// applies while the row is still 'creating' and the tenant is active, so a
+	// suspension that raced with this Create (StopAllForTenant skips rows with
+	// no container yet) cannot leave a running container behind.
 	leaseExpiresAt := now + int64(leaseDuration)
 	var updateResult sql.Result
 	updateResult, err = m.db.ExecContext(ctx,
@@ -310,13 +303,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	if updated != 1 {
 		m.removeCreatedEnvironment(containerID, volumeName)
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Tenant suspension marks in-flight rows 'stopped' without a container;
+		// that row is stale now that its storage is gone, so delete it. A row
+		// still 'creating' (tenant inactive, no suspension sweep) is marked failed.
 		_, deleteErr := m.db.ExecContext(cleanupCtx,
-			`DELETE FROM environments WHERE id = ? AND tenant_id = ?`, id, tenantID)
+			`DELETE FROM environments WHERE id = ? AND tenant_id = ? AND status = 'stopped'`, id, tenantID)
 		cancel()
 		if deleteErr != nil {
 			log.Printf("environments: remove interrupted creation %s: %v", id, deleteErr)
 		}
-		return nil, fmt.Errorf("environment creation was interrupted before ownership could be committed")
+		m.updateStatus(ctx, id, "failed")
+		return nil, apierr.Validation("environment creation was interrupted: tenant is not active")
 	}
 
 	return &Environment{
@@ -415,6 +412,11 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 	}
 	if err := m.removePreviewIngressNetwork(ctx, tenantID, envID, e.ContainerID); err != nil {
 		log.Printf("environments: remove preview ingress network for %s: %v", envID, err)
+	}
+
+	// A claimed pool container keeps its warm_pool row (for GC) until now.
+	if e.ContainerID != "" {
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, e.ContainerID)
 	}
 
 	// Remove volume
@@ -606,8 +608,12 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 		req.Timeout = 300
 	}
 
+	// Backstop: coreutils timeout kills the process inside the container a few
+	// seconds after ExecRun gives up on the connection, so it does not run forever.
+	cmd := append([]string{"timeout", "-s", "KILL", fmt.Sprintf("%d", req.Timeout+5)}, req.Command...)
+
 	// Create exec
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, req.Command, req.WorkDir)
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, cmd, req.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
@@ -619,10 +625,7 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 
 	durationMs := time.Since(start).Milliseconds()
 
-	timedOut := false
-	if err != nil && ctx.Err() != nil {
-		timedOut = true
-	}
+	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
 	// If the exec timed out but we still got partial output, return it
 	if err != nil && !timedOut {
 		return nil, fmt.Errorf("exec run: %w", err)
@@ -838,8 +841,8 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "No such container") ||
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such container") ||
 		strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no such volume") ||
 		strings.Contains(msg, "404")
@@ -848,6 +851,8 @@ func isNotFoundError(err error) bool {
 // ---------------------------------------------------------------------------
 // Workspace Sync
 // ---------------------------------------------------------------------------
+
+const syncTimeout = 5 * time.Minute
 
 // SyncWorkspace syncs code into an environment's /workspace directory via git.
 func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req SyncRequest) error {
@@ -879,12 +884,12 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 	)
 
 	// Create and run exec with a 5-minute timeout
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"sh", "-c", gitCmd}, "/workspace")
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())), "sh", "-c", gitCmd}, "/workspace")
 	if err != nil {
 		return fmt.Errorf("sync exec create: %w", err)
 	}
 
-	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, 5*time.Minute)
+	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, syncTimeout)
 	if err != nil {
 		return fmt.Errorf("sync exec run: %w", err)
 	}
@@ -921,7 +926,7 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	// Validate name
 	if !previewNamePattern.MatchString(req.Name) {
-		return nil, apierr.Validation("preview name must be 1-63 characters, alphanumeric and hyphens, starting with alphanumeric")
+		return nil, apierr.Validation("preview name must be 1-50 characters, alphanumeric and hyphens, starting with alphanumeric")
 	}
 
 	// Validate port
@@ -944,12 +949,18 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	now := time.Now().Unix()
 
-	// Insert DB row
-	_, err = m.db.ExecContext(ctx,
+	// Insert DB row, enforcing the per-environment cap atomically.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environment_previews (id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now,
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environment_previews WHERE environment_id = ?) < ?`,
+		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now, envID, maxPreviewsPerEnv,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("maximum %d previews per environment reached", maxPreviewsPerEnv))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("preview with name %q already exists for this environment", req.Name))

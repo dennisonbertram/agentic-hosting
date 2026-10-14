@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -76,15 +77,11 @@ func runRotateKey(args []string) {
 		log.Fatalf("failed to load new key: %v", err)
 	}
 
-	// Open database directly (not via db.Open which starts migrations and metering DB)
-	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	sqlDB, err := openRotateDB(dbPath, dryRun)
 	if err != nil {
-		log.Fatalf("failed to open database %s: %v", dbPath, err)
+		log.Fatalf("%v", err)
 	}
 	defer sqlDB.Close()
-	if err := sqlDB.Ping(); err != nil {
-		log.Fatalf("failed to ping database %s: %v", dbPath, err)
-	}
 
 	mode := "LIVE"
 	if dryRun {
@@ -103,7 +100,8 @@ func runRotateKey(args []string) {
 	log.Printf("  database conn strings: %d", result.DatabaseConnStrs)
 	log.Printf("  kanban admin tokens:   %d", result.KanbanTokens)
 	log.Printf("  snapshot env vars:     %d", result.SnapshotEnvs)
-	log.Printf("  total fields:          %d", result.Total())
+	log.Printf("  api key hash key:      %d", result.HashKeys)
+	log.Printf("  total fields:         %d", result.Total())
 	log.Printf("  errors:                %d", result.Errors)
 
 	if dryRun {
@@ -112,6 +110,30 @@ func runRotateKey(args []string) {
 		log.Printf("all encrypted data has been re-encrypted with the new key.")
 		log.Printf("IMPORTANT: replace your master key file with the new key and restart the server.")
 	}
+}
+
+// openRotateDB opens the state DB directly (not via db.Open, which also starts
+// the metering DB) and applies pending state migrations (skipped for dry-run). RotateKeys reads
+// server_secrets, which a DB the server has not started on since migration 020
+// does not have yet. ApplyStateMigrations skips already-applied migrations.
+func openRotateDB(dbPath string, dryRun bool) (*sql.DB, error) {
+	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database %s: %w", dbPath, err)
+	}
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("failed to ping database %s: %w", dbPath, err)
+	}
+	if dryRun {
+		// Migrations commit, so a dry-run must not apply them.
+		return sqlDB, nil
+	}
+	if err := db.ApplyStateMigrations(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("failed to apply migrations to %s: %w", dbPath, err)
+	}
+	return sqlDB, nil
 }
 
 // loadKeyFile reads and validates a master key file. The file must contain

@@ -76,7 +76,7 @@ func TestRunDbDelete_RequiresConfirm(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}
@@ -102,7 +102,7 @@ func TestRunDbDelete_WithConfirm(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}
@@ -124,7 +124,7 @@ func TestWriteDbTable_Columns(t *testing.T) {
 			ID:     "aabbccdd11223344aabbccdd11223344",
 			Name:   "my-postgres",
 			Type:   "postgres",
-			Status: "running",
+			Status: "ready",
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestWriteDbTable_Columns(t *testing.T) {
 
 	assert.Contains(t, output, "my-postgres", "table must show database name")
 	assert.Contains(t, output, "postgres", "table must show database type")
-	assert.Contains(t, output, "running", "table must show database status")
+	assert.Contains(t, output, "ready", "table must show database status")
 }
 
 func TestWriteDbTable_IDTruncated(t *testing.T) {
@@ -184,7 +184,7 @@ func TestResolveDbID_ByName(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: wantID, Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: wantID, Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}

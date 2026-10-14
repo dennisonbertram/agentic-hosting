@@ -413,9 +413,10 @@ func TestSyncWorkspace_Success(t *testing.T) {
 	mock.ExecCreateFn = func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
 		// Verify git clone command is constructed correctly
 		assert.Equal(t, "/workspace", workDir)
-		assert.Equal(t, "sh", cmd[0])
-		assert.Equal(t, "-c", cmd[1])
-		assert.Contains(t, cmd[2], "https://github.com/test/repo.git")
+		assert.Equal(t, "timeout", cmd[0])
+		assert.Equal(t, "sh", cmd[4])
+		assert.Equal(t, "-c", cmd[5])
+		assert.Contains(t, cmd[6], "https://github.com/test/repo.git")
 		return "exec-sync", nil
 	}
 	mock.ExecRunFn = func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {

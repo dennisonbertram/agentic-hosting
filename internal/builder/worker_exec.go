@@ -7,9 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
-	"unicode"
 )
 
 func (b *Builder) gitClone(ctx context.Context, req BuildRequest, sourceDir string, logCb func(string)) error {
@@ -102,19 +100,34 @@ func runWorkerCommand(ctx context.Context, dir string, env []string, logCb func(
 }
 
 func streamLines(r io.Reader, logCb func(string)) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-	for scanner.Scan() {
-		line := strings.Map(func(r rune) rune {
-			if r == '\t' {
-				return r
+	const maxLine = 256 * 1024
+	// Read with a bufio.Reader so an overlong line is truncated instead of
+	// ending the read loop (which would block the child on a full pipe).
+	br := bufio.NewReaderSize(r, 64*1024)
+	var buf []byte
+	truncated := false
+	for {
+		chunk, isPrefix, err := br.ReadLine()
+		if len(buf)+len(chunk) <= maxLine {
+			buf = append(buf, chunk...)
+		} else {
+			buf = append(buf, chunk[:maxLine-len(buf)]...)
+			truncated = true
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
 			}
-			if unicode.IsControl(r) {
-				return -1
-			}
-			return r
-		}, scanner.Text())
+			return err
+		}
+		if isPrefix {
+			continue
+		}
+		line := sanitizeLogLine(string(buf))
+		if truncated {
+			line += " [line truncated]"
+		}
 		logCb(line)
+		buf, truncated = buf[:0], false
 	}
-	return scanner.Err()
 }

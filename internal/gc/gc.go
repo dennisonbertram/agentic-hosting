@@ -108,10 +108,10 @@ func (g *GC) collectOnce(ctx context.Context) error {
 		log.Printf("gc: orphaned container check failed: %v", err)
 	} else {
 		for _, id := range orphanedContainers {
-			log.Printf("gc: removing orphaned container %s", id[:12])
+			log.Printf("gc: removing orphaned container %s", short(id))
 			_ = g.docker.StopContainer(ctx, id)
 			if err := g.docker.RemoveContainer(ctx, id); err != nil {
-				log.Printf("gc: failed to remove container %s: %v", id[:12], err)
+				log.Printf("gc: failed to remove container %s: %v", short(id), err)
 			} else {
 				removed++
 			}
@@ -144,6 +144,13 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	} else if pruned > 0 {
 		log.Printf("gc: pruned %d dangling images", pruned)
 		removed += pruned
+	}
+
+	removed += g.removeUnusedBuiltImages(ctx)
+	if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
+		log.Printf("gc: anonymous volume prune failed: %v", err)
+	} else {
+		removed += n
 	}
 
 	// 5. Orphaned tenant and per-workload ingress networks.
@@ -183,150 +190,72 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	return nil
 }
 
+// containerTables are the tables whose container_id column marks a container as in use.
+// Ownership is decided by container ID only, never by labels: warm-pool containers
+// keep ah.type=warm-pool while pooled and are renamed (not relabelled) when claimed.
+var containerTables = []string{"services", "databases", "environments", "kanbans", "warm_pool"}
+
 func (g *GC) findOrphanedContainers(ctx context.Context) ([]string, error) {
-	// Get all ah service containers
-	svcContainers, err := g.docker.ListContainersByLabel(ctx, "ah.service", "")
-	if err != nil {
-		return nil, err
-	}
-	// Get all ah database containers
-	dbContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "database")
-	if err != nil {
-		return nil, err
+	// Candidates: every container carrying any ah label GC manages.
+	var candidates []string
+	seen := map[string]bool{}
+	for _, q := range [][2]string{{"ah.service", ""}, {"ah.type", "database"}, {"ah.type", "environment"}, {"ah.type", "kanban"}, {"ah.type", "warm-pool"}} {
+		ids, err := g.docker.ListContainersByLabel(ctx, q[0], q[1])
+		if err != nil {
+			if q[0] == "ah.service" || q[1] == "database" {
+				return nil, err
+			}
+			log.Printf("gc: %s=%s container list failed: %v", q[0], q[1], err)
+			continue
+		}
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				candidates = append(candidates, id)
+			}
+		}
 	}
 
 	var orphaned []string
 	cutoff := time.Now().Add(-minResourceAge)
-
-	// Check service containers
-	for _, id := range svcContainers {
-		// Skip containers younger than minResourceAge to avoid deploy races
+	for _, id := range candidates {
+		// Skip containers younger than minResourceAge to avoid deploy races.
 		info, inspectErr := g.docker.InspectContainer(ctx, id)
-		if inspectErr != nil {
-			continue // can't inspect, skip (don't delete what we can't verify)
+		if inspectErr != nil || info.CreatedAt.After(cutoff) {
+			continue // can't verify or too new: don't delete
 		}
-		if info.CreatedAt.After(cutoff) {
-			continue // too new, skip
-		}
-
-		var count int
-		err := g.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM services WHERE container_id = ?`, id).Scan(&count)
+		used, err := g.containerInUse(ctx, id)
 		if err != nil {
-			// DB error — do NOT treat as orphaned. Log and skip.
-			log.Printf("gc: DB error checking container %s, skipping: %v", id[:12], err)
+			// DB error — do NOT treat as orphaned.
+			log.Printf("gc: DB error checking container %s, skipping: %v", short(id), err)
 			continue
 		}
-		if count == 0 {
+		if !used {
 			orphaned = append(orphaned, id)
 		}
 	}
-
-	// Check database containers
-	for _, id := range dbContainers {
-		info, inspectErr := g.docker.InspectContainer(ctx, id)
-		if inspectErr != nil {
-			continue
-		}
-		if info.CreatedAt.After(cutoff) {
-			continue
-		}
-
-		var count int
-		err := g.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM databases WHERE container_id = ?`, id).Scan(&count)
-		if err != nil {
-			log.Printf("gc: DB error checking database container %s, skipping: %v", id[:12], err)
-			continue
-		}
-		if count == 0 {
-			orphaned = append(orphaned, id)
-		}
-	}
-
-	// Check environment containers
-	envContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "environment")
-	if err != nil {
-		log.Printf("gc: environment container list failed: %v", err)
-	} else {
-		for _, id := range envContainers {
-			info, inspectErr := g.docker.InspectContainer(ctx, id)
-			if inspectErr != nil {
-				continue
-			}
-			if info.CreatedAt.After(cutoff) {
-				continue
-			}
-
-			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM environments WHERE container_id = ?`, id).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking environment container %s, skipping: %v", id[:12], err)
-				continue
-			}
-			if count == 0 {
-				orphaned = append(orphaned, id)
-			}
-		}
-	}
-
-	// Check kanban containers
-	kanbanContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "kanban")
-	if err != nil {
-		log.Printf("gc: kanban container list failed: %v", err)
-	} else {
-		for _, id := range kanbanContainers {
-			info, inspectErr := g.docker.InspectContainer(ctx, id)
-			if inspectErr != nil {
-				continue
-			}
-			if info.CreatedAt.After(cutoff) {
-				continue
-			}
-
-			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM kanbans WHERE container_id = ?`, id).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking kanban container %s, skipping: %v", id[:12], err)
-				continue
-			}
-			if count == 0 {
-				orphaned = append(orphaned, id)
-			}
-		}
-	}
-
-	// Check warm-pool containers
-	poolContainers, err := g.docker.ListContainersByLabel(ctx, "ah.type", "warm-pool")
-	if err != nil {
-		log.Printf("gc: warm-pool container list failed: %v", err)
-	} else {
-		for _, id := range poolContainers {
-			info, inspectErr := g.docker.InspectContainer(ctx, id)
-			if inspectErr != nil {
-				continue
-			}
-			if info.CreatedAt.After(cutoff) {
-				continue
-			}
-
-			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT (SELECT COUNT(*) FROM warm_pool WHERE container_id = ?) +
-				        (SELECT COUNT(*) FROM environments WHERE container_id = ?)`, id, id).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking warm-pool container %s, skipping: %v", id[:12], err)
-				continue
-			}
-			if count == 0 {
-				orphaned = append(orphaned, id)
-			}
-		}
-	}
-
 	return orphaned, nil
+}
+
+// containerInUse reports whether any table references the container ID.
+func (g *GC) containerInUse(ctx context.Context, id string) (bool, error) {
+	for _, table := range containerTables {
+		var count int
+		if err := g.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE container_id = ?`, id).Scan(&count); err != nil {
+			return false, err
+		}
+		if count > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func short(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
@@ -428,10 +357,16 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 	return orphaned, nil
 }
 
+// minNetworkAge protects networks created by a deploy that is still pulling its image.
+const minNetworkAge = 15 * time.Minute
+
+// minImageAge protects images from a build or snapshot that is not yet recorded in the DB.
+const minImageAge = time.Hour
+
 // findOrphanedNetworks lists tenant and per-workload ingress networks with no
-// workload endpoint. A single Traefik endpoint is also orphaned. Tenant
-// networks contain only workloads; ingress networks contain Traefik plus one
-// workload while active.
+// workload endpoint, older than minNetworkAge and not owned by a persisted
+// workload. A single Traefik endpoint is also orphaned. Tenant networks contain
+// only workloads; ingress networks contain Traefik plus one workload while active.
 func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
 	ownedNetworks, err := g.persistedWorkloadNetworks(ctx)
 	if err != nil {
@@ -450,6 +385,9 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 		if _, owned := ownedNetworks[net.Name]; owned {
 			continue
 		}
+		if time.Since(net.Created) < minNetworkAge {
+			continue
+		}
 		// NetworkList may omit endpoint membership. Inspect every possible
 		// orphan before removal; on inspection failure, abort this cleanup pass.
 		if net.Containers > 1 {
@@ -460,7 +398,23 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 			return nil, fmt.Errorf("inspect candidate network %s: %w", net.Name, err)
 		}
 		if inspected.Containers == 0 || (inspected.Containers == 1 && onlyTraefik(inspected.ContainerNames)) {
-			orphaned = append(orphaned, inspected)
+			// The container list includes stopped containers, which have no live
+			// endpoint; skip the network if any non-Traefik container still uses it.
+			names, err := g.docker.ListNetworkContainers(ctx, net.Name)
+			if err != nil {
+				log.Printf("gc: cannot list containers on network %s, skipping: %v", net.Name, err)
+				continue
+			}
+			inUse := false
+			for _, n := range names {
+				if strings.TrimPrefix(n, "/") != "paas-traefik" {
+					inUse = true
+				}
+			}
+			if !inUse {
+				inspected.Created = net.Created
+				orphaned = append(orphaned, inspected)
+			}
 		}
 	}
 	return orphaned, nil
@@ -527,6 +481,60 @@ func onlyTraefik(containerNames []string) bool {
 		return false
 	}
 	return strings.TrimPrefix(containerNames[0], "/") == "paas-traefik"
+}
+
+// removeUnusedBuiltImages removes tenant build and snapshot images that no
+// container uses and no service or snapshot row references.
+func (g *GC) removeUnusedBuiltImages(ctx context.Context) int {
+	images, err := g.docker.ListImages(ctx)
+	if err != nil {
+		log.Printf("gc: image list failed: %v", err)
+		return 0
+	}
+	ctrImages, err := g.docker.ListContainerImages(ctx)
+	if err != nil {
+		log.Printf("gc: container image list failed: %v", err)
+		return 0
+	}
+	inUse := map[string]bool{}
+	for _, r := range ctrImages {
+		inUse[r] = true
+	}
+	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`} {
+		rows, err := g.db.QueryContext(ctx, q)
+		if err != nil {
+			log.Printf("gc: image reference query failed: %v", err)
+			return 0 // unknown references: remove nothing
+		}
+		for rows.Next() {
+			var ref sql.NullString
+			if rows.Scan(&ref) == nil {
+				inUse[ref.String] = true
+			}
+		}
+		rows.Close()
+	}
+
+	removed := 0
+	for _, img := range images {
+		if inUse[img.ID] || time.Since(img.Created) < minImageAge {
+			continue
+		}
+		for _, tag := range img.Tags {
+			if !strings.HasPrefix(tag, "127.0.0.1:5000/ah/") && !strings.HasPrefix(tag, "127.0.0.1:5000/snapshots/") {
+				continue
+			}
+			if inUse[tag] {
+				continue
+			}
+			if err := g.docker.RemoveImage(ctx, tag); err != nil {
+				log.Printf("gc: failed to remove image %s: %v", tag, err)
+			} else {
+				removed++
+			}
+		}
+	}
+	return removed
 }
 
 func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {

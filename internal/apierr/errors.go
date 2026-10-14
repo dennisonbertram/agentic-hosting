@@ -61,6 +61,12 @@ func Forbidden(msg string) *APIError {
 	return &APIError{Code: http.StatusForbidden, Message: msg, Err: ErrForbidden}
 }
 
+// DeployFailed returns a 502 error: the platform worked but the container runtime
+// could not start, stop or remove the service's container. The cause is shown to the client.
+func DeployFailed(cause error) *APIError {
+	return &APIError{Code: http.StatusBadGateway, Message: "deploy failed: " + cause.Error(), Err: cause}
+}
+
 // WriteAPIError writes an appropriate JSON error response based on the error type.
 // Uses errors.As() to extract APIError; falls back to 500 for unknown errors.
 func WriteAPIError(w http.ResponseWriter, err error) {

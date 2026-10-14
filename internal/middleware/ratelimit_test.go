@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,6 +115,11 @@ func TestRateLimit_MissingTenantIDFailsClosed(t *testing.T) {
 // server.go NewRateLimiter(100, 200).
 func TestRateLimit_ProductionConfig_200BurstThenThrottled(t *testing.T) {
 	rl := NewRateLimiter(100, 200)
+	// Freeze the clock: at 100 req/s a slow loop (CI, -race) refills a token
+	// every 10ms, which made the 201st request flaky. The test is about the
+	// burst size, not wall-clock refill.
+	frozen := time.Now()
+	rl.now = func() time.Time { return frozen }
 	handler := newRateLimitHandler(rl)
 
 	// All 200 burst requests should pass

@@ -385,20 +385,16 @@ export AH_KEY="keyid.secret"
 
 # Register a new tenant (one-time)
 AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
+```
 
-# Deploy from git or Docker image
-./scripts/deploy.sh https://github.com/org/repo my-app 3000
-./scripts/deploy.sh nginx:alpine my-site 80
+For deploys, status, build logs and databases, use the `ahc` CLI:
 
-# Check status of everything
-./scripts/status.sh
-
-# Provision a database and wire it to a service
-./scripts/db-provision.sh my-app postgres
-./scripts/db-provision.sh my-app redis
-
-# Stream build logs
-./scripts/logs.sh my-app
+```bash
+ahc deploy https://github.com/org/repo my-app
+ahc deploy nginx:alpine my-site
+ahc status
+ahc db provision my-app postgres
+ahc build logs my-app
 ```
 
 See [`scripts/README.md`](scripts/README.md) for full documentation.

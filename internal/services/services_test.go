@@ -4,14 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
+	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
+	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,15 +29,19 @@ func TestValidateImage_AllowsPlatformLocalRegistry(t *testing.T) {
 	}{
 		{name: "docker hub image", image: "nginx:latest"},
 		{name: "docker hub namespace image", image: "library/nginx:latest"},
-		{name: "loopback registry by ip", image: "127.0.0.1:5000/tenant/my-app:latest"},
-		{name: "loopback registry by localhost", image: "localhost:5000/tenant/my-app:latest"},
-		{name: "build output image tag", image: "127.0.0.1:5000/ah/tenant-service:build123"},
+		{name: "loopback registry other tenant path", image: "127.0.0.1:5000/tenant/my-app:latest", wantErr: true},
+		{name: "localhost registry with port", image: "localhost:5000/ah/tenant-1-service:b1", wantErr: true},
+		{name: "localhost without port", image: "localhost/ah/tenant-1-service:b1", wantErr: true},
+		{name: "own build output image tag", image: "127.0.0.1:5000/ah/tenant-1-service:build123"},
+		{name: "other tenant build image", image: "127.0.0.1:5000/ah/tenant-2-service:build123", wantErr: true},
+		{name: "own snapshot image", image: "127.0.0.1:5000/snapshots/tenant-1:snap1"},
+		{name: "other tenant snapshot image", image: "127.0.0.1:5000/snapshots/tenant-2:snap1", wantErr: true},
 		{name: "external registry remains blocked", image: "evil.example.com/team/app:latest", wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateImage(tc.image)
+			err := ValidateImage("tenant-1", tc.image)
 			if tc.wantErr && err == nil {
 				t.Fatalf("ValidateImage(%q) unexpectedly succeeded", tc.image)
 			}
@@ -569,4 +578,180 @@ func seedTenantWithQuota(t *testing.T, db *sql.DB, maxServices int) {
 	if err != nil {
 		t.Fatalf("seed quota: %v", err)
 	}
+}
+
+// --- W2-A regression tests ---
+
+func newTestMgr(t *testing.T, mock *testutil.MockDockerClient, traefikDir string) (*Manager, *deployments.Store, *Service) {
+	t.Helper()
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	store := deployments.NewStore(stateDB)
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "example.com", traefikDir, store)
+	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "my-service", Image: "nginx:latest", Port: 8080})
+	require.NoError(t, err)
+	return mgr, store, svc
+}
+
+func TestRestart_RedeploysWhenContainerIDEmpty_AfterFailedPull(t *testing.T) {
+	pulls := 0
+	mock := &testutil.MockDockerClient{PullImageFn: func(ctx context.Context, img string) error {
+		pulls++
+		if pulls == 1 {
+			return errors.New("registry unreachable")
+		}
+		return nil
+	}}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+
+	require.Error(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	require.NoError(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	got, err := mgr.Get(ctx, "tenant-1", svc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	assert.NotEmpty(t, got.ContainerID)
+}
+
+func TestRestart_RedeploysAfterCircuitReset(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	_, err := mgr.db.Exec(`UPDATE services SET circuit_open = 1, status = 'failed' WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.ResetCircuitBreaker(ctx, "tenant-1", svc.ID))
+	require.NoError(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	got, err := mgr.Get(ctx, "tenant-1", svc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	assert.NotEmpty(t, got.ContainerID)
+}
+
+func TestDelete_WithSnapshot(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	_, err := mgr.db.Exec(`INSERT INTO snapshots (id, tenant_id, service_id, name, image_ref, created_at) VALUES ('snap1', 'tenant-1', ?, 's', '127.0.0.1:5000/snapshots/tenant-1:snap1', 1)`, svc.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.Delete(context.Background(), "tenant-1", svc.ID))
+
+	var n int
+	require.NoError(t, mgr.db.QueryRow(`SELECT COUNT(*) FROM snapshots WHERE service_id = ?`, svc.ID).Scan(&n))
+	assert.Equal(t, 0, n)
+	assert.Contains(t, mock.RemoveImageCalls, "127.0.0.1:5000/snapshots/tenant-1:snap1")
+}
+
+func TestDeploy_PullFailure(t *testing.T) {
+	pullErr := func(ctx context.Context, img string) error { return errors.New("not in registry") }
+	exists := func(v bool) func(context.Context, string) (bool, error) {
+		return func(context.Context, string) (bool, error) { return v, nil }
+	}
+	t.Run("pull fails, image local: deploys", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{PullImageFn: pullErr, ImageExistsFn: exists(true)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+		assert.Len(t, mock.PullImageCalls, 1)
+	})
+	t.Run("pull fails, not local: fails", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{PullImageFn: pullErr, ImageExistsFn: exists(false)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.Error(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+	})
+	t.Run("pull succeeds: pulls even if local", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{ImageExistsFn: exists(true)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+		assert.Len(t, mock.PullImageCalls, 1)
+	})
+}
+
+func TestRestart_EarlyReturnMarksDeploymentFailed(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, store, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	mock.StopContainerFn = func(ctx context.Context, id string) error { return errors.New("daemon exploded") }
+
+	require.Error(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+
+	ds, err := store.ListByService(ctx, "tenant-1", svc.ID, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, ds, 2)
+	for _, d := range ds {
+		assert.NotEqual(t, deployments.StatusDeploying, d.Status)
+	}
+}
+
+func TestUpdateName_KeepsPortEnvOverride(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	dir := t.TempDir()
+	mgr, _, svc := newTestMgr(t, mock, dir)
+	ctx := context.Background()
+	require.NoError(t, mgr.SetEnv(ctx, "tenant-1", svc.ID, map[string]string{"PORT": "9999"}))
+
+	_, err := mgr.UpdateName(ctx, "tenant-1", svc.ID, "renamed")
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(dir + "/" + svc.ID + ".yml")
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "9999")
+	assert.NotContains(t, string(data), "8080")
+}
+
+func TestIsNotFoundError(t *testing.T) {
+	assert.False(t, isNotFoundError(nil))
+	assert.False(t, isNotFoundError(errors.New("context deadline exceeded while inspecting container 404abc")))
+	assert.True(t, isNotFoundError(fmt.Errorf("wrap: %w", errdefs.NotFound(errors.New("No such container: x")))))
+}
+
+// --- W3-C: DeployImage locking ---
+
+func TestDeployImage_BlocksWhileServiceLocked(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	unlock := mgr.lockService(svc.ID)
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.DeployImage(context.Background(), "tenant-1", svc.ID, "img:1", "") }()
+
+	select {
+	case <-done:
+		t.Fatal("DeployImage ran while the service lock was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeployImage did not proceed after unlock")
+	}
+}
+
+func TestDeployImage_CircuitOpenIsConflict(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	_, err := mgr.db.Exec(`UPDATE services SET circuit_open = 1 WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+
+	err = mgr.DeployImage(context.Background(), "tenant-1", svc.ID, "img:1", "")
+	var ae *apierr.APIError
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, http.StatusConflict, ae.Code)
+	assert.Zero(t, mock.RunContainerCalls)
+}
+
+func TestDeployImage_RemoveFailureFallsBackToNameCleanup(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	mock.RemoveContainerFn = func(ctx context.Context, id string) error { return errors.New("device busy") }
+
+	require.NoError(t, mgr.DeployImage(ctx, "tenant-1", svc.ID, "img:2", ""))
+	assert.Equal(t, []string{"ah-tenant-1-" + svc.ID}, mock.StopAndRemoveByNameCalls)
 }

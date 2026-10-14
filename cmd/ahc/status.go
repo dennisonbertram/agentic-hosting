@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
+	"github.com/dennisonbertram/agentic-hosting/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +24,8 @@ Examples:
 
 Exit codes:
   0  All systems healthy
-  1  One or more services unhealthy or disk critically full`,
+  1  Health not ok, Docker unavailable, a disk over 90% full, or a service
+     failed, crashed, or has its circuit breaker open`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient(root)
 			if err != nil {
@@ -48,18 +50,17 @@ type statusReport struct {
 	Databases []ahclient.Database              `json:"databases"`
 }
 
-// isUnhealthyServiceStatus returns true for service statuses that indicate failure.
-func isUnhealthyServiceStatus(status string) bool {
-	switch status {
-	case "circuit_open", "failed", "error", "crashed":
-		return true
-	default:
-		return false
-	}
+// isUnhealthyService reports whether a service has failed, crashed, or tripped
+// its circuit breaker (a separate flag; the server never sets a circuit status).
+// "error" and "circuit_open" are also treated as unhealthy for servers or
+// older records that report them as a status.
+func isUnhealthyService(svc ahclient.Service) bool {
+	return svc.CircuitOpen || svc.Status == status.ServiceFailed || svc.Status == status.ServiceCrashed ||
+		svc.Status == status.ServiceError || svc.Status == "circuit_open"
 }
 
-func isUnhealthyDatabaseStatus(status string) bool {
-	return status == "failed" || status == "error"
+func isUnhealthyDatabaseStatus(s string) bool {
+	return s == status.DatabaseFailed || s == "error"
 }
 
 // runStatusCmd is the testable core of the status command.
@@ -82,15 +83,15 @@ func runStatusCmd(c *ahclient.Client, w io.Writer, jsonOutput bool) (int, error)
 
 	// Determine exit code
 	exitCode := 0
-	diskCritical := health.Disk.UsedPercent > 90.0 || health.DockerDisk.UsedPercent > 90.0
-	if diskCritical {
+	if health.Status != "ok" || !health.Docker.Available ||
+		health.Disk.UsedPercent > 90.0 || health.DockerDisk.UsedPercent > 90.0 {
 		exitCode = 1
 	}
 	if health.Status != "ok" || !health.Docker.Available || !health.GVisor.Available {
 		exitCode = 1
 	}
 	for _, svc := range services {
-		if isUnhealthyServiceStatus(svc.Status) {
+		if isUnhealthyService(svc) {
 			exitCode = 1
 			break
 		}
@@ -161,14 +162,17 @@ func runStatusCmd(c *ahclient.Client, w io.Writer, jsonOutput bool) (int, error)
 		headers := []string{"NAME", "STATUS", "RESTARTS"}
 		rows := make([][]string, 0, len(services))
 		for _, svc := range services {
-			status := svc.Status
+			svcStatus := svc.Status
 			// Color unhealthy statuses red
-			if isUnhealthyServiceStatus(svc.Status) {
-				status = colored(colorRed, svc.Status)
+			if svc.CircuitOpen {
+				svcStatus += " (circuit open)"
+			}
+			if isUnhealthyService(svc) {
+				svcStatus = colored(colorRed, svcStatus)
 			}
 			rows = append(rows, []string{
 				svc.Name,
-				status,
+				svcStatus,
 				strconv.Itoa(svc.CrashCount),
 			})
 		}

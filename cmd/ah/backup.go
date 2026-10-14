@@ -39,7 +39,10 @@ func runBackup(dbPath string) {
 	}
 
 	// Backup metering DB if it exists
-	meteringPath := db.MeteringPath(dbPath)
+	meteringPath := os.Getenv("AH_METER_DB_PATH")
+	if meteringPath == "" {
+		meteringPath = db.MeteringPath(dbPath)
+	}
 	if _, err := os.Stat(meteringPath); err == nil {
 		if err := backupSQLite(meteringPath, filepath.Join(backupDir, fmt.Sprintf("ah-metering-%s.db.gz", ts))); err != nil {
 			log.Printf("WARNING: backup metering db: %v", err)

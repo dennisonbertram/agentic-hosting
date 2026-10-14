@@ -181,6 +181,59 @@ test('rejects configurations that expose a direct key in relay mode', () => {
   }), /OPENROUTER_API_KEY must not be set in provider relay mode/);
 });
 
+test('filters assistant metadata for the relay continuation while preserving reasoning details', async () => {
+  const reasoningDetails = [{ type: 'reasoning.text', text: 'opaque provider detail' }];
+  let continuationAssistant;
+  let providerCalls = 0;
+  const fetchImpl = async (_url, init) => {
+    providerCalls += 1;
+    const messages = JSON.parse(init.body).messages;
+    if (providerCalls === 2) continuationAssistant = messages.at(-2);
+    const choice = providerCalls === 1
+      ? {
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            reasoning: 'additional provider metadata',
+            refusal: null,
+            annotations: [],
+            reasoning_details: reasoningDetails,
+            tool_calls: [{
+              id: 'metadata_call_1',
+              type: 'function',
+              function: { name: 'add_numbers', arguments: '{"a":8,"b":13}' },
+            }],
+          },
+        }
+      : { finish_reason: 'stop', message: { role: 'assistant', content: 'The answer is 21.' } };
+    return new Response(JSON.stringify({ choices: [choice] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await withServer({ apiKey: undefined, relayToken: 'test-relay-token-0123456789abcdef', fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 8 and 13.' }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.deepEqual(Object.keys(continuationAssistant).sort(), [
+    'content', 'reasoning_details', 'role', 'tool_calls',
+  ]);
+  assert.deepEqual(continuationAssistant.reasoning_details, reasoningDetails);
+  assert.equal(continuationAssistant.reasoning, undefined);
+  assert.equal(continuationAssistant.refusal, undefined);
+  assert.equal(continuationAssistant.annotations, undefined);
+});
+
 test('does not execute or loop on unsupported tool calls and hides provider errors', async () => {
   let providerCalls = 0;
   const fetchImpl = async () => {

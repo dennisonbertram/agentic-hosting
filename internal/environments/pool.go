@@ -25,10 +25,11 @@ var ErrPoolEmpty = errors.New("warm pool: no container available")
 
 // PoolManager manages a pool of pre-warmed containers for fast environment creation.
 type PoolManager struct {
-	db     *sql.DB
-	docker docker.Client
-	config PoolConfig
-	mu     sync.Mutex
+	db       *sql.DB
+	docker   docker.Client
+	config   PoolConfig
+	mu       sync.Mutex
+	refillMu sync.Mutex
 }
 
 // NewPoolManager creates a new pool manager.
@@ -144,6 +145,8 @@ func (p *PoolManager) pruneStaleEntries(ctx context.Context) {
 }
 
 func (p *PoolManager) refill(ctx context.Context) error {
+	p.refillMu.Lock()
+	defer p.refillMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -205,37 +208,35 @@ func (p *PoolManager) refill(ctx context.Context) error {
 			poolEntryID := fmt.Sprintf("wp_%d", time.Now().UnixNano())
 			volumeName := fmt.Sprintf("ah-pool-%s", poolEntryID)
 
-			// Create volume.
-			if err := p.docker.CreateVolume(ctx, volumeName); err != nil {
-				log.Printf("warm-pool: create volume %s failed: %v", volumeName, err)
-				break
-			}
-
-			// Ensure pool network exists (shared, non-internal for pool containers).
-			poolNet := "ah-pool"
-			if _, err := p.docker.EnsureNetwork(ctx, poolNet); err != nil {
-				log.Printf("warm-pool: ensure pool network failed: %v", err)
-				_ = p.docker.RemoveVolume(ctx, volumeName)
-				break
-			}
-
-			containerID, err := p.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
-				TenantID:    "pool",
-				EnvID:       poolEntryID,
-				Image:       tmpl.Image,
-				MemoryMB:    tmpl.MemoryMB,
-				CPUMillis:   tmpl.CPUMillis,
-				VolumeName:  volumeName,
-				NetworkName: poolNet,
-				Labels: map[string]string{
-					"ah.managed":  "true",
-					"ah.type":     "warm-pool",
-					"ah.template": tmpl.ID,
-				},
-			})
-			if err != nil {
-				log.Printf("warm-pool: run container for %s failed: %v", tmpl.ID, err)
-				_ = p.docker.RemoveVolume(ctx, volumeName)
+			// Image pulls can be slow. Leave ready entries available while Docker
+			// creates a replacement container.
+			var containerID string
+			createErr := func() error {
+				p.mu.Unlock()
+				defer p.mu.Lock()
+				if err := p.docker.CreateVolume(ctx, volumeName); err != nil {
+					return err
+				}
+				poolNet := "ah-pool"
+				if _, err := p.docker.EnsureNetwork(ctx, poolNet); err != nil {
+					_ = p.docker.RemoveVolume(ctx, volumeName)
+					return err
+				}
+				var err error
+				containerID, err = p.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
+					TenantID: "pool", EnvID: poolEntryID, Image: tmpl.Image,
+					MemoryMB: tmpl.MemoryMB, CPUMillis: tmpl.CPUMillis,
+					VolumeName: volumeName, NetworkName: poolNet,
+					Labels:   map[string]string{"ah.managed": "true", "ah.template": tmpl.ID},
+					WarmPool: true,
+				})
+				if err != nil {
+					_ = p.docker.RemoveVolume(ctx, volumeName)
+				}
+				return err
+			}()
+			if createErr != nil {
+				log.Printf("warm-pool: create container for %s failed: %v", tmpl.ID, createErr)
 				break
 			}
 

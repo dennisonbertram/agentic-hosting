@@ -227,16 +227,26 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		poolContainerID, poolVolumeName, poolErr := m.pool.Acquire(ctx, tmpl.ID)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
-			// Move the pool container from ah-pool network to the tenant network.
-			_ = m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
-			if connErr := m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID); connErr != nil {
-				log.Printf("environments: failed to connect pool container to tenant network, falling back to cold start: %v", connErr)
-				// Fall through to cold path; the pool container stays in its state.
+			transferErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
+			if transferErr == nil {
+				transferErr = m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID)
+			}
+			if transferErr == nil {
+				transferErr = m.docker.RenameContainer(ctx, poolContainerID,
+					fmt.Sprintf("ah-env-%s-%s", tenantID, id))
+			}
+			if transferErr == nil {
+				_, transferErr = m.db.ExecContext(ctx,
+					`UPDATE environments SET volume_name = ? WHERE id = ?`, poolVolumeName, id)
+			}
+			if transferErr != nil {
+				log.Printf("environments: warm container transfer failed, falling back to cold start: %v", transferErr)
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = m.docker.StopContainer(cleanupCtx, poolContainerID)
+				_ = m.docker.RemoveContainer(cleanupCtx, poolContainerID)
+				_ = m.docker.RemoveVolume(cleanupCtx, poolVolumeName)
+				cancel()
 			} else {
-				// Update the DB volume_name to match the pool volume.
-				_, _ = m.db.ExecContext(ctx,
-					`UPDATE environments SET volume_name = ? WHERE id = ?`,
-					poolVolumeName, id)
 				volumeName = poolVolumeName
 				containerID = poolContainerID
 				usedPool = true
@@ -411,17 +421,43 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		return apierr.Validation(fmt.Sprintf("environment must be stopped to start (current: %s)", e.Status))
 	}
 
+	containerID := e.ContainerID
 	if err := m.docker.StartContainer(ctx, e.ContainerID); err != nil {
-		return fmt.Errorf("start container: %w", err)
+		if !isNotFoundError(err) {
+			return fmt.Errorf("start container: %w", err)
+		}
+		// The container may have been removed while its named workspace volume
+		// survived. Recreate it from the same template and keep that volume.
+		tmpl, tmplErr := m.GetTemplate(ctx, e.TemplateID)
+		if tmplErr != nil {
+			return fmt.Errorf("load environment template for recovery: %w", tmplErr)
+		}
+		networkName := docker.TenantNetworkName(tenantID)
+		if _, networkErr := m.docker.EnsureNetwork(ctx, networkName); networkErr != nil {
+			return fmt.Errorf("ensure environment network for recovery: %w", networkErr)
+		}
+		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
+			TenantID: tenantID, EnvID: envID, Image: tmpl.BaseImage,
+			MemoryMB: int64(tmpl.MemoryMB), CPUMillis: int64(tmpl.CPUMillis),
+			VolumeName: e.VolumeName, NetworkName: networkName,
+			EgressAllow: tmpl.EgressPolicy == "allow",
+		})
+		if err != nil {
+			return fmt.Errorf("recreate missing environment container: %w", err)
+		}
 	}
 
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(e.LeaseDurationSeconds)
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'running', lease_expires_at = ?,
+		`UPDATE environments SET container_id = ?, status = 'running', lease_expires_at = ?,
 		 last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		leaseExpiresAt, now, now, envID,
+		containerID, leaseExpiresAt, now, now, envID,
 	)
+	if err != nil && containerID != e.ContainerID {
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+	}
 	return err
 }
 

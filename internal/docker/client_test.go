@@ -132,6 +132,22 @@ func TestContainerName(t *testing.T) {
 	}
 }
 
+func TestEnvironmentContainerLabelsKeepLifecycleTypeReserved(t *testing.T) {
+	base := RunEnvironmentConfig{
+		TenantID: "tenant-1", EnvID: "env-1",
+		Labels: map[string]string{"ah.type": "attacker-value", "ah.tenant": "attacker-tenant"},
+	}
+	labels := environmentContainerLabels(base)
+	if labels["ah.type"] != "environment" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("environment labels did not preserve reserved identity: %#v", labels)
+	}
+	base.WarmPool = true
+	labels = environmentContainerLabels(base)
+	if labels["ah.type"] != "warm-pool" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("warm-pool lifecycle was not explicitly applied: %#v", labels)
+	}
+}
+
 func TestTenantNetworkName(t *testing.T) {
 	tests := []struct {
 		tenantID string

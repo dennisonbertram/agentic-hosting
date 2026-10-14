@@ -6,8 +6,8 @@ import (
 	"database/sql"
 	"log"
 	"os"
-	"runtime/debug"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -313,7 +313,8 @@ func (g *GC) findOrphanedContainers(ctx context.Context) ([]string, error) {
 
 			var count int
 			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM warm_pool WHERE container_id = ?`, id).Scan(&count)
+				`SELECT (SELECT COUNT(*) FROM warm_pool WHERE container_id = ?) +
+				        (SELECT COUNT(*) FROM environments WHERE container_id = ?)`, id, id).Scan(&count)
 			if err != nil {
 				log.Printf("gc: DB error checking warm-pool container %s, skipping: %v", id[:12], err)
 				continue
@@ -411,7 +412,8 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 
 			var count int
 			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?`, name).Scan(&count)
+				`SELECT (SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?) +
+				        (SELECT COUNT(*) FROM environments WHERE volume_name = ?)`, name, name).Scan(&count)
 			if err != nil {
 				log.Printf("gc: DB error checking pool volume %s, skipping: %v", name, err)
 				continue

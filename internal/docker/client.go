@@ -2,9 +2,9 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"bytes"
 	"io"
 	"log"
 	"strings"
@@ -696,6 +696,7 @@ type RunEnvironmentConfig struct {
 	NetworkName string
 	Labels      map[string]string
 	EgressAllow bool
+	WarmPool    bool // explicit lifecycle marker for containers created for the warm pool
 }
 
 // RunEnvironment creates and starts an environment container with gVisor runtime.
@@ -712,15 +713,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	// Build labels; ah.* keys are set last and cannot be overridden.
-	labels := make(map[string]string, len(cfg.Labels)+4)
-	for k, v := range cfg.Labels {
-		labels[k] = v
-	}
-	labels["ah.tenant"] = cfg.TenantID
-	labels["ah.environment"] = cfg.EnvID
-	labels["ah.type"] = "environment"
-	labels["traefik.enable"] = "false"
+	labels := environmentContainerLabels(cfg)
 
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
@@ -776,6 +769,22 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	}
 
 	return resp.ID, nil
+}
+
+func environmentContainerLabels(cfg RunEnvironmentConfig) map[string]string {
+	labels := make(map[string]string, len(cfg.Labels)+4)
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	labels["ah.tenant"] = cfg.TenantID
+	labels["ah.environment"] = cfg.EnvID
+	if cfg.WarmPool {
+		labels["ah.type"] = "warm-pool"
+	} else {
+		labels["ah.type"] = "environment"
+	}
+	labels["traefik.enable"] = "false"
+	return labels
 }
 
 // RenameContainer renames a container.

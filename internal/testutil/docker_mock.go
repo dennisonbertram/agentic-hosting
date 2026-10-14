@@ -135,6 +135,7 @@ type MockDockerClient struct {
 	// RenameContainer
 	RenameContainerFn    func(ctx context.Context, containerID, newName string) error
 	RenameContainerCalls int
+	RenameContainerArgs  [][2]string // [containerID, newName]
 
 	// CopyToContainer
 	CopyToContainerFn    func(ctx context.Context, containerID string, dstPath string, content io.Reader) error
@@ -386,6 +387,7 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 
 func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
 	m.RenameContainerCalls++
+	m.RenameContainerArgs = append(m.RenameContainerArgs, [2]string{containerID, newName})
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
 	}

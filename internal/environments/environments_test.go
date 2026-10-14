@@ -3,6 +3,7 @@ package environments
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -785,6 +786,22 @@ func TestCreate_UsesPoolWhenAvailable(t *testing.T) {
 	// The environment's container ID should be the pool container.
 	assert.Equal(t, "pool-container-abc", env.ContainerID,
 		"environment should use the pool container ID")
+	assert.Equal(t, [][2]string{{"pool-container-abc", "ah-env-" + testTenantID + "-" + env.ID}}, mock.RenameContainerArgs,
+		"a claimed pool container must be renamed to the environment name used by preview routing")
+}
+
+func TestCreateCleansUpWarmContainerWhenNetworkTransferFails(t *testing.T) {
+	mgr, mock, _, sharedDB := newTestManagerWithPool(t, 5)
+	insertWarmPoolEntry(t, sharedDB, "wp_fail", "tmpl_default", "pool-fails", "ah-pool-wp_fail")
+	mock.NetworkDisconnectFn = func(context.Context, string, string) error { return fmt.Errorf("disconnect failed") }
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		return "cold-fallback", nil
+	}
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "fallback-env", TemplateID: "default"})
+	require.NoError(t, err)
+	assert.Equal(t, "cold-fallback", env.ContainerID)
+	assert.Contains(t, mock.RemoveContainerCalls, "pool-fails", "failed transfer must not orphan the claimed pool container")
+	assert.Contains(t, mock.RemoveVolumeCalls, "ah-pool-wp_fail", "failed transfer must clean the unclaimed pool volume")
 }
 
 // TestCreate_FallsBackToColdStartWhenPoolEmpty verifies that when the pool
@@ -809,6 +826,27 @@ func TestCreate_FallsBackToColdStartWhenPoolEmpty(t *testing.T) {
 	assert.Equal(t, 1, mock.RunEnvironmentCalls,
 		"RunEnvironment must be called when pool is empty (cold start)")
 	assert.Equal(t, "cold-container-xyz", env.ContainerID)
+}
+
+func TestStartRecreatesMissingContainerWithExistingWorkspaceVolume(t *testing.T) {
+	mgr, mock, _, _ := newTestManagerWithPool(t, 5)
+	var runs int
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		runs++
+		if runs == 1 {
+			return "original-container", nil
+		}
+		return "replacement-container", nil
+	}
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "recover-env", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	mock.StartContainerFn = func(context.Context, string) error { return fmt.Errorf("No such container: original-container") }
+	require.NoError(t, mgr.Start(context.Background(), testTenantID, env.ID))
+	recovered, err := mgr.Get(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "replacement-container", recovered.ContainerID)
+	assert.Equal(t, env.VolumeName, recovered.VolumeName, "recovery must preserve existing workspace contents")
 }
 
 // insertWarmPoolEntry inserts a ready warm pool entry into the given DB.

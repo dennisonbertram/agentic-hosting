@@ -164,11 +164,11 @@ func TestCollectOnce_PrunesDanglingImages(t *testing.T) {
 
 // mockSnapshotCleaner implements SnapshotCleaner for testing.
 type mockSnapshotCleaner struct {
-	called          bool
-	maxPerService   int
-	maxAge          time.Duration
-	returnRemoved   int
-	returnErr       error
+	called        bool
+	maxPerService int
+	maxAge        time.Duration
+	returnRemoved int
+	returnErr     error
 }
 
 func (m *mockSnapshotCleaner) CleanExpired(ctx context.Context, maxPerService int, maxAge time.Duration) (int, error) {
@@ -433,6 +433,40 @@ func TestCollectOnce_PreservesPoolVolumeInDB(t *testing.T) {
 
 	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-referenced-vol",
 		"pool volume with a matching warm_pool row must NOT be removed by GC")
+}
+
+func TestCollectOnce_PreservesPoolVolumeOwnedByEnvironment(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		VALUES ('tenant_gc', 'GC test', 'gc@test.invalid', 'active', ?, ?)`, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO environments
+		(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+		VALUES ('env_gc', 'tenant_gc', 'workspace', 'tmpl_default', 'running', 'pool-ctr-owned', 'ah-pool-reused', 1, 1)`)
+	require.NoError(t, err)
+	mock := &testutil.MockDockerClient{
+		ListContainersByLabelFn: func(ctx context.Context, label, value string) ([]string, error) {
+			if label == "ah.type" && value == "warm-pool" {
+				return []string{"pool-ctr-owned"}, nil
+			}
+			return nil, nil
+		},
+		InspectContainerFn: func(context.Context, string) (*docker.ContainerInfo, error) {
+			return &docker.ContainerInfo{Status: "running", CreatedAt: time.Now().Add(-time.Hour)}, nil
+		},
+		ListVolumesFn: func(ctx context.Context, prefix string) ([]string, error) {
+			if prefix == "ah-pool-" {
+				return []string{"ah-pool-reused"}, nil
+			}
+			return nil, nil
+		},
+	}
+	require.NoError(t, New(stateDB, mock, 5*time.Minute, t.TempDir()).collectOnce(context.Background()))
+	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-reused",
+		"GC must preserve a pool volume after ownership transfers to an environment")
+	assert.NotContains(t, mock.RemoveContainerCalls, "pool-ctr-owned",
+		"GC must preserve a pool-labeled container after ownership transfers to an environment")
 }
 
 // TestCollectOnce_RemovesOrphanedPoolContainers verifies that warm-pool

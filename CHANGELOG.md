@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Master key rotation no longer invalidates API keys** — API key hashes now use a dedicated HMAC key stored encrypted in new `server_secrets` table (seeded from the current master key so existing keys keep working); `ah rotate-key` re-encrypts it.
+
 ### Added
 
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)

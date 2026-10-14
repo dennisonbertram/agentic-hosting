@@ -17,10 +17,18 @@ func TestAuth_SurvivesMasterKeyRotation(t *testing.T) {
 	tenantID := insertTenant(t, sqlDB, "active")
 	token := insertAPIKey(t, sqlDB, tenantID, nil, nil) // hashed under testMasterKey
 
-	_, err := crypto.RotateKeys(sqlDB, testMasterKey, newKey, false)
+	// Startup with the old master key creates the hash key row (legacy value).
+	oldHashKey, err := crypto.LoadOrCreateAPIKeyHashKey(sqlDB, testMasterKey)
+	require.NoError(t, err)
+	require.Equal(t, testMasterKey, oldHashKey) // pre-migration hashes stay valid
+
+	_, err = crypto.RotateKeys(sqlDB, testMasterKey, newKey, false)
 	require.NoError(t, err)
 
-	mw, _ := Auth(sqlDB, newKey)
+	// Restart with the new master key.
+	hashKey, err := crypto.LoadOrCreateAPIKeyHashKey(sqlDB, newKey)
+	require.NoError(t, err)
+	mw, _ := Auth(sqlDB, hashKey)
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)

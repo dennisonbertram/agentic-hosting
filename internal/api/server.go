@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"context"
 	"errors"
 	"fmt"
@@ -64,6 +65,7 @@ type databaseManager interface {
 type Server struct {
 	store             *db.Store
 	masterKey         []byte
+	apiKeyHashKey     []byte // HMAC key for API key hashes; independent of master key rotation
 	devMode           bool
 	bootstrapTokens   []string
 	openRegistration  bool
@@ -91,7 +93,11 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	// Initialize auth middleware and cache invalidator early so they are
 	// guaranteed non-nil before any request can arrive.
-	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, cfg.MasterKey)
+	hashKey, err := crypto.LoadOrCreateAPIKeyHashKey(cfg.Store.StateDB, cfg.MasterKey)
+	if err != nil {
+		panic("ah: " + err.Error())
+	}
+	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, hashKey)
 	rl := middleware.NewRateLimiter(100, 200)
 	globalRL := middleware.NewGlobalRateLimiter(500, 1000)
 	idem := middleware.NewIdempotencyStore()
@@ -106,6 +112,7 @@ func NewServer(cfg ServerConfig) *Server {
 	s := &Server{
 		store:             cfg.Store,
 		masterKey:         cfg.MasterKey,
+		apiKeyHashKey:     hashKey,
 		devMode:           cfg.DevMode,
 		bootstrapTokens:   cfg.BootstrapTokens,
 		openRegistration:  cfg.OpenRegistration,

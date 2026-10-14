@@ -357,7 +357,7 @@ func databaseImage(dbType string) string {
 func (m *Manager) Get(ctx context.Context, tenantID, dbID string) (*Database, error) {
 	d := &Database{}
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, type, status, container_id, host, port, db_name, username,
+		`SELECT id, tenant_id, name, type, status, COALESCE(container_id, ''), host, port, db_name, username,
 		 volume_name, created_at, updated_at
 		 FROM databases WHERE id = ? AND tenant_id = ?`,
 		dbID, tenantID,

@@ -522,3 +522,46 @@ func seedDatabaseTestData(t *testing.T, stateDB *sql.DB, maxDatabases int) {
 	)
 	require.NoError(t, err)
 }
+
+func TestGetAndDeleteDatabaseWithNullContainerID(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	dockerClient := &testutil.MockDockerClient{}
+	mgr := NewManager(stateDB, dockerClient, []byte("0123456789abcdef0123456789abcdef"))
+	for _, tc := range []struct {
+		id     string
+		status string
+	}{
+		{id: "failed-create", status: "failed"},
+		{id: "provisioning-create", status: "provisioning"},
+	} {
+		_, err := stateDB.Exec(`INSERT INTO databases
+			(id, tenant_id, name, type, status, container_id, port, db_name, username, password_encrypted, volume_name, created_at, updated_at)
+			VALUES (?, 'tenant-1', ?, 'redis', ?, NULL, 16379, '', '', 'encrypted', ?, 1, 1)`,
+			tc.id, tc.id, tc.status, "volume-"+tc.id)
+		require.NoError(t, err)
+	}
+
+	for _, tc := range []struct {
+		id     string
+		status string
+	}{
+		{id: "failed-create", status: "failed"},
+		{id: "provisioning-create", status: "provisioning"},
+	} {
+		db, err := mgr.Get(context.Background(), "tenant-1", tc.id)
+		require.NoError(t, err)
+		assert.Equal(t, tc.status, db.Status)
+		assert.Empty(t, db.ContainerID)
+	}
+
+	err := mgr.Delete(context.Background(), "tenant-1", "failed-create")
+	require.NoError(t, err)
+	assert.Empty(t, dockerClient.StopContainerCalls)
+	assert.Empty(t, dockerClient.RemoveContainerCalls)
+	assert.Equal(t, []string{"volume-failed-create"}, dockerClient.WipeVolumeCalls)
+	assert.Equal(t, []string{"volume-failed-create"}, dockerClient.RemoveVolumeCalls)
+	var count int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM databases WHERE id = 'failed-create'`).Scan(&count))
+	assert.Zero(t, count)
+}

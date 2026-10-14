@@ -659,7 +659,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	// The user may have deleted the service while we were pulling.
 	svc, err = m.getOwned(ctx, tenantID, serviceID)
 	if err != nil {
-		return fmt.Errorf("service deleted during deploy")
+		return fmt.Errorf("service deleted or circuit opened during deploy")
 	}
 
 	// Remove existing container before creating new one to prevent
@@ -712,7 +712,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		now := time.Now().Unix()
 		url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
 		res, err := m.db.ExecContext(ctx,
-			`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+			`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
 			containerID, url, now, serviceID, tenantID,
 		)
 		if err != nil {
@@ -724,11 +724,11 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			// Service was deleted while we were deploying; clean up the container
-			log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
+			log.Printf("WARNING: service %s was deleted (or circuit opened) during deploy; removing orphan container %s", serviceID, containerID)
 			_ = m.docker.StopContainer(ctx, containerID)
 			_ = m.docker.RemoveContainer(ctx, containerID)
-			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
-			return fmt.Errorf("service deleted during deploy")
+			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted or circuit opened during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
+			return fmt.Errorf("service deleted or circuit opened during deploy")
 		}
 	}
 
@@ -964,7 +964,12 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	// Every error return below leaves the deployment row 'failed', not 'deploying'.
 	defer func() {
 		if retErr != nil {
-			m.updateDeploymentStatus(context.WithoutCancel(ctx), deployID, deployments.StatusFailed, deployments.WithError(retErr.Error()), deployments.WithCompletedAt(time.Now().Unix()))
+			bg := context.WithoutCancel(ctx)
+			m.updateDeploymentStatus(bg, deployID, deployments.StatusFailed, deployments.WithError(retErr.Error()), deployments.WithCompletedAt(time.Now().Unix()))
+			// Failed before the old container was dropped: hand the row back to the reconciler.
+			_, _ = m.db.ExecContext(bg,
+				`UPDATE services SET status = ?, last_error = ? WHERE id = ? AND tenant_id = ? AND container_id = ? AND status = 'restarting'`,
+				svc.Status, retErr.Error(), serviceID, tenantID, svc.ContainerID)
 		}
 	}()
 
@@ -973,6 +978,19 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	// context.WithoutCancel preserves request-scoped values while dropping client cancellation.
 	opCtx, opCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer opCancel()
+
+	// Take the row out of the reconciler's watch (it only scans running/crashed) BEFORE
+	// touching the container, keeping container_id so a failure here stays recoverable.
+	// Otherwise a tick between the stop and this update records a phantom crash.
+	casRes, casErr := m.db.ExecContext(opCtx,
+		`UPDATE services SET status = 'restarting', updated_at = ? WHERE id = ? AND tenant_id = ? AND container_id = ? AND circuit_open = 0`,
+		time.Now().Unix(), serviceID, tenantID, svc.ContainerID)
+	if casErr != nil {
+		return fmt.Errorf("mark service restarting: %w", casErr)
+	}
+	if n, _ := casRes.RowsAffected(); n == 0 {
+		return apierr.Conflict("service changed while restarting (circuit opened or container replaced); retry")
+	}
 
 	// Stop and remove the existing container.
 	log.Printf("services: restarting service %s — stopping container %s", serviceID, cidShort(svc.ContainerID))
@@ -983,12 +1001,12 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 			// Container is already stopped — safe to proceed to remove + recreate.
 			log.Printf("services: container %s already stopped during restart of %s", cidShort(svc.ContainerID), serviceID)
 		} else {
-			return fmt.Errorf("stop container: %w", err)
+			return apierr.DeployFailed(fmt.Errorf("stop container: %w", err))
 		}
 	}
 	if err := m.docker.RemoveContainer(opCtx, svc.ContainerID); err != nil {
 		if !isNotFoundError(err) {
-			return fmt.Errorf("remove container: %w", err)
+			return apierr.DeployFailed(fmt.Errorf("remove container: %w", err))
 		}
 	}
 	// Fallback cleanup by deterministic container name in case DB had a stale container_id.
@@ -1001,11 +1019,11 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 			_, verErr := m.docker.InspectContainer(opCtx, expectedName)
 			if verErr == nil {
 				// Container still exists; abort to avoid orphaning a running container.
-				return fmt.Errorf("container still exists after cleanup attempt (%s): %v — retry restart or redeploy", expectedName, cleanErr)
+				return apierr.DeployFailed(fmt.Errorf("container still exists after cleanup attempt (%s): %v — retry restart or redeploy", expectedName, cleanErr))
 			}
 			if !isNotFoundError(verErr) {
 				// Inspect failed for a non-404 reason — cannot confirm absence; fail closed.
-				return fmt.Errorf("cannot confirm container absence (inspect error=%v, remove error=%v) — retry restart or redeploy", verErr, cleanErr)
+				return apierr.DeployFailed(fmt.Errorf("cannot confirm container absence (inspect error=%v, remove error=%v) — retry restart or redeploy", verErr, cleanErr))
 			}
 			// isNotFoundError(verErr): container is definitely gone; safe to proceed.
 		}
@@ -1055,7 +1073,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	// back to default networking and break tenant isolation).
 	if _, err := m.docker.EnsureNetwork(opCtx, docker.TenantNetworkName(tenantID)); err != nil {
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("network setup failed: %v", err))
-		return fmt.Errorf("ensure tenant network: %w", err)
+		return apierr.DeployFailed(fmt.Errorf("ensure tenant network: %w", err))
 	}
 
 	// Load resource limits from tenant quotas.
@@ -1070,11 +1088,11 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 		if traefikErr := m.deleteTraefikRoute(serviceID); traefikErr != nil {
 			log.Printf("WARNING: failed to delete traefik route for service %s after restart failure: %v", serviceID, traefikErr)
 		}
-		return fmt.Errorf("run container: %w", err)
+		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
 	}
 
 	dbUpdRes, dbUpdErr := m.db.ExecContext(opCtx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
 		containerID, time.Now().Unix(), serviceID, tenantID,
 	)
 	if dbUpdErr != nil {
@@ -1085,10 +1103,10 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 		return fmt.Errorf("update service after restart: %w", dbUpdErr)
 	}
 	if n, _ := dbUpdRes.RowsAffected(); n == 0 {
-		log.Printf("WARNING: service %s was deleted during restart; removing orphan container %s", serviceID, containerID)
+		log.Printf("WARNING: service %s was deleted (or circuit opened) during restart; removing orphan container %s", serviceID, containerID)
 		_ = m.docker.StopContainer(opCtx, containerID)
 		_ = m.docker.RemoveContainer(opCtx, containerID)
-		return fmt.Errorf("service deleted during restart")
+		return fmt.Errorf("service deleted or circuit opened during restart")
 	}
 
 	m.updateDeploymentStatus(opCtx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
@@ -1101,6 +1119,20 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	return nil
 }
 
+// containersGone reports whether none of the given containers (IDs or names; empty skipped) exist.
+// An inspect error other than not-found counts as "cannot confirm", i.e. not gone.
+func (m *Manager) containersGone(ctx context.Context, refs ...string) bool {
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		if _, err := m.docker.InspectContainer(ctx, ref); err == nil || !isNotFoundError(err) {
+			return false
+		}
+	}
+	return true
+}
+
 // Delete stops and removes the container, then deletes the DB record.
 func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error {
 	svc, err := m.getOwned(ctx, tenantID, serviceID)
@@ -1111,20 +1143,28 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 	unlock := m.lockService(serviceID)
 	defer unlock()
 
+	removeFailed := false
 	if svc.ContainerID != "" {
 		if stopErr := m.docker.StopContainer(ctx, svc.ContainerID); stopErr != nil {
 			log.Printf("WARNING: failed to stop container %s for service %s: %v", svc.ContainerID, serviceID, stopErr)
 		}
 		if rmErr := m.docker.RemoveContainer(ctx, svc.ContainerID); rmErr != nil {
+			removeFailed = !isNotFoundError(rmErr)
 			log.Printf("WARNING: failed to remove container %s for service %s: %v (orphan container may remain)", svc.ContainerID, serviceID, rmErr)
 		}
 	}
 	// Also try cleanup by deterministic container name to catch split-brain orphans
 	// where a container exists but DB doesn't have its ID.
 	expectedName := fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
-	if cleanupErr := m.docker.StopAndRemoveByName(ctx, expectedName); cleanupErr != nil {
-		// Not an error — container may not exist by this name
+	cleanupErr := m.docker.StopAndRemoveByName(ctx, expectedName)
+	if cleanupErr != nil {
 		log.Printf("services: cleanup by name %s: %v", expectedName, cleanupErr)
+	}
+	// If any removal failed for a reason other than "not found", confirm the container is
+	// really gone. Deleting the row while an unless-stopped container survives would
+	// leave it running with nothing tracking it.
+	if (removeFailed || (cleanupErr != nil && !isNotFoundError(cleanupErr))) && !m.containersGone(ctx, svc.ContainerID, expectedName) {
+		return fmt.Errorf("container still exists after cleanup — retry delete")
 	}
 
 	// Remove Traefik file-provider route (non-fatal on error)

@@ -238,6 +238,16 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			newBaseline = sql.NullInt64{Int64: int64(info.RestartCount), Valid: true}
 		}
 
+		// A crashed row already at the threshold means an earlier breaker trip could not
+		// stop the container; retry it.
+		if crashes == 0 && s.status == "crashed" && s.crashCount >= crashThreshold &&
+			s.windowStart.Valid && now-s.windowStart.Int64 < crashWindowSecs {
+			if r.tripBreaker(ctx, s.id, s.tenantID, s.containerID, s.circuitOpenCount) {
+				fixed++
+			}
+			continue
+		}
+
 		if crashes == 0 {
 			newStatus := s.status
 			if s.status == "crashed" && info != nil && info.Status == "running" &&
@@ -267,10 +277,6 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			windowStart, crashCount = now, crashes
 		}
 		open := crashCount >= crashThreshold
-		openInt := 0
-		if open {
-			openInt = 1
-		}
 		res, err := r.db.ExecContext(ctx, `
 			UPDATE services SET
 				status = 'crashed',
@@ -279,13 +285,9 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				last_crashed_at = ?,
 				last_error = ?,
 				last_restart_count = ?,
-				circuit_open = ?,
-				circuit_retry_at = CASE WHEN ? = 1 THEN ? ELSE circuit_retry_at END,
-				circuit_open_count = circuit_open_count + ?,
 				updated_at = ?
 			WHERE id = ? AND tenant_id = ? AND status = ? AND container_id = ?`,
 			windowStart, crashCount, now, crashReason, newBaseline,
-			openInt, openInt, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), openInt,
 			now, s.id, s.tenantID, s.status, s.containerID)
 		if err != nil {
 			log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
@@ -297,15 +299,24 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 
 		if open {
-			log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
-			// Stop first to defeat the restart policy, then remove.
-			_ = r.docker.StopContainer(ctx, s.containerID)
-			_ = r.docker.RemoveContainer(ctx, s.containerID)
+			r.tripBreaker(ctx, s.id, s.tenantID, s.containerID, s.circuitOpenCount)
 		} else if needRestart {
 			// A manual stop would stay stopped under unless-stopped, so restart instead.
 			log.Printf("reconciler: service %s container %s is unhealthy — restarting", s.id, shortID(s.containerID))
 			if rerr := r.docker.RestartContainer(ctx, s.containerID); rerr != nil {
 				log.Printf("reconciler: failed to restart unhealthy container for service %s: %v", s.id, rerr)
+			} else {
+				// Manager.Stop does not share a lock with the reconciler. If it marked the
+				// row stopped (or replaced the container) meanwhile, undo the restart.
+				var curStatus, curCID string
+				qerr := r.db.QueryRowContext(ctx, `SELECT status, container_id FROM services WHERE id = ? AND tenant_id = ?`,
+					s.id, s.tenantID).Scan(&curStatus, &curCID)
+				if qerr == nil && curCID == s.containerID && curStatus != "running" && curStatus != "crashed" {
+					log.Printf("reconciler: service %s changed to %s during unhealthy restart, stopping container again", s.id, curStatus)
+					if serr := r.docker.StopContainer(ctx, s.containerID); serr != nil && !isNotFoundError(serr) {
+						log.Printf("reconciler: failed to re-stop container for service %s: %v", s.id, serr)
+					}
+				}
 			}
 		}
 		log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
@@ -581,21 +592,26 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 		leaseRows.Close()
 		for _, l := range expired {
+			// Claim the row first (re-checking the lease), so a concurrent lease renewal
+			// wins cleanly and is never followed by a stop. If the stop fails the row stays
+			// 'stopped' and the retry pass above stops the container on a later tick.
+			res, err := r.db.ExecContext(ctx,
+				`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'running' AND container_id = ? AND lease_expires_at < ?`,
+				time.Now().Unix(), l.id, l.tenantID, l.containerID, leaseNow)
+			if err != nil {
+				log.Printf("reconciler: failed to expire environment lease %s: %v", l.id, err)
+				continue
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
+			}
 			if l.containerID != "" {
 				if stopErr := r.docker.StopContainer(ctx, l.containerID); stopErr != nil && !isNotFoundError(stopErr) {
 					log.Printf("reconciler: failed to stop expired environment container %s, will retry: %v", shortID(l.containerID), stopErr)
-					continue
 				}
 			}
-			res, err := r.db.ExecContext(ctx,
-				`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'running' AND container_id = ?`,
-				time.Now().Unix(), l.id, l.tenantID, l.containerID)
-			if err != nil {
-				log.Printf("reconciler: failed to expire environment lease %s: %v", l.id, err)
-			} else if n, _ := res.RowsAffected(); n > 0 {
-				log.Printf("reconciler: expired environment lease %s", l.id)
-				fixed++
-			}
+			log.Printf("reconciler: expired environment lease %s", l.id)
+			fixed++
 		}
 	}
 
@@ -638,4 +654,32 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// tripBreaker stops and removes the container, and only then commits circuit_open=1 and
+// clears container_id. If the container cannot be stopped or removed, the row stays
+// crashed and watched so the next tick retries. Reports whether the circuit opened.
+func (r *Reconciler) tripBreaker(ctx context.Context, id, tenantID, containerID string, openCount int) bool {
+	log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", id)
+	// Stop first to defeat the restart policy, then remove.
+	if err := r.docker.StopContainer(ctx, containerID); err != nil && !isNotFoundError(err) {
+		log.Printf("reconciler: service %s breaker trip: stop %s failed, will retry: %v", id, shortID(containerID), err)
+		return false
+	}
+	if err := r.docker.RemoveContainer(ctx, containerID); err != nil && !isNotFoundError(err) {
+		log.Printf("reconciler: service %s breaker trip: remove %s failed, will retry: %v", id, shortID(containerID), err)
+		return false
+	}
+	now := time.Now()
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE services SET circuit_open = 1, container_id = '', circuit_retry_at = ?,
+			circuit_open_count = circuit_open_count + 1, updated_at = ?
+		WHERE id = ? AND tenant_id = ? AND status = 'crashed' AND container_id = ?`,
+		now.Add(circuitRetryBackoff(openCount+1)).Unix(), now.Unix(), id, tenantID, containerID)
+	if err != nil {
+		log.Printf("reconciler: service %s breaker trip: commit failed: %v", id, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }

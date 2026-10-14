@@ -126,7 +126,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	now := time.Now().Unix()
 	url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
 	res, err := m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
 		containerID, url, now, serviceID, tenantID,
 	)
 	if err != nil {
@@ -136,11 +136,11 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return fmt.Errorf("update service: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		log.Printf("WARNING: service %s was deleted during deploy; removing orphan container %s", serviceID, containerID)
+		log.Printf("WARNING: service %s was deleted (or circuit opened) during deploy; removing orphan container %s", serviceID, containerID)
 		_ = m.docker.StopContainer(ctx, containerID)
 		_ = m.docker.RemoveContainer(ctx, containerID)
-		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
-		return fmt.Errorf("service deleted during deploy")
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted or circuit opened during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
+		return fmt.Errorf("service deleted or circuit opened during deploy")
 	}
 
 	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
@@ -148,7 +148,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	// Write Traefik file-provider route (non-fatal on error). Re-verify under the
 	// lock that the service still exists so a concurrent Delete cannot leave a stale route.
 	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
-		return fmt.Errorf("service deleted during deploy")
+		return fmt.Errorf("service deleted or circuit opened during deploy")
 	}
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
 		log.Printf("WARNING: failed to write traefik route for service %s: %v", serviceID, err)

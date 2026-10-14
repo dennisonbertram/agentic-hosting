@@ -111,7 +111,7 @@ func (m *Manager) ReconcileStale() {
 	defer cancel()
 
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM kanbans WHERE status = 'provisioning'`)
+		`SELECT id, COALESCE(container_id, ''), volume_name FROM kanbans WHERE status = 'provisioning'`)
 	if err != nil {
 		log.Printf("kanbans: reconcile query failed: %v", err)
 		return
@@ -170,6 +170,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 	if existingCount > 0 {
 		return nil, apierr.Conflict("tenant already has a kanban board")
+	}
+
+	// A failed board's row (UNIQUE tenant_id) would block re-create forever.
+	if _, err := m.db.ExecContext(ctx, `DELETE FROM kanbans WHERE tenant_id = ? AND status = 'failed'`, tenantID); err != nil {
+		return nil, fmt.Errorf("remove failed kanban: %w", err)
 	}
 
 	id, err := generateID()
@@ -239,31 +244,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 
 	// Run Vikunja container
-	containerID, err := m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
-		Name:          containerName,
-		Image:         "vikunja/vikunja:0.24.6",
-		HostPort:      port,
-		ContainerPort: 3456,
-		Env: map[string]string{
-			"VIKUNJA_SERVICE_JWTSECRET":                       jwtSecret,
-			"VIKUNJA_SERVICE_FRONTENDURL":                     fmt.Sprintf("https://%s", publicURL),
-			"VIKUNJA_DATABASE_TYPE":                           "sqlite",
-			"VIKUNJA_DATABASE_PATH":                           "/app/vikunja/files/vikunja.db",
-			// Registration must be enabled for initial admin user creation.
-			// Container is only accessible on loopback (127.0.0.1 port binding)
-			// so external registration is not possible.
-			"VIKUNJA_SERVICE_ENABLEREGISTRATION":              "true",
-			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_NAME":   "false",
-			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_EMAIL":  "false",
-			"VIKUNJA_MAILER_ENABLED":                          "false",
-		},
-		VolumeName: volumeName,
-		MountPath:  "/app/vikunja/files",
-		Labels: map[string]string{
-			"ah.managed": "true",
-			"ah.type":    "kanban",
-		},
-	})
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerName, volumeName, publicURL, jwtSecret, port))
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
 		_ = m.docker.RemoveVolume(ctx, volumeName)
@@ -309,6 +290,77 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}, nil
 }
 
+// vikunjaConfig builds the container config for a tenant's Vikunja instance.
+func vikunjaConfig(containerName, volumeName, publicURL, jwtSecret string, port int) docker.RunDatabaseConfig {
+	return docker.RunDatabaseConfig{
+		Name:          containerName,
+		Image:         "vikunja/vikunja:0.24.6",
+		HostPort:      port,
+		ContainerPort: 3456,
+		Env: map[string]string{
+			"VIKUNJA_SERVICE_JWTSECRET":   jwtSecret,
+			"VIKUNJA_SERVICE_FRONTENDURL": fmt.Sprintf("https://%s", publicURL),
+			"VIKUNJA_DATABASE_TYPE":       "sqlite",
+			"VIKUNJA_DATABASE_PATH":       "/app/vikunja/files/vikunja.db",
+			// Registration must be enabled for initial admin user creation.
+			// Container is only accessible on loopback (127.0.0.1 port binding)
+			// so external registration is not possible.
+			"VIKUNJA_SERVICE_ENABLEREGISTRATION":            "true",
+			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_NAME":  "false",
+			"VIKUNJA_DEFAULTSETTINGS_DISCOVERABLE_BY_EMAIL": "false",
+			"VIKUNJA_MAILER_ENABLED":                        "false",
+		},
+		VolumeName: volumeName,
+		MountPath:  "/app/vikunja/files",
+		Labels: map[string]string{
+			"ah.managed": "true",
+			"ah.type":    "kanban",
+		},
+	}
+}
+
+// StartForTenant recreates the container of a tenant's stopped kanban board
+// (see StopForTenant) on its existing volume and port. Vikunja's data and admin
+// user live in the volume; only the JWT secret is regenerated, which just
+// invalidates old login tokens. Best-effort: failures mark the board "failed".
+func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
+	var id, volume, publicURL string
+	var port int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT id, volume_name, port, COALESCE(url, '') FROM kanbans WHERE tenant_id = ? AND status = 'stopped'`, tenantID,
+	).Scan(&id, &volume, &port, &publicURL)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("kanbans: StartForTenant query failed for tenant %s: %v", tenantID, err)
+		}
+		return
+	}
+	jwtSecret, err := randomHex(32)
+	if err != nil {
+		log.Printf("kanbans: StartForTenant: %v", err)
+		return
+	}
+	prefix := tenantID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	name := fmt.Sprintf("ah-kanban-%s-%s", prefix, id[:16])
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(name, volume, publicURL, jwtSecret, port))
+	if err != nil {
+		log.Printf("kanbans: StartForTenant run container for %s: %v", id, err)
+		m.updateStatus(ctx, id, "failed")
+		return
+	}
+	_, _ = m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`,
+		containerID, time.Now().Unix(), id)
+	if !m.waitForHTTP(ctx, port, m.healthCheckTimeout) {
+		log.Printf("kanbans: StartForTenant health check failed for %s", id)
+		m.updateStatus(ctx, id, "failed")
+		return
+	}
+	m.updateStatus(ctx, id, "ready")
+}
+
 // provision runs in a background goroutine to complete kanban setup after the
 // container has been started. It handles the health check, Vikunja user/project
 // setup, credential encryption, and final status update. On any failure it
@@ -334,12 +386,15 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 		return
 	}
 
-	// Setup Vikunja (create admin user, project, buckets) — non-fatal on failure
+	// Setup Vikunja (create admin user, project, buckets)
 	setupToken, setupErr := m.setupVikunja(port, tenantID, adminPassword)
+	_ = setupToken
 	if setupErr != nil {
-		log.Printf("kanbans: setup failed for %s (non-fatal): %v", id, setupErr)
-	} else {
-		_ = setupToken // JWT stored via admin token below; setup success logged
+		// Without the admin user the stored credentials are useless, so don't report ready.
+		log.Printf("kanbans: setup failed for %s, cleaning up: %v", id, setupErr)
+		m.updateStatus(ctx, id, "failed")
+		cleanup()
+		return
 	}
 
 	// Encrypt admin password for storage — failure is fatal (irrecoverable credentials)
@@ -372,7 +427,7 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 func (m *Manager) Get(ctx context.Context, tenantID string) (*Kanban, error) {
 	k := &Kanban{}
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, status, container_id, host, port, url,
+		`SELECT id, tenant_id, status, COALESCE(container_id, ''), host, port, url,
 		 volume_name, created_at, updated_at
 		 FROM kanbans WHERE tenant_id = ?`, tenantID,
 	).Scan(&k.ID, &k.TenantID, &k.Status, &k.ContainerID, &k.Host, &k.Port, &k.URL,
@@ -695,5 +750,3 @@ func randomHex(n int) (string, error) {
 	}
 	return fmt.Sprintf("%x", b), nil
 }
-
-func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {}

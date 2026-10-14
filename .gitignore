@@ -13,3 +13,7 @@ code-reviews/
 
 # Claude agent memory (local)
 .claude/agent-memory/
+
+# Built binaries
+/ah
+/ahc

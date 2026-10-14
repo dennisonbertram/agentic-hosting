@@ -93,7 +93,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 		_ = os.Remove(buildDir)
 		return fmt.Errorf("set build directory group: %w", err)
 	}
-	if err := os.Chmod(buildDir, os.ModeSetgid|0770); err != nil {
+	if err := os.Chmod(buildDir, 0770); err != nil {
 		_ = os.RemoveAll(buildDir)
 		return fmt.Errorf("set build directory mode: %w", err)
 	}
@@ -116,9 +116,15 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 	if err := writePrivateJSON(manifestPath, req, 0640); err != nil {
 		return fmt.Errorf("write build request: %w", err)
 	}
+	if err := setBuildGroup(manifestPath); err != nil {
+		return fmt.Errorf("set build request group: %w", err)
+	}
 	logPath := filepath.Join(buildDir, "build.log")
 	if err := createBuildLog(logPath); err != nil {
 		return fmt.Errorf("create build log: %w", err)
+	}
+	if err := setBuildGroup(logPath); err != nil {
+		return fmt.Errorf("set build log group: %w", err)
 	}
 
 	if err := brokerCall(ctx, brokerRequest{Operation: "start", BuildID: req.BuildID}); err != nil {
@@ -145,7 +151,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 	defer readLog.Close()
 	drainer := &buildLogDrainer{reader: bufio.NewReader(readLog)}
 	for {
-		if err := drainer.drain(logCb); err != nil {
+		if _, err := drainer.drain(logCb); err != nil {
 			cleanBuildDir = false
 			stopBuildWorker(req.BuildID)
 			return fmt.Errorf("read build log: %w", err)
@@ -158,7 +164,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				cleanBuildDir = false
 				return fmt.Errorf("build cancelled: %w (worker stop failed)", ctx.Err())
 			}
-			_ = drainer.drain(logCb)
+			_, _ = drainer.drain(logCb)
 			return ctx.Err()
 		}
 		status, err := brokerStatus(ctx, req.BuildID)
@@ -176,7 +182,16 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 		finished := status.ActiveState == "inactive" || status.ActiveState == "failed" ||
 			(status.ActiveState == "active" && status.MainPID == 0)
 		if finished {
-			_ = drainer.drain(logCb)
+			for {
+				n, drainErr := drainer.drain(logCb)
+				if drainErr != nil {
+					cleanBuildDir = false
+					return fmt.Errorf("read completed build log: %w", drainErr)
+				}
+				if n == 0 {
+					break
+				}
+			}
 			if stopErr := stopBuildWorker(req.BuildID); stopErr != nil {
 				cleanBuildDir = false
 				return fmt.Errorf("stop completed build worker: %w", stopErr)
@@ -283,7 +298,7 @@ type buildLogDrainer struct {
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
 // line. This keeps log streaming from starving cancellation and unit polling.
-func (d *buildLogDrainer) drain(logCb func(string)) error {
+func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 	const maxPass, maxLine = 64 * 1024, 16 * 1024
 	read := 0
 	for read < maxPass {
@@ -294,9 +309,9 @@ func (d *buildLogDrainer) drain(logCb func(string)) error {
 					logCb(sanitizeLogLine(string(d.pending)))
 					d.pending = d.pending[:0]
 				}
-				return nil
+				return read, nil
 			}
-			return err
+			return read, err
 		}
 		read++
 		if b == '\n' {
@@ -316,7 +331,7 @@ func (d *buildLogDrainer) drain(logCb func(string)) error {
 			}
 		}
 	}
-	return nil
+	return read, nil
 }
 
 // RunWorker executes one manifest. It is only called by ah-build@.service,
@@ -409,7 +424,7 @@ func (b *Builder) executeBuild(ctx context.Context, req BuildRequest, buildDir s
 		_ = os.Remove(sourceDir)
 		return fmt.Errorf("set source directory group: %w", err)
 	}
-	if err := os.Chmod(sourceDir, os.ModeSetgid|0770); err != nil {
+	if err := os.Chmod(sourceDir, 0770); err != nil {
 		return fmt.Errorf("set source directory mode: %w", err)
 	}
 	if req.SourceType != "git" {

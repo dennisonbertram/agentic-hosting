@@ -11,8 +11,9 @@ values from the API.
 
 The build root must be owned by `ah:ah-build` with mode `0710`. The API account
 must belong to `ah-build`; `ah-builder` must belong to `ah-build` and `docker`.
-The API creates each build directory as `ah:ah-build` with mode `02770`, and
-creates the request file and log with modes `0640` and `0660`. Keep this root
+The API creates each build directory as `ah:ah-build` with mode `0770`, then
+sets the `ah-build` group on the request and log files individually. The files
+have modes `0640` and `0660`. Keep this root
 separate from `/var/lib/ah`, which contains daemon secrets. The broker runtime
 directory is root:`ah` mode `0750`, and the socket is root:`ah` mode `0660`.
 

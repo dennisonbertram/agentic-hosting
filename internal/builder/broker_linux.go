@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const brokerTimeout = 12 * time.Second
@@ -113,17 +115,17 @@ func openWorkerArtifact(root, buildID, name string, flags int, mode uint32) (*os
 	}
 	// O_PATH permits traversal through an execute-only 0710 build root without
 	// granting ah-builder directory listing access.
-	rootFD, err := syscall.Open(root, syscall.O_PATH|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer syscall.Close(rootFD)
-	dirFD, err := syscall.Openat(rootFD, buildID, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	defer unix.Close(rootFD)
+	dirFD, err := unix.Openat(rootFD, buildID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer syscall.Close(dirFD)
-	fd, err := syscall.Openat(dirFD, name, flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, mode)
+	defer unix.Close(dirFD)
+	fd, err := unix.Openat(dirFD, name, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
 	if err != nil {
 		return nil, err
 	}

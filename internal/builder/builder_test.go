@@ -1,6 +1,8 @@
 package builder
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,30 @@ import (
 	"syscall"
 	"testing"
 )
+
+func TestBuildLogDrainerConsumesTerminalBacklogInBoundedPasses(t *testing.T) {
+	const lines = 900
+	contents := bytes.Repeat([]byte("complete line\n"), lines)
+	drainer := &buildLogDrainer{reader: bufio.NewReader(bytes.NewReader(contents))}
+	got := 0
+	for {
+		n, err := drainer.drain(func(line string) {
+			if line != "complete line" {
+				t.Errorf("unexpected log line %q", line)
+			}
+			got++
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if got != lines {
+		t.Fatalf("drained %d lines, want %d", got, lines)
+	}
+}
 
 func validBuildRequest() BuildRequest {
 	tenantID := strings.Repeat("a", 32)

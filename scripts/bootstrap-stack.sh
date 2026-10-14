@@ -42,6 +42,16 @@ valid_domain() {
   IFS=. read -r -a labels <<< "$domain"
   for label in "${labels[@]}"; do ((${#label} <= 63)) || return 1; done
 }
+render_docker_source() {
+  cat <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+Architectures: $1
+Signed-By: /etc/apt/keyrings/docker.gpg
+EOF
+}
 
 usage() { cat <<'EOF'
 Usage: sudo scripts/bootstrap-stack.sh --domain DOMAIN [--acme-email EMAIL] [--external-tls-terminated] [--skip-website] [--dry-run]
@@ -75,6 +85,10 @@ test_preflight() {
   select_architecture arm64
   [[ $go_arch == arm64 && $nixpacks_arch == aarch64-unknown-linux-musl ]] || die 'arm64 artifact selection failed'
   log 'architecture artifact selection self-test passed (amd64, arm64)'
+  for arch in amd64 arm64; do
+    if ! render_docker_source "$arch" | grep -Fxq "Architectures: $arch"; then die "Docker source architecture rendering failed for $arch"; fi
+  done
+  log 'Docker source architecture rendering self-test passed (amd64, arm64)'
   valid_domain example.com || die 'valid domain self-test failed'
   if valid_domain "$(printf 'a%.0s' {1..64}).example"; then die 'invalid label accepted'; fi
   log 'domain label length self-test passed'
@@ -144,14 +158,7 @@ curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.asc
 actual_fingerprint=$(gpg --show-keys --with-colons /tmp/docker.asc | awk -F: '$1=="fpr" {print $10; exit}')
 [[ $actual_fingerprint == "$DOCKER_KEY_FINGERPRINT" ]] || die 'Docker signing key fingerprint mismatch'
 gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg /tmp/docker.asc; chmod 0644 /etc/apt/keyrings/docker.gpg; rm -f /tmp/docker.asc
-cat > /etc/apt/sources.list.d/docker.sources <<'EOF'
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: noble
-Components: stable
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/docker.gpg
-EOF
+render_docker_source "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.sources
 apt-get update
 apt-get install -y --no-install-recommends docker-ce=5:29.9.0-1~ubuntu.24.04~noble docker-ce-cli=5:29.9.0-1~ubuntu.24.04~noble containerd.io=2.4.2-1~ubuntu.24.04~noble docker-buildx-plugin=0.38.0-1~ubuntu.24.04~noble docker-compose-plugin=5.6.0-1~ubuntu.24.04~noble
 
@@ -337,7 +344,15 @@ systemctl enable --now ah.service
 for _ in {1..40}; do curl -fsS -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health >/dev/null && break; sleep 1; done
 curl -fsS -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health >/dev/null || { journalctl -u ah.service -n 80 --no-pager; die 'API health check failed'; }
 
-log 'stack installed; public certificates require DNS pointing at this host'
+if ((external_tls_terminated)); then
+  log 'stack installed; configure your trusted TLS tunnel to forward to this host HTTP ingress'
+else
+  log 'stack installed; public certificates require DNS pointing at this host'
+fi
 log 'bootstrap token is stored in root-only /etc/default/ah; retrieve it through an approved secure channel'
-log "after DNS and ACME certificate issuance, verify: curl --fail --show-error https://api.$domain/v1/system/health"
+if ((external_tls_terminated)); then
+  log "after connecting the TLS tunnel, verify: curl --fail --show-error https://api.$domain/v1/system/health"
+else
+  log "after DNS and ACME certificate issuance, verify: curl --fail --show-error https://api.$domain/v1/system/health"
+fi
 log 'build broker and worker template are installed; git-based service builds still need a live smoke test'

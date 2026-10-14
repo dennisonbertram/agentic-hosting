@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
@@ -21,6 +22,8 @@ func NewNotFoundError(containerID string) error {
 // MockDockerClient is a test double for docker.Client.
 // Set the function fields to control return values; inspect the recorded fields to verify calls.
 type MockDockerClient struct {
+	mu sync.Mutex // guards the *Calls recorders written by concurrent tests
+
 	// EnsureNetwork
 	EnsureNetworkFn           func(ctx context.Context, name string) (string, error)
 	EnsureNetworkCalls        []string // network names passed
@@ -178,7 +181,9 @@ type MockDockerClient struct {
 var _ docker.Client = (*MockDockerClient)(nil)
 
 func (m *MockDockerClient) EnsureNetwork(ctx context.Context, name string) (string, error) {
+	m.mu.Lock()
 	m.EnsureNetworkCalls = append(m.EnsureNetworkCalls, name)
+	m.mu.Unlock()
 	if m.EnsureNetworkFn != nil {
 		return m.EnsureNetworkFn(ctx, name)
 	}
@@ -186,7 +191,9 @@ func (m *MockDockerClient) EnsureNetwork(ctx context.Context, name string) (stri
 }
 
 func (m *MockDockerClient) EnsureIngressNetwork(ctx context.Context, name string) (string, error) {
+	m.mu.Lock()
 	m.EnsureIngressNetworkCalls = append(m.EnsureIngressNetworkCalls, name)
+	m.mu.Unlock()
 	if m.EnsureIngressNetworkFn != nil {
 		return m.EnsureIngressNetworkFn(ctx, name)
 	}
@@ -194,7 +201,9 @@ func (m *MockDockerClient) EnsureIngressNetwork(ctx context.Context, name string
 }
 
 func (m *MockDockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
+	m.mu.Lock()
 	m.ConnectNetworkCalls = append(m.ConnectNetworkCalls, [2]string{networkID, containerID})
+	m.mu.Unlock()
 	if m.ConnectNetworkFn != nil {
 		return m.ConnectNetworkFn(ctx, networkID, containerID)
 	}
@@ -202,7 +211,9 @@ func (m *MockDockerClient) ConnectNetwork(ctx context.Context, networkID, contai
 }
 
 func (m *MockDockerClient) ConnectNetworkAlias(ctx context.Context, networkID, containerID, alias string) error {
+	m.mu.Lock()
 	m.ConnectNetworkAliasCalls = append(m.ConnectNetworkAliasCalls, [3]string{networkID, containerID, alias})
+	m.mu.Unlock()
 	if m.ConnectNetworkAliasFn != nil {
 		return m.ConnectNetworkAliasFn(ctx, networkID, containerID, alias)
 	}
@@ -210,7 +221,9 @@ func (m *MockDockerClient) ConnectNetworkAlias(ctx context.Context, networkID, c
 }
 
 func (m *MockDockerClient) NetworkDisconnect(ctx context.Context, networkID, containerID string) error {
+	m.mu.Lock()
 	m.NetworkDisconnectCalls = append(m.NetworkDisconnectCalls, [2]string{networkID, containerID})
+	m.mu.Unlock()
 	if m.NetworkDisconnectFn != nil {
 		return m.NetworkDisconnectFn(ctx, networkID, containerID)
 	}
@@ -218,7 +231,9 @@ func (m *MockDockerClient) NetworkDisconnect(ctx context.Context, networkID, con
 }
 
 func (m *MockDockerClient) NetworkList(ctx context.Context) ([]docker.NetworkInfo, error) {
+	m.mu.Lock()
 	m.NetworkListCalls++
+	m.mu.Unlock()
 	if m.NetworkListFn != nil {
 		return m.NetworkListFn(ctx)
 	}
@@ -226,7 +241,9 @@ func (m *MockDockerClient) NetworkList(ctx context.Context) ([]docker.NetworkInf
 }
 
 func (m *MockDockerClient) NetworkInspect(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+	m.mu.Lock()
 	m.NetworkInspectCalls = append(m.NetworkInspectCalls, networkID)
+	m.mu.Unlock()
 	if m.NetworkInspectFn != nil {
 		return m.NetworkInspectFn(ctx, networkID)
 	}
@@ -245,7 +262,9 @@ func (m *MockDockerClient) NetworkInspect(ctx context.Context, networkID string)
 }
 
 func (m *MockDockerClient) RemoveNetwork(ctx context.Context, networkID string) error {
+	m.mu.Lock()
 	m.RemoveNetworkCalls = append(m.RemoveNetworkCalls, networkID)
+	m.mu.Unlock()
 	if m.RemoveNetworkFn != nil {
 		return m.RemoveNetworkFn(ctx, networkID)
 	}
@@ -253,7 +272,9 @@ func (m *MockDockerClient) RemoveNetwork(ctx context.Context, networkID string) 
 }
 
 func (m *MockDockerClient) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *docker.ResourceLimits) (string, error) {
+	m.mu.Lock()
 	m.RunContainerCalls++
+	m.mu.Unlock()
 	if m.RunContainerFn != nil {
 		return m.RunContainerFn(ctx, tenantID, serviceID, img, port, envVars, extraLabels, limits)
 	}
@@ -261,7 +282,9 @@ func (m *MockDockerClient) RunContainer(ctx context.Context, tenantID, serviceID
 }
 
 func (m *MockDockerClient) StopContainer(ctx context.Context, containerID string) error {
+	m.mu.Lock()
 	m.StopContainerCalls = append(m.StopContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.StopContainerFn != nil {
 		return m.StopContainerFn(ctx, containerID)
 	}
@@ -269,7 +292,9 @@ func (m *MockDockerClient) StopContainer(ctx context.Context, containerID string
 }
 
 func (m *MockDockerClient) StartContainer(ctx context.Context, containerID string) error {
+	m.mu.Lock()
 	m.StartContainerCalls = append(m.StartContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.StartContainerFn != nil {
 		return m.StartContainerFn(ctx, containerID)
 	}
@@ -277,7 +302,9 @@ func (m *MockDockerClient) StartContainer(ctx context.Context, containerID strin
 }
 
 func (m *MockDockerClient) RestartContainer(ctx context.Context, containerID string) error {
+	m.mu.Lock()
 	m.RestartContainerCalls = append(m.RestartContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.RestartContainerFn != nil {
 		return m.RestartContainerFn(ctx, containerID)
 	}
@@ -285,7 +312,9 @@ func (m *MockDockerClient) RestartContainer(ctx context.Context, containerID str
 }
 
 func (m *MockDockerClient) RemoveContainer(ctx context.Context, containerID string) error {
+	m.mu.Lock()
 	m.RemoveContainerCalls = append(m.RemoveContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.RemoveContainerFn != nil {
 		return m.RemoveContainerFn(ctx, containerID)
 	}
@@ -293,7 +322,9 @@ func (m *MockDockerClient) RemoveContainer(ctx context.Context, containerID stri
 }
 
 func (m *MockDockerClient) LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error) {
+	m.mu.Lock()
 	m.LogsContainerCalls = append(m.LogsContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.LogsContainerFn != nil {
 		return m.LogsContainerFn(ctx, containerID, follow, tail)
 	}
@@ -301,7 +332,9 @@ func (m *MockDockerClient) LogsContainer(ctx context.Context, containerID string
 }
 
 func (m *MockDockerClient) InspectContainer(ctx context.Context, containerID string) (*docker.ContainerInfo, error) {
+	m.mu.Lock()
 	m.InspectContainerCalls = append(m.InspectContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.InspectContainerFn != nil {
 		return m.InspectContainerFn(ctx, containerID)
 	}
@@ -309,7 +342,9 @@ func (m *MockDockerClient) InspectContainer(ctx context.Context, containerID str
 }
 
 func (m *MockDockerClient) PullImage(ctx context.Context, img string) error {
+	m.mu.Lock()
 	m.PullImageCalls = append(m.PullImageCalls, img)
+	m.mu.Unlock()
 	if m.PullImageFn != nil {
 		return m.PullImageFn(ctx, img)
 	}
@@ -324,7 +359,9 @@ func (m *MockDockerClient) ImageExists(ctx context.Context, img string) (bool, e
 }
 
 func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) error {
+	m.mu.Lock()
 	m.TagImageCalls = append(m.TagImageCalls, [2]string{source, target})
+	m.mu.Unlock()
 	if m.TagImageFn != nil {
 		return m.TagImageFn(ctx, source, target)
 	}
@@ -332,7 +369,9 @@ func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) 
 }
 
 func (m *MockDockerClient) RemoveImage(ctx context.Context, imageRef string) error {
+	m.mu.Lock()
 	m.RemoveImageCalls = append(m.RemoveImageCalls, imageRef)
+	m.mu.Unlock()
 	if m.RemoveImageFn != nil {
 		return m.RemoveImageFn(ctx, imageRef)
 	}
@@ -340,7 +379,9 @@ func (m *MockDockerClient) RemoveImage(ctx context.Context, imageRef string) err
 }
 
 func (m *MockDockerClient) ListContainersByLabel(ctx context.Context, label, value string) ([]string, error) {
+	m.mu.Lock()
 	m.ListContainersByLabelCalls++
+	m.mu.Unlock()
 	if m.ListContainersByLabelFn != nil {
 		return m.ListContainersByLabelFn(ctx, label, value)
 	}
@@ -348,7 +389,9 @@ func (m *MockDockerClient) ListContainersByLabel(ctx context.Context, label, val
 }
 
 func (m *MockDockerClient) GetContainerLabels(ctx context.Context, containerID string) map[string]string {
+	m.mu.Lock()
 	m.GetContainerLabelsCalls = append(m.GetContainerLabelsCalls, containerID)
+	m.mu.Unlock()
 	if m.GetContainerLabelsFn != nil {
 		return m.GetContainerLabelsFn(ctx, containerID)
 	}
@@ -356,7 +399,9 @@ func (m *MockDockerClient) GetContainerLabels(ctx context.Context, containerID s
 }
 
 func (m *MockDockerClient) GetContainerName(ctx context.Context, containerID string) string {
+	m.mu.Lock()
 	m.GetContainerNameCalls = append(m.GetContainerNameCalls, containerID)
+	m.mu.Unlock()
 	if m.GetContainerNameFn != nil {
 		return m.GetContainerNameFn(ctx, containerID)
 	}
@@ -364,7 +409,9 @@ func (m *MockDockerClient) GetContainerName(ctx context.Context, containerID str
 }
 
 func (m *MockDockerClient) VerifyGVisorRuntime(ctx context.Context) error {
+	m.mu.Lock()
 	m.VerifyGVisorRuntimeCalls++
+	m.mu.Unlock()
 	if m.VerifyGVisorRuntimeFn != nil {
 		return m.VerifyGVisorRuntimeFn(ctx)
 	}
@@ -372,7 +419,9 @@ func (m *MockDockerClient) VerifyGVisorRuntime(ctx context.Context) error {
 }
 
 func (m *MockDockerClient) CreateVolume(ctx context.Context, name string) error {
+	m.mu.Lock()
 	m.CreateVolumeCalls = append(m.CreateVolumeCalls, name)
+	m.mu.Unlock()
 	if m.CreateVolumeFn != nil {
 		return m.CreateVolumeFn(ctx, name)
 	}
@@ -380,7 +429,9 @@ func (m *MockDockerClient) CreateVolume(ctx context.Context, name string) error 
 }
 
 func (m *MockDockerClient) RemoveVolume(ctx context.Context, name string) error {
+	m.mu.Lock()
 	m.RemoveVolumeCalls = append(m.RemoveVolumeCalls, name)
+	m.mu.Unlock()
 	if m.RemoveVolumeFn != nil {
 		return m.RemoveVolumeFn(ctx, name)
 	}
@@ -388,7 +439,9 @@ func (m *MockDockerClient) RemoveVolume(ctx context.Context, name string) error 
 }
 
 func (m *MockDockerClient) RemoveVolumeSafe(ctx context.Context, name string) error {
+	m.mu.Lock()
 	m.RemoveVolumeSafeCalls = append(m.RemoveVolumeSafeCalls, name)
+	m.mu.Unlock()
 	if m.RemoveVolumeSafeFn != nil {
 		return m.RemoveVolumeSafeFn(ctx, name)
 	}
@@ -396,7 +449,9 @@ func (m *MockDockerClient) RemoveVolumeSafe(ctx context.Context, name string) er
 }
 
 func (m *MockDockerClient) WipeVolume(ctx context.Context, name string) error {
+	m.mu.Lock()
 	m.WipeVolumeCalls = append(m.WipeVolumeCalls, name)
+	m.mu.Unlock()
 	if m.WipeVolumeFn != nil {
 		return m.WipeVolumeFn(ctx, name)
 	}
@@ -404,7 +459,9 @@ func (m *MockDockerClient) WipeVolume(ctx context.Context, name string) error {
 }
 
 func (m *MockDockerClient) RunDatabase(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+	m.mu.Lock()
 	m.RunDatabaseCalls++
+	m.mu.Unlock()
 	if m.RunDatabaseFn != nil {
 		return m.RunDatabaseFn(ctx, cfg)
 	}
@@ -412,7 +469,9 @@ func (m *MockDockerClient) RunDatabase(ctx context.Context, cfg docker.RunDataba
 }
 
 func (m *MockDockerClient) StopAndRemoveByName(ctx context.Context, name string) error {
+	m.mu.Lock()
 	m.StopAndRemoveByNameCalls = append(m.StopAndRemoveByNameCalls, name)
+	m.mu.Unlock()
 	if m.StopAndRemoveByNameFn != nil {
 		return m.StopAndRemoveByNameFn(ctx, name)
 	}
@@ -420,7 +479,9 @@ func (m *MockDockerClient) StopAndRemoveByName(ctx context.Context, name string)
 }
 
 func (m *MockDockerClient) PruneDanglingImages(ctx context.Context) (int, error) {
+	m.mu.Lock()
 	m.PruneDanglingImagesCalls++
+	m.mu.Unlock()
 	if m.PruneDanglingImagesFn != nil {
 		return m.PruneDanglingImagesFn(ctx)
 	}
@@ -428,7 +489,9 @@ func (m *MockDockerClient) PruneDanglingImages(ctx context.Context) (int, error)
 }
 
 func (m *MockDockerClient) PruneAnonymousVolumes(ctx context.Context) (int, error) {
+	m.mu.Lock()
 	m.PruneAnonymousVolumesCalls++
+	m.mu.Unlock()
 	if m.PruneAnonymousVolumesFn != nil {
 		return m.PruneAnonymousVolumesFn(ctx)
 	}
@@ -457,7 +520,9 @@ func (m *MockDockerClient) ListNetworkContainers(ctx context.Context, networkNam
 }
 
 func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]string, error) {
+	m.mu.Lock()
 	m.ListVolumesCalls = append(m.ListVolumesCalls, prefix)
+	m.mu.Unlock()
 	if m.ListVolumesFn != nil {
 		return m.ListVolumesFn(ctx, prefix)
 	}
@@ -465,7 +530,9 @@ func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]st
 }
 
 func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage, error) {
+	m.mu.Lock()
 	m.DiskUsageCalls++
+	m.mu.Unlock()
 	if m.DiskUsageFn != nil {
 		return m.DiskUsageFn(ctx)
 	}
@@ -473,7 +540,9 @@ func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage,
 }
 
 func (m *MockDockerClient) RunEnvironment(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
+	m.mu.Lock()
 	m.RunEnvironmentCalls++
+	m.mu.Unlock()
 	if m.RunEnvironmentFn != nil {
 		return m.RunEnvironmentFn(ctx, cfg)
 	}
@@ -481,7 +550,9 @@ func (m *MockDockerClient) RunEnvironment(ctx context.Context, cfg docker.RunEnv
 }
 
 func (m *MockDockerClient) ExecCreate(ctx context.Context, containerID string, cmd []string, workDir string) (string, error) {
+	m.mu.Lock()
 	m.ExecCreateCalls = append(m.ExecCreateCalls, containerID)
+	m.mu.Unlock()
 	if m.ExecCreateFn != nil {
 		return m.ExecCreateFn(ctx, containerID, cmd, workDir)
 	}
@@ -489,7 +560,9 @@ func (m *MockDockerClient) ExecCreate(ctx context.Context, containerID string, c
 }
 
 func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {
+	m.mu.Lock()
 	m.ExecRunCalls = append(m.ExecRunCalls, execID)
+	m.mu.Unlock()
 	if m.ExecRunFn != nil {
 		return m.ExecRunFn(ctx, execID, timeout)
 	}
@@ -497,7 +570,9 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 }
 
 func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
+	m.mu.Lock()
 	m.RenameContainerCalls++
+	m.mu.Unlock()
 	m.RenameContainerArgs = append(m.RenameContainerArgs, [2]string{containerID, newName})
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
@@ -506,7 +581,9 @@ func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, new
 }
 
 func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID string, dstPath string, content io.Reader) error {
+	m.mu.Lock()
 	m.CopyToContainerCalls = append(m.CopyToContainerCalls, containerID)
+	m.mu.Unlock()
 	if m.CopyToContainerFn != nil {
 		return m.CopyToContainerFn(ctx, containerID, dstPath, content)
 	}

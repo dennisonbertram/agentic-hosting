@@ -63,7 +63,13 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.requireAdmin(w, adminTokenFromRequest(r, req.BootstrapToken), "recovery temporarily unavailable") {
+	// Accept the token in the body or the X-Bootstrap-Token header, like the
+	// other admin routes, so every slot gets the same 403/401 handling.
+	legacy := req.BootstrapToken
+	if legacy == "" {
+		legacy = r.Header.Get("X-Bootstrap-Token")
+	}
+	if !s.requireAdmin(w, adminTokenFromRequest(r, legacy), "recovery temporarily unavailable") {
 		return
 	}
 

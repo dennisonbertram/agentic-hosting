@@ -34,6 +34,7 @@ type fakeDatabaseManager struct {
 	createCalls           int
 	stopAllForTenantCalls []string
 	createFn              func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
+	deleteFn              func(ctx context.Context, tenantID, dbID string) error
 }
 
 func (f *fakeDatabaseManager) Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
@@ -67,6 +68,9 @@ func (f *fakeDatabaseManager) GetConnectionString(ctx context.Context, tenantID,
 }
 
 func (f *fakeDatabaseManager) Delete(ctx context.Context, tenantID, dbID string) error {
+	if f.deleteFn != nil {
+		return f.deleteFn(ctx, tenantID, dbID)
+	}
 	return nil
 }
 

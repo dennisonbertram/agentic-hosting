@@ -417,6 +417,10 @@ func (m *Manager) GetConnectionString(ctx context.Context, tenantID, dbID string
 	return string(plaintext), nil
 }
 
+// containerCleanupTimeout bounds container stop+remove in Delete so a stalled
+// Docker daemon cannot hang the request forever. A variable so tests can shorten it.
+var containerCleanupTimeout = time.Minute
+
 // Delete destroys a database: stops container, removes volume, deletes record.
 // Only deletes the DB record after Docker cleanup succeeds to avoid orphaning resources.
 func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
@@ -425,13 +429,20 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 		return err
 	}
 
+	// Cleanup must outlive the request: a slow wipe under gVisor used to
+	// exhaust the route timeout and leave no time to remove the volume.
+	// Detach from request cancellation; wipe and removal get separate budgets.
+	ctx = context.WithoutCancel(ctx)
+
 	// Stop and remove container
 	if d.ContainerID != "" {
-		if err := m.docker.StopContainer(ctx, d.ContainerID); err != nil {
+		ctrCtx, ctrCancel := context.WithTimeout(ctx, containerCleanupTimeout)
+		defer ctrCancel()
+		if err := m.docker.StopContainer(ctrCtx, d.ContainerID); err != nil {
 			log.Printf("databases: stop container %s: %v", d.ContainerID, err)
 			// Container may not exist (already stopped/removed) — continue
 		}
-		if err := m.docker.RemoveContainer(ctx, d.ContainerID); err != nil {
+		if err := m.docker.RemoveContainer(ctrCtx, d.ContainerID); err != nil {
 			// If container removal fails (not just "not found"), keep the record
 			if !strings.Contains(err.Error(), "No such container") &&
 				!strings.Contains(err.Error(), "not found") {
@@ -452,7 +463,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 
 	// Remove volume
 	if d.VolumeName != "" {
-		if err := m.docker.RemoveVolume(ctx, d.VolumeName); err != nil {
+		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		if err := m.docker.RemoveVolume(rmCtx, d.VolumeName); err != nil {
 			if !strings.Contains(err.Error(), "no such volume") &&
 				!strings.Contains(err.Error(), "not found") {
 				log.Printf("databases: remove volume %s failed, keeping record: %v", d.VolumeName, err)
@@ -525,9 +538,9 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 
 // wipeVolume runs a short-lived container to overwrite all files in the named
 // volume with zeros, ensuring a future tenant cannot recover data after a
-// database is deleted. The wipe uses a 2-minute timeout to bound the operation.
+// database is deleted. The wipe uses a 5-minute timeout to bound the operation.
 func (m *Manager) wipeVolume(ctx context.Context, volumeName string) error {
-	wipeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	wipeCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	return m.docker.WipeVolume(wipeCtx, volumeName)
 }

@@ -152,7 +152,7 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keyHash := crypto.HashAPIKey(apiKey, s.masterKey)
+	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
 	if len(keyID) < 8 {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return

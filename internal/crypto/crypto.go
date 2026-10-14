@@ -6,9 +6,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -93,6 +95,37 @@ func HashAPIKey(key string, secret []byte) string {
 func VerifyAPIKey(storedHash, key string, secret []byte) bool {
 	computed := HashAPIKey(key, secret)
 	return hmac.Equal([]byte(storedHash), []byte(computed))
+}
+
+// APIKeyHashSecretName is the server_secrets row holding the API-key HMAC key.
+const APIKeyHashSecretName = "api_key_hmac"
+
+// LoadOrCreateAPIKeyHashKey returns the HMAC key used to hash API keys. It is
+// stored encrypted under masterKey in server_secrets so master key rotation
+// can re-encrypt it without changing existing key hashes. On first use the
+// key is the master key itself, because that is what pre-existing hashes were
+// computed with.
+func LoadOrCreateAPIKeyHashKey(db *sql.DB, masterKey []byte) ([]byte, error) {
+	enc, err := Encrypt(masterKey, masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt api key hash key: %w", err)
+	}
+	// INSERT OR IGNORE keeps concurrent first starts from overwriting each other.
+	if _, err := db.Exec(
+		`INSERT OR IGNORE INTO server_secrets (name, value_encrypted, created_at) VALUES (?, ?, ?)`,
+		APIKeyHashSecretName, enc, time.Now().Unix(),
+	); err != nil {
+		return nil, fmt.Errorf("store api key hash key: %w", err)
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT value_encrypted FROM server_secrets WHERE name = ?`, APIKeyHashSecretName).Scan(&stored); err != nil {
+		return nil, fmt.Errorf("load api key hash key: %w", err)
+	}
+	key, err := Decrypt(stored, masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt api key hash key (wrong master key?): %w", err)
+	}
+	return key, nil
 }
 
 // GenerateAPIKey generates a random 64-char hex API key secret.

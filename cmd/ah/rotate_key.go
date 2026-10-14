@@ -103,7 +103,8 @@ func runRotateKey(args []string) {
 	log.Printf("  database conn strings: %d", result.DatabaseConnStrs)
 	log.Printf("  kanban admin tokens:   %d", result.KanbanTokens)
 	log.Printf("  snapshot env vars:     %d", result.SnapshotEnvs)
-	log.Printf("  total fields:          %d", result.Total())
+	log.Printf("  api key hash key:      %d", result.HashKeys)
+	log.Printf("  total fields:         %d", result.Total())
 	log.Printf("  errors:                %d", result.Errors)
 
 	if dryRun {

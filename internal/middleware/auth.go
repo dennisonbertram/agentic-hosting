@@ -123,7 +123,7 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 	}
 }
 
-func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
+func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
 	tracker := newLastUsedTracker(db)
 	cache := newAuthCache()
 	invalidator := &AuthCacheInvalidator{cache: cache}
@@ -205,7 +205,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 				return
 			}
 
-			if !crypto.VerifyAPIKey(keyHash, secret, masterKey) {
+			if !crypto.VerifyAPIKey(keyHash, secret, hashKey) {
 				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}

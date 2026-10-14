@@ -218,18 +218,23 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
 			// Rename to the tenant env name (preview routes target it), then move
 			// the container from the ah-pool network to the tenant network.
-			_ = m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
-			claimErr := m.docker.RenameContainer(ctx, poolContainerID, fmt.Sprintf("ah-env-%s-%s", tenantID, id))
+			claimErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
+			if claimErr == nil {
+				claimErr = m.docker.RenameContainer(ctx, poolContainerID, fmt.Sprintf("ah-env-%s-%s", tenantID, id))
+			}
 			if claimErr == nil {
 				claimErr = m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID)
 			}
 			if claimErr != nil {
 				log.Printf("environments: failed to adopt pool container, falling back to cold start: %v", claimErr)
 				// Do not leak the claimed container: remove it and its volume.
-				_ = m.docker.StopContainer(ctx, poolContainerID)
-				_ = m.docker.RemoveContainer(ctx, poolContainerID)
-				_ = m.docker.RemoveVolume(ctx, poolVolumeName)
-				_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, poolContainerID)
+				// The request context may already be cancelled, so detach.
+				cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				_ = m.docker.StopContainer(cctx, poolContainerID)
+				_ = m.docker.RemoveContainer(cctx, poolContainerID)
+				_ = m.docker.RemoveVolume(cctx, poolVolumeName)
+				_, _ = m.db.ExecContext(cctx, `DELETE FROM warm_pool WHERE container_id = ?`, poolContainerID)
+				cancel()
 			} else {
 				// Update the DB volume_name to match the pool volume.
 				_, _ = m.db.ExecContext(ctx,
@@ -271,20 +276,37 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		}
 	}
 
-	// Update DB with container_id, status=running, lease
+	// Update DB with container_id, status=running, lease. The update only
+	// applies while the row is still 'creating' and the tenant is active, so a
+	// suspension that raced with this Create (StopAllForTenant skips rows with
+	// no container yet) cannot leave a running container behind.
 	leaseExpiresAt := now + int64(leaseDuration)
-	_, err = m.db.ExecContext(ctx,
+	res, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running',
 		 lease_expires_at = ?, last_activity_at = ?, updated_at = ?
-		 WHERE id = ?`,
-		containerID, leaseExpiresAt, now, now, id,
+		 WHERE id = ? AND status = 'creating'
+		 AND EXISTS (SELECT 1 FROM tenants WHERE id = ? AND status = 'active')`,
+		containerID, leaseExpiresAt, now, now, id, tenantID,
 	)
-	if err != nil {
-		log.Printf("environments: failed to update container_id for %s: %v", id, err)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("update environment: %w", err)
+	updated := int64(0)
+	if err == nil {
+		updated, _ = res.RowsAffected()
+	}
+	if err != nil || updated == 0 {
+		if err != nil {
+			log.Printf("environments: failed to update container_id for %s: %v", id, err)
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = m.docker.StopContainer(cctx, containerID)
+		_ = m.docker.RemoveContainer(cctx, containerID)
+		_ = m.docker.RemoveVolume(cctx, volumeName)
+		_, _ = m.db.ExecContext(cctx, `DELETE FROM warm_pool WHERE container_id = ?`, containerID)
+		m.updateStatus(ctx, id, "failed")
+		if err != nil {
+			return nil, fmt.Errorf("update environment: %w", err)
+		}
+		return nil, apierr.Validation("tenant is not active")
 	}
 
 	return &Environment{
@@ -723,6 +745,8 @@ func isNotFoundError(err error) bool {
 // Workspace Sync
 // ---------------------------------------------------------------------------
 
+const syncTimeout = 5 * time.Minute
+
 // SyncWorkspace syncs code into an environment's /workspace directory via git.
 func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req SyncRequest) error {
 	e, err := m.Get(ctx, tenantID, envID)
@@ -753,12 +777,12 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 	)
 
 	// Create and run exec with a 5-minute timeout
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"sh", "-c", gitCmd}, "/workspace")
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())), "sh", "-c", gitCmd}, "/workspace")
 	if err != nil {
 		return fmt.Errorf("sync exec create: %w", err)
 	}
 
-	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, 5*time.Minute)
+	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, syncTimeout)
 	if err != nil {
 		return fmt.Errorf("sync exec run: %w", err)
 	}
@@ -1008,7 +1032,9 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE environment_id = ?`, e.id)
 		if e.containerID != "" {
 			if err := m.docker.StopContainer(ctx, e.containerID); err != nil && !isNotFoundError(err) {
+				// Leave the row as is so lease reconciliation or the next suspend retries.
 				log.Printf("environments: stop container %s for env %s: %v", e.containerID, e.id, err)
+				continue
 			}
 		}
 		m.updateStatus(ctx, e.id, "stopped")

@@ -96,9 +96,9 @@ main() {
   local archive="${BINARY}_${os}_${arch}.tar.gz"
   local base_url="https://github.com/${REPO}/releases/download/${version}"
 
-  local tmp_dir
+  # tmp_dir is global: the EXIT trap runs after main returns, when a local would be unset.
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  trap 'rm -rf "${tmp_dir:-}"' EXIT
 
   fetch "${base_url}/${archive}" "${tmp_dir}/${archive}"
   fetch "${base_url}/checksums.txt" "${tmp_dir}/checksums.txt"

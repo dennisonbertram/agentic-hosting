@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -145,6 +146,10 @@ func rotateAPIKeyHashKey(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, e
 			APIKeyHashSecretName, newEnc, time.Now().Unix()); err != nil {
 			return 0, fmt.Errorf("insert: %w", err)
 		}
+		return 1, nil
+	case err != nil && dryRun && strings.Contains(err.Error(), "no such table"):
+		// Dry-run on a DB that predates server_secrets: the table and hash key
+		// row would be created by a live run.
 		return 1, nil
 	case err != nil:
 		return 0, fmt.Errorf("query: %w", err)

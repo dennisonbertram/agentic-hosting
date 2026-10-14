@@ -2,10 +2,12 @@
 package databases
 
 import (
+	"bufio"
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"regexp"
@@ -693,15 +695,14 @@ func postgresReady(addr string) bool {
 	return b == 'R' || b == 'E' || b == 'N'
 }
 
-// waitForRedis probes Redis at the protocol level. It sends a RESP PING
-// command and checks that the server responds with +PONG. A container that
-// accepts TCP but has not finished loading its data set or configuration will
-// not respond to PING yet.
+// waitForRedis probes Redis with the configured password and then checks for
+// a +PONG response. A container that accepts TCP but has not finished loading
+// its data set or configuration will not be considered ready.
 func (m *Manager) waitForRedis(port int, password string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	for time.Now().Before(deadline) {
-		if redisReady(addr) {
+		if redisReady(addr, password) {
 			return true
 		}
 		time.Sleep(1 * time.Second)
@@ -709,29 +710,37 @@ func (m *Manager) waitForRedis(port int, password string, timeout time.Duration)
 	return false
 }
 
-// redisReady returns true when the Redis server at addr responds to a PING
-// with +PONG, indicating it is fully initialised.
-func redisReady(addr string) bool {
+// redisReady returns true when the Redis server at addr accepts AUTH (when a
+// password is configured) and responds to PING. Each probe has a fixed network
+// deadline, and response lines are bounded to avoid hanging on a bad endpoint.
+func redisReady(addr, password string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	// RESP inline PING: *1\r\n$4\r\nPING\r\n
-	if _, err := conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return false
 	}
 
-	// Read enough bytes to check for "+PONG"
-	buf := make([]byte, 7)
-	n, err := conn.Read(buf)
-	if err != nil || n < 5 {
+	reader := bufio.NewReaderSize(conn, 256)
+	if password != "" {
+		if _, err := fmt.Fprintf(conn, "*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(password), password); err != nil {
+			return false
+		}
+		if !redisSimpleReply(reader, "+OK\r\n") {
+			return false
+		}
+	}
+	if _, err := io.WriteString(conn, "*1\r\n$4\r\nPING\r\n"); err != nil {
 		return false
 	}
-	return strings.HasPrefix(string(buf[:n]), "+PONG")
+	return redisSimpleReply(reader, "+PONG\r\n")
+}
+
+func redisSimpleReply(reader *bufio.Reader, want string) bool {
+	line, err := reader.ReadSlice('\n')
+	return err == nil && string(line) == want
 }
 
 func generateID() (string, error) {

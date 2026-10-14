@@ -1,10 +1,15 @@
 package databases
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,7 +72,7 @@ func serveFakeRedis(t *testing.T) int {
 			go func(c net.Conn) {
 				defer c.Close()
 				buf := make([]byte, 64)
-				c.Read(buf) //nolint:errcheck
+				c.Read(buf)                  //nolint:errcheck
 				c.Write([]byte("+PONG\r\n")) //nolint:errcheck
 			}(conn)
 		}
@@ -162,7 +167,7 @@ func TestPostgresReady_ErrorResponseIsReady(t *testing.T) {
 func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 	port := serveSilentTCP(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a silent TCP listener should not be considered redis-ready")
 }
 
@@ -171,8 +176,98 @@ func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 func TestRedisReady_ProperPongIsReady(t *testing.T) {
 	port := serveFakeRedis(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.True(t, got, "a fake redis server responding +PONG should be considered ready")
+}
+
+func TestRedisReady_AuthenticatesBeforePingAndHandlesPartialReplies(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		auth, err := readTestRedisCommand(reader)
+		if err != nil || !reflect.DeepEqual(auth, []string{"AUTH", "synthetic-password"}) {
+			return
+		}
+		_, _ = conn.Write([]byte("+O"))
+		_, _ = conn.Write([]byte("K\r\n"))
+		ping, err := readTestRedisCommand(reader)
+		if err != nil || !reflect.DeepEqual(ping, []string{"PING"}) {
+			return
+		}
+		_, _ = conn.Write([]byte("+PO"))
+		_, _ = conn.Write([]byte("NG\r\n"))
+	}()
+
+	assert.True(t, redisReady(ln.Addr().String(), "synthetic-password"))
+}
+
+func TestRedisReady_RejectsInvalidPassword(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = readTestRedisCommand(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte("-WRONGPASS invalid username-password pair\r\n"))
+	}()
+
+	assert.False(t, redisReady(ln.Addr().String(), "synthetic-password"))
+}
+
+func TestRedisReady_RejectsUnauthenticatedRedis(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = readTestRedisCommand(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte("-NOAUTH Authentication required.\r\n"))
+	}()
+
+	assert.False(t, redisReady(ln.Addr().String(), ""))
+}
+
+func readTestRedisCommand(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil || len(line) < 4 || line[0] != '*' {
+		return nil, fmt.Errorf("invalid RESP array")
+	}
+	count, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")[1:])
+	if err != nil || count < 1 || count > 4 {
+		return nil, fmt.Errorf("invalid RESP array length")
+	}
+	args := make([]string, 0, count)
+	for range count {
+		line, err = reader.ReadString('\n')
+		if err != nil || len(line) < 4 || line[0] != '$' {
+			return nil, fmt.Errorf("invalid RESP bulk length")
+		}
+		length, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")[1:])
+		if err != nil || length < 0 || length > 1024 {
+			return nil, fmt.Errorf("invalid RESP bulk length")
+		}
+		arg := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, arg); err != nil || !bytes.HasSuffix(arg, []byte("\r\n")) {
+			return nil, fmt.Errorf("invalid RESP bulk argument")
+		}
+		args = append(args, string(arg[:length]))
+	}
+	return args, nil
 }
 
 // TestRedisReady_WrongResponseIsNotReady verifies that a server responding
@@ -200,7 +295,7 @@ func TestRedisReady_WrongResponseIsNotReady(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a redis server returning a non-PONG response should not be considered ready")
 }
 
@@ -373,11 +468,11 @@ func TestValidateName_ValidNames(t *testing.T) {
 		"mydb",
 		"my-db-1",
 		"postgres_main",
-		"a",              // single letter
-		"A",              // single uppercase letter
-		"db1",            // letter then digits
-		"my_db",          // underscores
-		"My-Mixed_Case1", // mixed case with hyphens and underscores
+		"a",                     // single letter
+		"A",                     // single uppercase letter
+		"db1",                   // letter then digits
+		"my_db",                 // underscores
+		"My-Mixed_Case1",        // mixed case with hyphens and underscores
 		strings.Repeat("a", 63), // max length
 	}
 	for _, name := range valid {

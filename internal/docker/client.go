@@ -4,6 +4,8 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -476,8 +478,50 @@ func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 	defer reader.Close()
-	_, _ = io.Copy(io.Discard, reader)
+	if err := consumeImagePullResponse(ctx, reader); err != nil {
+		return fmt.Errorf("read image pull response: %w", err)
+	}
 	return nil
+}
+
+type imagePullMessage struct {
+	Error       string `json:"error"`
+	ErrorDetail struct {
+		Message string `json:"message"`
+	} `json:"errorDetail"`
+}
+
+// consumeImagePullResponse reads the Docker Engine JSON message stream. The
+// daemon can report pull failures in an HTTP 200 response body, so transport
+// success alone does not mean the image is available. Error text is omitted
+// because daemon messages may include registry details.
+func consumeImagePullResponse(ctx context.Context, stream io.Reader) error {
+	decoder := json.NewDecoder(stream)
+	messages := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var message imagePullMessage
+		err := decoder.Decode(&message)
+		if err == io.EOF {
+			if messages == 0 {
+				return fmt.Errorf("empty image pull response")
+			}
+			return nil
+		}
+		if err != nil {
+			var syntaxErr *json.SyntaxError
+			if errors.As(err, &syntaxErr) {
+				return fmt.Errorf("invalid image pull response")
+			}
+			return fmt.Errorf("read image pull stream: %w", err)
+		}
+		messages++
+		if message.Error != "" || message.ErrorDetail.Message != "" {
+			return fmt.Errorf("Docker daemon reported an image pull error")
+		}
+	}
 }
 
 // TagImage adds a new tag to an existing image.

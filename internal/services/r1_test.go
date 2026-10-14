@@ -2,7 +2,10 @@ package services
 
 import (
 	"context"
+	"net/http"
+
 	"errors"
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
@@ -127,4 +130,37 @@ func TestDelete_ContainerRemovalFailureKeepsRow(t *testing.T) {
 		return nil, testutil.NewNotFoundError(id)
 	}
 	require.NoError(t, mgr.Delete(ctx, "tenant-1", svc.ID))
+}
+
+// A failed restart/redeploy must reach the client as a 502 carrying the reason, and
+// leave last_error on the row (not a bare 500 "internal error").
+func TestRestart_FailureIsDeployFailedError(t *testing.T) {
+	runFails := func(context.Context, string, string, string, int, map[string]string, map[string]string, *docker.ResourceLimits) (string, error) {
+		return "", errors.New("runtime error: runsc exploded")
+	}
+	for name, setup := range map[string]func(m *testutil.MockDockerClient){
+		"run": func(m *testutil.MockDockerClient) { m.RunContainerFn = runFails },
+		"stop": func(m *testutil.MockDockerClient) {
+			m.StopContainerFn = func(context.Context, string) error { return errors.New("daemon exploded") }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mock := &testutil.MockDockerClient{}
+			mgr, _, svc := newTestMgr(t, mock, "")
+			ctx := context.Background()
+			require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+			setup(mock)
+
+			err := mgr.Restart(ctx, "tenant-1", svc.ID)
+			var apiErr *apierr.APIError
+			require.True(t, errors.As(err, &apiErr), "got %v", err)
+			assert.Equal(t, http.StatusBadGateway, apiErr.Code)
+			assert.Contains(t, apiErr.Message, "deploy failed")
+
+			got, gerr := mgr.Get(ctx, "tenant-1", svc.ID)
+			require.NoError(t, gerr)
+			assert.NotEmpty(t, got.LastError)
+			assert.NotEqual(t, "restarting", got.Status)
+		})
+	}
 }

@@ -71,6 +71,7 @@ func TestRegistrationLimiter_GlobalLimitEnforced(t *testing.T) {
 		ip := "10.0." + strconv.Itoa(i/regMaxPerIPPerHour) + "." + strconv.Itoa(i%regMaxPerIPPerHour+1)
 		ok, _ := rl.allow(ip)
 		require.True(t, ok, "registration %d (ip=%s) should pass under global limit", i+1, ip)
+		rl.chargeGlobal() // the global bucket is charged only after the token validates
 	}
 
 	// 21st registration from a fresh IP should be rejected by global limit

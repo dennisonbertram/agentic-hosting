@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
@@ -36,7 +37,15 @@ type authCacheEntry struct {
 
 type authCache struct {
 	lru *cache.LRU[string, *authCacheEntry]
+	// mu guards gen against concurrent invalidate/setIfUnchanged. gen is bumped
+	// by every invalidation so a request that read the DB before a revoke
+	// cannot write its stale entry back afterwards.
+	mu  sync.Mutex
+	gen uint64
 }
+
+// authAfterDBRead is a test hook called after the auth DB read, before the cache write.
+var authAfterDBRead func()
 
 func newAuthCache() *authCache {
 	c := &authCache{
@@ -66,7 +75,25 @@ func (c *authCache) set(keyID string, entry *authCacheEntry) {
 	c.lru.Set(keyID, entry)
 }
 
+func (c *authCache) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
+}
+
+// setIfUnchanged caches entry only if no invalidation happened since gen was read.
+func (c *authCache) setIfUnchanged(keyID string, entry *authCacheEntry, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.lru.Set(keyID, entry)
+	}
+}
+
 func (c *authCache) invalidate(keyID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gen++
 	c.lru.Delete(keyID)
 }
 
@@ -83,6 +110,9 @@ func (a *AuthCacheInvalidator) InvalidateKey(keyID string) {
 
 // InvalidateTenant removes all cached keys belonging to the given tenant.
 func (a *AuthCacheInvalidator) InvalidateTenant(tenantID string) {
+	a.cache.mu.Lock()
+	defer a.cache.mu.Unlock()
+	a.cache.gen++
 	a.cache.lru.DeleteFunc(func(_ string, v *authCacheEntry) bool {
 		return v.tenantID == tenantID
 	})
@@ -171,6 +201,7 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 				keyHash = cached.keyHash
 				status = cached.status
 			} else {
+				gen := cache.generation()
 				now := time.Now().Unix()
 				var expiresAt *int64
 				err := db.QueryRowContext(r.Context(),
@@ -191,13 +222,16 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 					return
 				}
 
-				cache.set(keyID, &authCacheEntry{
+				if authAfterDBRead != nil {
+					authAfterDBRead()
+				}
+				cache.setIfUnchanged(keyID, &authCacheEntry{
 					tenantID:  tenantID,
 					keyHash:   keyHash,
 					status:    status,
 					expiresAt: expiresAt,
 					cachedAt:  time.Now(),
-				})
+				}, gen)
 			}
 
 			if status != "active" {

@@ -32,6 +32,7 @@ type ServerConfig struct {
 	MasterKey        []byte
 	DevMode          bool
 	BootstrapTokens  []string
+	AdminTokens      []string // operator-only endpoints (recover/reactivate/quota); empty = fall back to BootstrapTokens
 	OpenRegistration bool
 	Docker           docker.Client
 	BuildManager     *builds.Manager
@@ -70,6 +71,7 @@ type Server struct {
 	apiKeyHashKey     []byte // HMAC key for API key hashes; independent of master key rotation
 	devMode           bool
 	bootstrapTokens   []string
+	adminTokens       []string
 	openRegistration  bool
 	baseDomain        string
 	router            chi.Router
@@ -117,6 +119,7 @@ func NewServer(cfg ServerConfig) *Server {
 		apiKeyHashKey:     hashKey,
 		devMode:           cfg.DevMode,
 		bootstrapTokens:   cfg.BootstrapTokens,
+		adminTokens:       cfg.AdminTokens,
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
 		authInvalidator:   authInvalidator,

@@ -47,6 +47,8 @@ ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah"
 
 Multiple bootstrap tokens are supported — set `AH_BOOTSTRAP_TOKEN` to a comma-separated list (e.g. `token1,token2`). Any valid token in the list is accepted.
 
+`AH_ADMIN_TOKEN` (also comma-separated, 32+ chars) authorizes the operator-only endpoints: key recovery, tenant reactivation and quota updates. Send it as `X-Admin-Token` (or in place of the bootstrap token). Once set, bootstrap tokens are rejected (403) on those endpoints and only work for registration. If unset, bootstrap tokens still work there (deprecated; the server logs a warning at startup).
+
 To verify a bootstrap token without registering, use `POST /v1/auth/bootstrap/validate` with the `X-Bootstrap-Token` header — returns `200` if valid.
 
 ```bash

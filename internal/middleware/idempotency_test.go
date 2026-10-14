@@ -3,14 +3,14 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"sync"
-	"sync/atomic"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 

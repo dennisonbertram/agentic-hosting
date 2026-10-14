@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - `ah backup`: retention now keeps the newest 10 state and 10 metering backups separately (state backups were being deleted first), the source DB is opened truly read-only, and the metering path reuses `db.MeteringPath`.
+- Build-triggered deploys (`DeployImage`) now take the per-service lock, refuse when the circuit breaker is open, and fall back to name-based cleanup of the old container. Idempotency middleware serializes concurrent same-key requests (waiters replay the first response) and evicts the tenant's oldest entry at the per-tenant cap instead of skipping storage.
 
 - Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).
 

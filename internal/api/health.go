@@ -10,8 +10,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 )
 
 type HealthResponse struct {
@@ -54,11 +52,15 @@ type DockerStorageInfo struct {
 }
 
 var (
-	detailedHealthCache     DetailedHealthResponse
+	detailedHealthCache      DetailedHealthResponse
 	detailedHealthCacheValid bool
-	detailedHealthCacheMu   sync.RWMutex
-	detailedHealthCacheTime time.Time
-	detailedHealthCacheTTL  = 30 * time.Second
+	detailedHealthCacheMu    sync.RWMutex
+	detailedHealthCacheTime  time.Time
+	detailedHealthCacheTTL   = 30 * time.Second
+	// ?fresh=true may refresh the cache at most this often.
+	detailedHealthFreshMinInterval = 10 * time.Second
+	// Serializes probes so concurrent callers share one result.
+	detailedHealthBuildMu sync.Mutex
 )
 
 // handleHealth returns minimal constant-time status for public (unauthenticated) requests.
@@ -68,23 +70,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealthDetailed returns full system info (authenticated only).
-// Pass ?fresh=true to bypass the 30s cache and force a live check.
+// Pass ?fresh=true to use a 10s instead of 30s cache lifetime.
 // This is useful during incident response when operators need real-time status.
 // The fresh result still updates the cache so subsequent requests benefit.
 func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.GetTenantID(r.Context()) // auth enforced by middleware
+	// Auth is enforced by middleware. Every authenticated caller is a tenant;
+	// there is no admin role to redact for, so the response is not redacted.
+	// fresh=true shortens the cache lifetime but cannot force a probe more
+	// often than detailedHealthFreshMinInterval (host probes are expensive).
+	maxAge := detailedHealthCacheTTL
+	if r.URL.Query().Get("fresh") == "true" {
+		maxAge = detailedHealthFreshMinInterval
+	}
 
-	fresh := r.URL.Query().Get("fresh") == "true"
+	if resp, ok := cachedDetailedHealth(maxAge); ok {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 
-	if !fresh {
-		detailedHealthCacheMu.RLock()
-		if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < detailedHealthCacheTTL {
-			resp := detailedHealthCache // copy by value under lock
-			detailedHealthCacheMu.RUnlock()
-			writeJSON(w, http.StatusOK, resp)
-			return
-		}
-		detailedHealthCacheMu.RUnlock()
+	// Only one probe runs at a time; callers that waited reuse its result.
+	detailedHealthBuildMu.Lock()
+	defer detailedHealthBuildMu.Unlock()
+	if resp, ok := cachedDetailedHealth(maxAge); ok {
+		writeJSON(w, http.StatusOK, resp)
+		return
 	}
 
 	resp := s.buildDetailedHealth()
@@ -96,6 +105,15 @@ func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
 	detailedHealthCacheMu.Unlock()
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func cachedDetailedHealth(maxAge time.Duration) (DetailedHealthResponse, bool) {
+	detailedHealthCacheMu.RLock()
+	defer detailedHealthCacheMu.RUnlock()
+	if detailedHealthCacheValid && time.Since(detailedHealthCacheTime) < maxAge {
+		return detailedHealthCache, true
+	}
+	return DetailedHealthResponse{}, false
 }
 
 func (s *Server) buildDetailedHealth() DetailedHealthResponse {
@@ -131,9 +149,13 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 		resp.GVisor = GVisorInfo{Available: version != "", Version: version}
 	}
 
-	// Check disk for /var/lib/ah (no exec, safe syscall)
+	// Check disk for the configured data dir (no exec, safe syscall)
+	dataDir := s.dataDir
+	if dataDir == "" {
+		dataDir = "/var/lib/ah"
+	}
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/var/lib/ah", &stat); err == nil {
+	if err := syscall.Statfs(dataDir, &stat); err == nil {
 		resp.Disk = statfsToDiskInfo(stat)
 	}
 

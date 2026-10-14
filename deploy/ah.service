@@ -36,7 +36,7 @@ LockPersonality=yes
 PrivateDevices=yes
 RestrictNamespaces=yes
 ProtectKernelLogs=yes
-ReadWritePaths=/var/lib/ah /etc/traefik/dynamic/ah.yml /run/docker.sock /var/run/docker.sock
+ReadWritePaths=/var/lib/ah /etc/traefik/dynamic /run/docker.sock /var/run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

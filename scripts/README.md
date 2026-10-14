@@ -19,10 +19,6 @@ export AH_URL="http://localhost:8080"
 | Script | Description |
 |--------|-------------|
 | `register.sh` | Register a new tenant and save credentials |
-| `deploy.sh` | Deploy a service from git URL or Docker image |
-| `status.sh` | Show status of all services and databases |
-| `logs.sh` | Stream build logs for a service |
-| `db-provision.sh` | Provision a database and wire it to a service |
 | `health-check.sh` | Cron-friendly health check with webhook alerting |
 
 ## Usage
@@ -33,23 +29,8 @@ chmod +x scripts/*.sh
 # Register (one-time, needs bootstrap token)
 AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
 
-# Deploy from git
-./scripts/deploy.sh https://github.com/org/repo my-app 3000
-
-# Deploy from Docker image
-./scripts/deploy.sh nginx:alpine my-site 80
-
-# Check status
-./scripts/status.sh
-
-# Stream build logs
-./scripts/logs.sh my-app
-
-# Provision Postgres and wire to service
-./scripts/db-provision.sh my-app postgres
-
-# Provision Redis and wire to service
-./scripts/db-provision.sh my-app redis
+# Deploy, status, logs and databases: use the ahc CLI
+# (ahc deploy, ahc status, ahc build logs, ahc db provision)
 ```
 
 ## Health Check Script

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"regexp"
 	"strings"
@@ -223,6 +224,7 @@ func main() {
 		MeteringStore:      meteringStore,
 		BaseDomain:         *baseDomain,
 		TraefikConfigDir:   cfg.TraefikConfigDir,
+		DataDir:            filepath.Dir(*dbPath),
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

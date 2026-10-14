@@ -1,0 +1,233 @@
+import assert from 'node:assert/strict';
+import { afterEach, test } from 'node:test';
+import { createAgentServer } from './app.mjs';
+
+const API_KEY = 'test-openrouter-key-do-not-log';
+const AUTH_TOKEN = 'test-demo-token-0123456789abcdef';
+const servers = new Set();
+
+async function withServer(options, callback) {
+  const server = createAgentServer({
+    apiKey: API_KEY,
+    authToken: AUTH_TOKEN,
+    ...options,
+  });
+  servers.add(server);
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  try {
+    return await callback(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+    servers.delete(server);
+  }
+}
+
+afterEach(async () => {
+  await Promise.all([...servers].map((server) => new Promise((resolve) => server.close(resolve))));
+  servers.clear();
+});
+
+test('requires the demo bearer token and does not call the provider when missing', async () => {
+  let providerCalls = 0;
+  await withServer({ fetchImpl: async () => { providerCalls += 1; } }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'Add 19 and 23.' }),
+    });
+    assert.equal(response.status, 401);
+    assert.equal(providerCalls, 0);
+    assert.doesNotMatch(await response.text(), /test-demo-token|test-openrouter-key/);
+  });
+});
+
+test('rejects oversized input before calling the provider', async () => {
+  let providerCalls = 0;
+  await withServer({ fetchImpl: async () => { providerCalls += 1; } }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'x'.repeat(5000) }),
+    });
+    assert.equal(response.status, 413);
+    assert.equal(providerCalls, 0);
+  });
+});
+
+test('runs one bounded calculator tool round-trip with the fixed model and endpoint', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    if (calls.length === 1) {
+      return new Response(JSON.stringify({
+        choices: [{
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              id: 'call_test_1',
+              type: 'function',
+              function: { name: 'add_numbers', arguments: '{"a":19,"b":23}' },
+            }],
+          },
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'stop',
+        message: { role: 'assistant', content: '19 plus 23 is 42.' },
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  await withServer({ fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 19 and 23, then explain the result.' }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      answer: '19 plus 23 is 42.',
+      tool: { name: 'add_numbers', result: 42 },
+    });
+  });
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(({ url }) => url === 'https://openrouter.ai/api/v1/chat/completions'));
+  assert.ok(calls.every(({ init }) => init.headers.Authorization === `Bearer ${API_KEY}`));
+  assert.ok(calls.every(({ body }) => body.model === 'anthropic/claude-sonnet-5.5'));
+  assert.ok(calls.every(({ body }) => body.max_tokens <= 512));
+  assert.ok(calls.every(({ body }) => body.reasoning.effort === 'low'));
+  assert.deepEqual(calls[0].body.tool_choice, {
+    type: 'function', function: { name: 'add_numbers' },
+  });
+  assert.equal(calls[1].body.tool_choice, 'none');
+  assert.equal(calls[1].body.messages.at(-1).tool_call_id, 'call_test_1');
+  assert.equal(calls[1].body.messages.at(-1).content, '42');
+  assert.doesNotMatch(JSON.stringify(calls), /test-demo-token/);
+});
+
+test('does not execute or loop on unsupported tool calls and hides provider errors', async () => {
+  let providerCalls = 0;
+  const fetchImpl = async () => {
+    providerCalls += 1;
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'tool_calls',
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_untrusted',
+            type: 'function',
+            function: { name: 'run_shell', arguments: '{"command":"id"}' },
+          }],
+        },
+      }],
+      error: { message: 'provider payload must not be echoed' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  await withServer({ fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Please do an unsafe operation.' }),
+    });
+    assert.equal(response.status, 502);
+    const text = await response.text();
+    assert.doesNotMatch(text, /provider payload|test-openrouter-key|test-demo-token/);
+  });
+
+  assert.equal(providerCalls, 1);
+});
+
+test('stops after the final-answer request if the provider tries another tool call', async () => {
+  let providerCalls = 0;
+  const fetchImpl = async () => {
+    providerCalls += 1;
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'tool_calls',
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: `call_${providerCalls}`,
+            type: 'function',
+            function: { name: 'add_numbers', arguments: '{"a":2,"b":3}' },
+          }],
+        },
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  await withServer({ fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 2 and 3.' }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'agent request failed' });
+  });
+
+  assert.equal(providerCalls, 2);
+});
+
+test('bounds provider wait and returns a generic error on timeout', async () => {
+  let providerCalls = 0;
+  const fetchImpl = async (_url, init) => {
+    providerCalls += 1;
+    await new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  };
+
+  await withServer({ fetchImpl, providerTimeoutMs: 20 }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 2 and 3.' }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'agent request failed' });
+  });
+
+  assert.equal(providerCalls, 1);
+});
+
+test('exposes a small public health response without contacting the provider', async () => {
+  let providerCalls = 0;
+  await withServer({ fetchImpl: async () => { providerCalls += 1; } }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/health`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 'ok' });
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  });
+  assert.equal(providerCalls, 0);
+});

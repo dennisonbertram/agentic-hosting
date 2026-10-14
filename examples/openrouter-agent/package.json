@@ -1,0 +1,14 @@
+{
+  "name": "agentic-hosting-openrouter-agent",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "node --check app.mjs && node --check server.mjs",
+    "start": "node server.mjs",
+    "test": "node --test"
+  }
+}

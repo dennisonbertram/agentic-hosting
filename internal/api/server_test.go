@@ -24,16 +24,17 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/metering"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeDatabaseManager struct {
-	createCalls         int
+	createCalls           int
 	stopAllForTenantCalls []string
-	createFn            func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
-	deleteFn            func(ctx context.Context, tenantID, dbID string) error
+	createFn              func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error)
+	deleteFn              func(ctx context.Context, tenantID, dbID string) error
 }
 
 func (f *fakeDatabaseManager) Create(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
@@ -134,6 +135,38 @@ func TestDatabaseCreate_UsesIdempotencyMiddleware(t *testing.T) {
 	assert.Equal(t, 1, dbMgr.createCalls, "database creation should be replayed, not executed twice")
 	assert.Equal(t, "true", second.Header().Get("Idempotency-Replayed"))
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
+}
+
+func TestServerPassesExternalTLSModeToServiceManager(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedAuthenticatedTenant(t, stateDB, []byte("0123456789abcdef0123456789abcdef"))
+	mock := &testutil.MockDockerClient{InspectContainerFn: func(context.Context, string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running", EffectivePort: 8080}, nil
+	}}
+	dir := t.TempDir()
+	srv := NewServer(ServerConfig{
+		Store:                 &db.Store{StateDB: stateDB},
+		MasterKey:             []byte("0123456789abcdef0123456789abcdef"),
+		Docker:                mock,
+		BaseDomain:            "example.com",
+		TraefikConfigDir:      dir,
+		ExternalTLSTerminated: true,
+	})
+
+	svc, err := srv.svcManager.Create(context.Background(), "tenant-1", services.CreateRequest{
+		Name: "server-external-tls", Image: "nginx:latest", Port: 8080,
+	})
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`UPDATE services SET status = 'stopped', container_id = 'existing-container' WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+	require.NoError(t, srv.svcManager.Start(context.Background(), "tenant-1", svc.ID))
+
+	route, err := os.ReadFile(filepath.Join(dir, svc.ID+".yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(route), "- web\n")
+	assert.NotContains(t, string(route), "websecure")
+	assert.NotContains(t, string(route), "certResolver")
+	assert.Contains(t, svc.URL, "https://")
 }
 
 func TestDatabaseCreateUsesBoundedProvisioningDeadline(t *testing.T) {

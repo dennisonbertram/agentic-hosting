@@ -110,12 +110,21 @@ const maxPreviewsPerEnv = 5
 
 // Manager manages environment lifecycle.
 type Manager struct {
-	db               *sql.DB
-	docker           docker.Client
-	pool             *PoolManager
-	baseDomain       string
-	traefikConfigDir string
-	mu               sync.Mutex // for state transitions
+	db                    *sql.DB
+	docker                docker.Client
+	pool                  *PoolManager
+	baseDomain            string
+	externalTLSTerminated bool
+	traefikConfigDir      string
+	mu                    sync.Mutex // for state transitions
+}
+
+// SetExternalTLSTerminated configures preview routes for deployments where a
+// trusted upstream proxy terminates public TLS before traffic reaches Traefik.
+// Enabling it assumes public requests reach these routes only through that
+// configured proxy; the route middleware then sets X-Forwarded-Proto to https.
+func (m *Manager) SetExternalTLSTerminated(enabled bool) {
+	m.externalTLSTerminated = enabled
 }
 
 // NewManager creates an environment manager.
@@ -1152,7 +1161,29 @@ func (m *Manager) writePreviewTraefikRoute(previewID, dnsLabel, containerName st
 	var content string
 	if m.baseDomain != "" {
 		host := fmt.Sprintf("%s.%s", dnsLabel, m.baseDomain)
-		content = fmt.Sprintf(`http:
+		if m.externalTLSTerminated {
+			content = fmt.Sprintf(`http:
+  routers:
+    env-preview-%s:
+      rule: "Host(`+"`%s`"+`)"
+      service: "env-preview-%s"
+      entryPoints:
+        - web
+      middlewares:
+        - env-preview-%s-public-https
+  middlewares:
+    env-preview-%s-public-https:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
+  services:
+    env-preview-%s:
+      loadBalancer:
+        servers:
+          - url: "http://%s:%d"
+`, previewID, host, previewID, previewID, previewID, previewID, containerName, port)
+		} else {
+			content = fmt.Sprintf(`http:
   routers:
     env-preview-%s:
       rule: "Host(`+"`%s`"+`)"
@@ -1167,6 +1198,7 @@ func (m *Manager) writePreviewTraefikRoute(previewID, dnsLabel, containerName st
         servers:
           - url: "http://%s:%d"
 `, previewID, host, previewID, previewID, containerName, port)
+		}
 	} else {
 		// Localhost mode
 		content = fmt.Sprintf(`http:

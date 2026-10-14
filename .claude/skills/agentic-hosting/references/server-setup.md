@@ -56,23 +56,23 @@ mkdir -p /agentic-hosting
 cd /agentic-hosting
 git clone https://github.com/dennisonbertram/agentic-hosting .
 export PATH=$PATH:/usr/local/go/bin
-CGO_ENABLED=1 go build -o /usr/local/bin/paasd ./cmd/ah/
-paasd --help   # verify binary works
+CGO_ENABLED=1 go build -o /usr/local/bin/ah ./cmd/ah/
+ah --help   # verify binary works
 ```
 
 ## 6. Generate Secrets
 
 ```bash
-mkdir -p /var/lib/paasd
+mkdir -p /var/lib/ah
 
 # Master key — encrypts all database credentials; back this up off-server
-head -c 32 /dev/urandom | xxd -p -c 64 > /var/lib/paasd/master.key
-chmod 600 /var/lib/paasd/master.key
+head -c 32 /dev/urandom | xxd -p -c 64 > /var/lib/ah/master.key
+chmod 600 /var/lib/ah/master.key
 
 # Bootstrap token — required to register new tenants; save this securely
 BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
-echo "AH_BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN" > /etc/default/paasd
-chmod 600 /etc/default/paasd
+echo "AH_BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN" > /etc/default/ah
+chmod 600 /etc/default/ah
 echo ""
 echo "⚠ Bootstrap token (save this — it cannot be recovered):"
 echo "  $BOOTSTRAP_TOKEN"
@@ -81,19 +81,19 @@ echo "  $BOOTSTRAP_TOKEN"
 ## 7. Create Systemd Service
 
 ```bash
-cat > /etc/systemd/system/paasd.service << 'EOF'
+cat > /etc/systemd/system/ah.service << 'EOF'
 [Unit]
-Description=paasd - Agentic PaaS daemon
+Description=ah - Agentic PaaS daemon
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/default/paasd
-ExecStart=/usr/local/bin/paasd serve \
+EnvironmentFile=/etc/default/ah
+ExecStart=/usr/local/bin/ah serve \
   --port 8080 \
-  --db-path /var/lib/paasd/paasd.db \
-  --master-key-path /var/lib/paasd/master.key \
+  --db-path /var/lib/ah/ah.db \
+  --master-key-path /var/lib/ah/master.key \
   --dev
   # Optional: enable automatic subdomain routing for all services
   # Requires wildcard DNS record *.apps.example.com → this server's IP
@@ -102,23 +102,25 @@ Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=paasd
+SyslogIdentifier=ah
 
 UMask=0077
 NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
 ProtectSystem=full
-ReadWritePaths=/var/lib/paasd /etc/traefik/dynamic
+ReadWritePaths=/var/lib/ah /etc/traefik/dynamic
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now paasd
-systemctl status paasd   # must show Active: active (running)
+systemctl enable --now ah
+systemctl status ah   # must show Active: active (running)
 ```
+
+The in-repo unit `deploy/ah.service` is the production file (runs as user `ah`, no `--dev`, hardened `ProtectSystem=strict`). Prefer `cp deploy/ah.service /etc/systemd/system/ah.service` when installing from a clone.
 
 Verify:
 ```bash
@@ -164,27 +166,29 @@ providers:
   file:
     directory: /dynamic
     watch: true
+# ah writes service routes as file-provider YAML and sets traefik.enable=false
+# on containers so image labels cannot hijack routing.
 
 api:
   dashboard: true
   insecure: false
 ```
 
-Create the Traefik dynamic config for the API (`/etc/traefik/dynamic/paasd.yml`):
+Create the Traefik dynamic config for the API (`/etc/traefik/dynamic/ah.yml`):
 
 ```yaml
 http:
   routers:
-    paasd:
+    ah:
       rule: "Host(`your-domain.com`) && PathPrefix(`/v1`)"
       entryPoints:
         - websecure
-      service: paasd-svc
+      service: ah-svc
       tls:
         certResolver: letsencrypt
 
   services:
-    paasd-svc:
+    ah-svc:
       loadBalancer:
         servers:
           - url: "http://host.docker.internal:8080"
@@ -216,7 +220,7 @@ docker run -d --name paas-registry \
 ## 10. Register First Tenant
 
 ```bash
-BOOTSTRAP_TOKEN=$(grep AH_BOOTSTRAP_TOKEN /etc/default/paasd | cut -d= -f2)
+BOOTSTRAP_TOKEN=$(grep AH_BOOTSTRAP_TOKEN /etc/default/ah | cut -d= -f2)
 
 curl -s -X POST http://127.0.0.1:8080/v1/tenants/register \
   -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" \
@@ -241,11 +245,11 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed | p
 
 ## Post-Install Checklist
 
-- [ ] `systemctl status paasd` → active (running)
+- [ ] `systemctl status ah` → active (running)
 - [ ] `curl http://127.0.0.1:8080/v1/system/health` → `{"status":"ok"}`
 - [ ] `docker info | grep runsc` → gVisor runtime present
-- [ ] `/var/lib/paasd/master.key` backed up off-server
-- [ ] Bootstrap token saved securely (from `/etc/default/paasd`)
+- [ ] `/var/lib/ah/master.key` backed up off-server
+- [ ] Bootstrap token saved securely (from `/etc/default/ah`)
 - [ ] Traefik is routing your domain to port 8080
 - [ ] First tenant registered with working API key
 - [ ] (Optional) If using `--base-domain`: wildcard DNS record `*.apps.example.com A <server-ip>` is live and resolving
@@ -256,14 +260,14 @@ curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed | p
 
 | File | Purpose |
 |------|---------|
-| `/usr/local/bin/paasd` | The daemon binary |
-| `/var/lib/paasd/paasd.db` | SQLite state database |
-| `/var/lib/paasd/master.key` | Encryption key for DB credentials |
-| `/etc/default/paasd` | `AH_BOOTSTRAP_TOKEN` env var |
-| `/etc/systemd/system/paasd.service` | Systemd unit |
+| `/usr/local/bin/ah` | The daemon binary |
+| `/var/lib/ah/ah.db` | SQLite state database |
+| `/var/lib/ah/master.key` | Encryption key for DB credentials |
+| `/etc/default/ah` | `AH_BOOTSTRAP_TOKEN` env var |
+| `/etc/systemd/system/ah.service` | Systemd unit |
 | `/etc/traefik/` | Traefik config and TLS certs |
 | `/etc/traefik/dynamic/` | Hot-reload routing rules |
-| `/var/lib/paasd/backups/` | Auto-backup destination |
+| `/var/lib/ah/backups/` | Auto-backup destination |
 
 ---
 
@@ -304,13 +308,13 @@ Build and redeploy in-place (Go must be on the server — CGO required):
 cd /path/to/agentic-hosting-source
 git pull
 export PATH=$PATH:/usr/local/go/bin
-CGO_ENABLED=1 go build -o /usr/local/bin/paasd ./cmd/ah/
+CGO_ENABLED=1 go build -o /usr/local/bin/ah ./cmd/ah/
 
 # Kill any orphaned process on :8080 first
 lsof -ti :8080 | xargs kill 2>/dev/null || true
 
-systemctl restart paasd
-journalctl -u paasd -n 20   # check for migration logs and startup
+systemctl restart ah
+journalctl -u ah -n 20   # check for migration logs and startup
 ```
 
 New migrations apply automatically on startup.

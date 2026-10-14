@@ -1,5 +1,5 @@
 ---
-description: Deploy a service to agentic-hosting from a git URL or Docker image. Usage: /deploy <git-url-or-image> <service-name> [port]
+description: Deploy a service to agentic-hosting from a git URL or Docker image. Usage: /ah-deploy <git-url-or-image> <service-name> [port]
 argument-hint: <git-url-or-image> <service-name> [port]
 allowed-tools: Bash
 ---
@@ -13,10 +13,10 @@ Follow this exact flow:
 1. Check connectivity: `curl -s $AH_URL/v1/system/health`
 2. Check disk: `curl -s -H "Authorization: Bearer $AH_KEY" $AH_URL/v1/system/health/detailed` — abort if disk >90%
 3. Determine if `$1` is a git URL (starts with https://) or a Docker image name
-4. **If Docker image**: Create service directly with the image
+4. **If Docker image**: Create service with `{"name","image","port"}` — do **not** send `memory_mb` or `cpu_count` (those fields are not on CreateRequest)
 5. **If git URL**:
-   - Create service with placeholder image first
-   - Start a Nixpacks build with the git URL
+   - Create service with placeholder image `"pending"` (`image` is required; omitting it returns 400)
+   - Start a Nixpacks build: `{"source_type":"git","source_url":"<url>","source_ref":"main"}` — there is no `git_url` / `branch` field
    - Stream build logs until complete
    - The build auto-deploys on success
 6. Poll for `running` status every 5 seconds, up to 10 minutes

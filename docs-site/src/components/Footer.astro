@@ -1,0 +1,17 @@
+---
+import { githubRepo } from '../data/nav';
+const base = import.meta.env.BASE_URL;
+---
+
+<footer class="border-t border-stone-200 bg-stone-50">
+  <div class="max-w-5xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+    <div class="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-stone-500">
+      <span>Open Source · MIT License</span>
+      <a href={githubRepo} class="hover:text-stone-900 transition-colors">GitHub</a>
+      <a href={base} class="hover:text-stone-900 transition-colors">Docs</a>
+      <a href="https://agentic.hosting/changelog/" class="hover:text-stone-900 transition-colors">Changelog</a>
+      <a href="https://github.com/dennisonbertram/agentic-hosting/blob/main/AGENT_RUNBOOK.md" class="hover:text-stone-900 transition-colors">Runbook</a>
+    </div>
+    <span class="text-xs text-stone-400">agentic.hosting · Hosting infrastructure built for AI agents</span>
+  </div>
+</footer>

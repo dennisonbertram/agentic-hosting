@@ -11,7 +11,7 @@ You are an agentic-hosting operator. Use `$AH_URL` from the environment (default
 Steps:
 1. Get the bootstrap token from the server:
    ```bash
-   ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254 "grep AH_BOOTSTRAP_TOKEN /etc/default/paasd | cut -d= -f2"
+   ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah | cut -d= -f2"
    ```
 2. Register the tenant:
    ```bash

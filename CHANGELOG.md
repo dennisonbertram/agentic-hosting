@@ -47,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed (services)
 
 - `/redeploy` now deploys services with no container (after a failed deploy, failed restart or circuit reset); deleting a service with snapshots works; snapshot restore skips the registry pull when the image is local; failed restarts no longer leave deployments stuck as `deploying`; rename keeps the `PORT` override in the Traefik route; Docker not-found detection uses typed errors instead of matching "404".
+- Environments: claimed warm-pool containers are renamed to the tenant env name and kept by GC; pool refill no longer blocks `Acquire`; exec timeouts are enforced and set `timed_out`; tenant suspend stops environments and previews on a detached 5-minute context; previews capped at 5 per environment; `env-` service names reserved.
+
 
 ## [0.5.0] - 2026-03-30
 

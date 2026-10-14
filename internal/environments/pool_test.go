@@ -48,11 +48,12 @@ func TestPoolAcquire_Hit(t *testing.T) {
 	assert.Equal(t, "container-abc", containerID)
 	assert.Equal(t, "ah-pool-wp1", volumeName)
 
-	// Verify the row was deleted.
-	var count int
-	err = db.QueryRow(`SELECT COUNT(*) FROM warm_pool WHERE id = 'wp1'`).Scan(&count)
+	// The row is kept as 'claimed' so GC (which matches the immutable
+	// ah.type=warm-pool label against warm_pool rows) does not remove it.
+	var status string
+	err = db.QueryRow(`SELECT status FROM warm_pool WHERE id = 'wp1'`).Scan(&status)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count)
+	assert.Equal(t, "claimed", status)
 }
 
 func TestPoolAcquire_Miss(t *testing.T) {

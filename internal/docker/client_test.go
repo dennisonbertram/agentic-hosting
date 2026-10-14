@@ -178,11 +178,27 @@ func TestPerWorkloadIngressNetworkNames(t *testing.T) {
 	if got, want := TenantIngressNetworkPrefix(tenantID), "ah-ingress-tenant-1-"; got != want {
 		t.Fatalf("TenantIngressNetworkPrefix() = %q, want %q", got, want)
 	}
-	if got, want := ServiceIngressAlias(tenantID, serviceID), "ah-route-tenant-1-service-svc-1"; got != want {
+	if got, want := ServiceIngressAlias(tenantID, serviceID), "ah-route-service-svc-1"; got != want {
 		t.Fatalf("ServiceIngressAlias() = %q, want %q", got, want)
 	}
-	if got, want := EnvironmentIngressAlias(tenantID, environmentID), "ah-route-tenant-1-environment-env-1"; got != want {
+	if got, want := EnvironmentIngressAlias(tenantID, environmentID), "ah-route-env-env-1"; got != want {
 		t.Fatalf("EnvironmentIngressAlias() = %q, want %q", got, want)
+	}
+}
+
+func TestPerWorkloadIngressAliasesFitDockerDNSLabelLimit(t *testing.T) {
+	fullID := "0123456789abcdef0123456789abcdef"
+	serviceAlias := ServiceIngressAlias("tenant-with-a-long-id", fullID)
+	environmentAlias := EnvironmentIngressAlias("tenant-with-a-long-id", fullID)
+	if len(serviceAlias) > 63 || len(environmentAlias) > 63 {
+		t.Fatalf("aliases exceed Docker DNS-label limit: service=%q (%d), environment=%q (%d)",
+			serviceAlias, len(serviceAlias), environmentAlias, len(environmentAlias))
+	}
+	if serviceAlias == environmentAlias {
+		t.Fatalf("service and environment aliases must have distinct prefixes: %q", serviceAlias)
+	}
+	if serviceAlias != ServiceIngressAlias("different-tenant", fullID) {
+		t.Fatal("globally unique workload IDs should produce tenant-independent aliases")
 	}
 }
 

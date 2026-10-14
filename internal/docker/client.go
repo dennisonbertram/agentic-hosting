@@ -249,7 +249,9 @@ func ServiceIngressNetworkName(tenantID, serviceID string) string {
 // ServiceIngressAlias returns a name that resolves only on this service's
 // dedicated ingress network.
 func ServiceIngressAlias(tenantID, serviceID string) string {
-	return "ah-route-" + tenantID + "-service-" + serviceID
+	// Service IDs are globally unique. Omitting the tenant ID keeps the name
+	// below Docker's 63-character DNS-label limit for full 32-character IDs.
+	return "ah-route-service-" + serviceID
 }
 
 // EnvironmentIngressNetworkName returns a network dedicated to one environment
@@ -261,7 +263,9 @@ func EnvironmentIngressNetworkName(tenantID, environmentID string) string {
 // EnvironmentIngressAlias returns a name that resolves only on this
 // environment's dedicated preview ingress network.
 func EnvironmentIngressAlias(tenantID, environmentID string) string {
-	return "ah-route-" + tenantID + "-environment-" + environmentID
+	// Environment IDs are globally unique. Keep this network-scoped alias
+	// within Docker's 63-character DNS-label limit for full 32-character IDs.
+	return "ah-route-env-" + environmentID
 }
 
 // TenantIngressNetworkPrefix returns the prefix for a tenant's per-workload

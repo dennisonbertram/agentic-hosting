@@ -3,6 +3,7 @@ package databases
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -207,6 +208,36 @@ func TestRedisReady_WrongResponseIsNotReady(t *testing.T) {
 // Manager integration tests
 // ---------------------------------------------------------------------------
 
+func TestCreate_PullsDatabaseImageBeforeCreatingResources(t *testing.T) {
+	for _, tc := range []struct {
+		dbType string
+		image  string
+	}{
+		{"postgres", "postgres:16-alpine"},
+		{"redis", "redis:7-alpine"},
+	} {
+		t.Run(tc.dbType, func(t *testing.T) {
+			stateDB := testutil.NewStateDB(t)
+			seedDatabaseTestData(t, stateDB, 5)
+			mock := &testutil.MockDockerClient{
+				PullImageFn: func(context.Context, string) error {
+					return errors.New("synthetic pull failure")
+				},
+			}
+			mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+			got, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "image-check", Type: tc.dbType})
+			require.ErrorContains(t, err, "pull database image")
+			assert.Nil(t, got)
+			assert.Equal(t, []string{tc.image}, mock.PullImageCalls)
+			assert.Empty(t, mock.CreateVolumeCalls, "volume must not be created when the base image cannot be pulled")
+			assert.Zero(t, mock.RunDatabaseCalls, "container must not be started when the base image cannot be pulled")
+			var rows int
+			require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM databases WHERE tenant_id = ?`, "tenant-1").Scan(&rows))
+			assert.Zero(t, rows, "failed image pull must not leave a failed database record")
+		})
+	}
+}
+
 func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	seedDatabaseTestData(t, stateDB, 1)
@@ -252,6 +283,7 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, second)
 	assert.ErrorContains(t, err, "quota exceeded: maximum 1 databases reached")
+	assert.Equal(t, []string{"postgres:16-alpine", "postgres:16-alpine"}, dockerClient.PullImageCalls)
 }
 
 // TestDelete_WipesVolumeBeforeRemoval verifies that WipeVolume is called before

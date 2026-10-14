@@ -148,6 +148,15 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("disk check: %w", err)
 	}
 
+	// Docker's ContainerCreate does not fetch a missing image. Ensure the
+	// database image exists before quota checks and before inserting a
+	// provisioning record or creating a volume. Pulling before the quota
+	// transaction avoids holding or extending the check-to-insert window.
+	image := databaseImage(req.Type)
+	if err := m.docker.PullImage(ctx, image); err != nil {
+		return nil, fmt.Errorf("pull database image: %w", err)
+	}
+
 	id, err := generateID()
 	if err != nil {
 		return nil, err
@@ -329,6 +338,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
+}
+
+func databaseImage(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "postgres:16-alpine"
+	case "redis":
+		return "redis:7-alpine"
+	default:
+		return ""
+	}
 }
 
 // Get returns a database by ID, scoped to tenant. Connection string NOT included.

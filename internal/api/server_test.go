@@ -132,15 +132,15 @@ func TestDatabaseCreate_UsesIdempotencyMiddleware(t *testing.T) {
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
 }
 
-func TestDatabaseCreate_LongRunningRouteHasNoTimeoutDeadline(t *testing.T) {
+func TestDatabaseCreateUsesBoundedProvisioningDeadline(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	token := seedAuthenticatedTenant(t, stateDB, masterKey)
 
-	sawDeadline := false
+	var managerDeadline time.Time
 	dbMgr := &fakeDatabaseManager{
 		createFn: func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
-			_, sawDeadline = ctx.Deadline()
+			managerDeadline, _ = ctx.Deadline()
 			return &databases.Database{
 				ID:       "db-1",
 				TenantID: tenantID,
@@ -162,10 +162,50 @@ func TestDatabaseCreate_LongRunningRouteHasNoTimeoutDeadline(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
+	writer := &deadlineRecordingWriter{ResponseWriter: rr}
+	started := time.Now()
+	srv.ServeHTTP(writer, req)
 
 	require.Equal(t, http.StatusCreated, rr.Code)
-	assert.False(t, sawDeadline, "long-running database create route should not inherit the short request timeout")
+	require.False(t, managerDeadline.IsZero(), "database provisioning should have a bounded context")
+	assert.GreaterOrEqual(t, managerDeadline.Sub(started), databaseCreateTimeout-time.Second)
+	assert.LessOrEqual(t, managerDeadline.Sub(started), databaseCreateTimeout+time.Second)
+	assert.GreaterOrEqual(t, writer.deadline.Sub(started), databaseCreateTimeout)
+	assert.LessOrEqual(t, writer.deadline.Sub(started), databaseCreateTimeout+6*time.Second)
+}
+
+func TestDatabaseCreateResponseSurvivesShortServerWriteTimeout(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+	dbMgr := &fakeDatabaseManager{
+		createFn: func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
+			time.Sleep(60 * time.Millisecond)
+			return &databases.Database{ID: "db-1", TenantID: tenantID, Name: req.Name, Type: req.Type, Status: "ready"}, nil
+		},
+	}
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		DatabaseManager: dbMgr,
+	})
+	ts := httptest.NewUnstartedServer(srv)
+	ts.Config.WriteTimeout = 20 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/databases", strings.NewReader(`{"name":"main-db","type":"postgres"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: time.Second}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Contains(t, string(body), `"status":"ready"`)
 }
 
 func TestServiceLogsRoute_IsRegisteredAndHasNoTimeoutDeadline(t *testing.T) {

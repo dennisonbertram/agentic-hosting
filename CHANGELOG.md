@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).
 
 - **Master key rotation no longer invalidates API keys** — API key hashes now use a dedicated HMAC key stored encrypted in new `server_secrets` table (seeded from the current master key so existing keys keep working); `ah rotate-key` re-encrypts it.
+- Lifecycle races (R1): the circuit breaker opens only after the container is stopped and removed (failed stops are retried); `Restart` marks the row `restarting` before stopping, so the reconciler no longer counts phantom crashes; deploys and restarts never overwrite an open circuit or reuse the old restart baseline; env lease expiry claims the row before stopping; `Delete` aborts if the container cannot be removed. Failed `/restart` and `/redeploy` now return 502 `deploy failed: <reason>` instead of 500.
+
 ### Fixed (W3-B cancellation)
 - Build cancel now cancels the build context, never overwrites a finished build, and a cancelled build no longer deploys; deployment cancel/status updates can no longer overwrite each other. Build log streaming no longer leaks subscribers or hangs, lines over 256KB no longer hang a build, and build logs are written in batches instead of one UPDATE per line.
 

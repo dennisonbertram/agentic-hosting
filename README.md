@@ -49,7 +49,7 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 
 ## Installation
 
-For a Mac mini demo, use the isolated Lima VM and ngrok setup in [the Mac mini walkthrough](docs/ops/macmini.md). It runs the same Go application with Docker and gVisor inside Ubuntu, and keeps the host-side ingress on loopback. The existing Hetzner/server install remains documented separately in [the fresh-install guide](docs/ops/fresh-install.md).
+For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
 
 ### 1. Install dependencies
 

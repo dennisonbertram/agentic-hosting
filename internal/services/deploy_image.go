@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
@@ -42,9 +43,16 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return fmt.Errorf("disk check: %w", err)
 	}
 
+	// LOCK ORDER: deployQueue -> deploySem -> lockService (same as Deploy/Restart).
+	unlock := m.lockService(serviceID)
+	defer unlock()
+
 	svc, err := m.getOwned(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
+	}
+	if svc.CircuitOpen {
+		return apierr.Conflict("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
 	}
 
 	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
@@ -63,8 +71,20 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	// Stop and remove old container if exists
 	if svc.ContainerID != "" {
-		_ = m.docker.StopContainer(ctx, svc.ContainerID)
-		_ = m.docker.RemoveContainer(ctx, svc.ContainerID)
+		if err := m.docker.StopContainer(ctx, svc.ContainerID); err != nil && !isNotFoundError(err) && !isAlreadyStoppedError(err) {
+			log.Printf("services: stop error during image deploy of %s: %v (proceeding)", serviceID, err)
+		}
+		if err := m.docker.RemoveContainer(ctx, svc.ContainerID); err != nil && !isNotFoundError(err) {
+			// Fall back to removal by deterministic name so the new container can reuse it.
+			log.Printf("services: remove by id failed for %s: %v; falling back to name", serviceID, err)
+			name := fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
+			if cleanErr := m.docker.StopAndRemoveByName(ctx, name); cleanErr != nil && !isNotFoundError(cleanErr) {
+				msg := fmt.Sprintf("remove old container failed: %v", cleanErr)
+				m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", msg)
+				m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(msg), deployments.WithCompletedAt(time.Now().Unix()))
+				return fmt.Errorf("remove old container: %w", cleanErr)
+			}
+		}
 	}
 
 	// Ensure per-tenant network
@@ -92,16 +112,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return fmt.Errorf("load env vars: %w", err)
 	}
 
-	port := svc.Port
-	if port <= 0 {
-		port = 8000
-	}
-	if p, ok := envVars["PORT"]; ok {
-		var parsed int
-		if _, err := fmt.Sscanf(p, "%d", &parsed); err == nil && parsed >= 1 && parsed <= 65535 {
-			port = parsed
-		}
-	}
+	port := resolvePort(svc.Port, envVars)
 
 	limits := m.getResourceLimits(ctx, tenantID)
 
@@ -134,7 +145,11 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
 
-	// Write Traefik file-provider route (non-fatal on error)
+	// Write Traefik file-provider route (non-fatal on error). Re-verify under the
+	// lock that the service still exists so a concurrent Delete cannot leave a stale route.
+	if _, err := m.getOwned(ctx, tenantID, serviceID); err != nil {
+		return fmt.Errorf("service deleted during deploy")
+	}
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
 		log.Printf("WARNING: failed to write traefik route for service %s: %v", serviceID, err)
 	}

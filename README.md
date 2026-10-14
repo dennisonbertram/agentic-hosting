@@ -417,6 +417,7 @@ See [`scripts/README.md`](scripts/README.md) for full documentation.
 ## Comparisons
 
 - [ah vs OpenShell / NemoClaw](docs/exploration/ah-vs-openshell.md) — where each tool fits and how they complement each other
+- [InstaBox compatibility (2026-10-14)](docs/investigations/instabox-compatibility-2026-10-14.md) — can ah run on InstaBox (InsForge / Hang Huang)? Likely as a constrained `--dev` single-tenant box; blocked for stock production install and unattended signup
 
 ## Documentation site
 

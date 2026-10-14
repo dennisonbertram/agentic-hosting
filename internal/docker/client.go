@@ -2,9 +2,9 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"bytes"
 	"io"
 	"log"
 	"strings"
@@ -503,39 +503,60 @@ func (c *DockerClient) RemoveVolumeSafe(ctx context.Context, name string) error 
 	return c.cli.VolumeRemove(ctx, name, false)
 }
 
-// WipeVolume overwrites all files in the named volume with zeros using a
-// short-lived busybox container. This prevents a future tenant from recovering
-// data after a database is deleted. The container is removed automatically
-// after the wipe completes (--rm equivalent via AutoRemove).
-// A best-effort operation: errors are logged but do not block volume removal.
-func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
-	containerCfg := &container.Config{
-		Image: "busybox:latest",
-		Cmd:   []string{"sh", "-c", "find /data -type f -exec sh -c 'dd if=/dev/zero of=\"$1\" bs=1M conv=notrunc 2>/dev/null; rm -f \"$1\"' _ {} \\;"},
-	}
-	hostCfg := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeVolume,
-				Source: name,
-				Target: "/data",
+const wipeImage = "busybox:1.36"
+
+// wipeScript overwrites each regular file with exactly its own size in zeros
+// (conv=notrunc, input capped by head -c) and then removes it, so it can never
+// grow a file or fill the shared disk.
+const wipeScript = `find /data -type f -exec sh -c 'head -c "$(wc -c < "$1")" /dev/zero | dd of="$1" bs=64k conv=notrunc 2>/dev/null; rm -f "$1"' _ {} \;`
+
+// wipeConfigs builds the container configs for WipeVolume. Root needs
+// DAC_OVERRIDE/FOWNER because volume files may belong to other UIDs.
+func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
+	return &container.Config{
+			Image: wipeImage,
+			Cmd:   []string{"sh", "-c", wipeScript},
+		}, &container.HostConfig{
+			Runtime:     "runsc",
+			NetworkMode: "none",
+			CapDrop:     []string{"ALL"},
+			CapAdd:      []string{"DAC_OVERRIDE", "FOWNER"},
+			Resources: container.Resources{
+				Memory:     64 * 1024 * 1024,
+				MemorySwap: 64 * 1024 * 1024,
+				PidsLimit:  int64Ptr(64),
 			},
-		},
-		AutoRemove: true,
+			Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: volume, Target: "/data"}},
+		}
+}
+
+// WipeVolume overwrites all files in the named volume with zeros (bounded to
+// each file's own size) in a short-lived sandboxed busybox container, so a
+// future tenant cannot recover deleted data. On ctx expiry the container is
+// killed and removed.
+func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
+	if _, err := c.cli.ImageInspect(ctx, wipeImage); err != nil {
+		if err := c.PullImage(ctx, wipeImage); err != nil {
+			return fmt.Errorf("wipe volume %s: %w", name, err)
+		}
 	}
+	containerCfg, hostCfg := wipeConfigs(name)
 
 	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")
 	if err != nil {
 		return fmt.Errorf("wipe volume %s: create container: %w", name, err)
 	}
+	// Always force-remove (kills if running); fresh context so it works after ctx expiry.
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = c.cli.ContainerRemove(cctx, resp.ID, container.RemoveOptions{Force: true})
+	}()
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		// Clean up the created-but-not-started container
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		return fmt.Errorf("wipe volume %s: start container: %w", name, err)
 	}
 
-	// Wait for the wipe container to finish
 	statusCh, errCh := c.cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
 	select {
 	case err := <-errCh:
@@ -546,8 +567,10 @@ func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
 		if body.Error != nil {
 			return fmt.Errorf("wipe volume %s: container error: %s", name, body.Error.Message)
 		}
+		if body.StatusCode != 0 {
+			return fmt.Errorf("wipe volume %s: container exited with status %d", name, body.StatusCode)
+		}
 	}
-
 	return nil
 }
 

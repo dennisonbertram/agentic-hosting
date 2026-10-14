@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -332,5 +333,54 @@ func TestRunDatabaseConfig_DefaultLabels(t *testing.T) {
 	}
 	if custom["custom"] != "label" {
 		t.Errorf("custom label = %q, want %q", custom["custom"], "label")
+	}
+}
+
+func TestWipeConfigs(t *testing.T) {
+	cfg, host := wipeConfigs("vol1")
+	if !strings.HasPrefix(cfg.Image, "busybox:") || strings.HasSuffix(cfg.Image, ":latest") {
+		t.Errorf("image must be pinned, got %q", cfg.Image)
+	}
+	if host.Runtime != "runsc" {
+		t.Errorf("runtime = %q, want runsc", host.Runtime)
+	}
+	if host.NetworkMode != "none" {
+		t.Errorf("network = %q, want none", host.NetworkMode)
+	}
+	if len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" {
+		t.Errorf("CapDrop = %v, want [ALL]", host.CapDrop)
+	}
+	if host.Memory == 0 || host.PidsLimit == nil {
+		t.Error("memory and pids limits must be set")
+	}
+	script := strings.Join(cfg.Cmd, " ")
+	if strings.Contains(script, "if=/dev/zero") || !strings.Contains(script, `head -c "$(wc -c`) {
+		t.Errorf("wipe must cap writes to the file size, got %q", script)
+	}
+}
+
+// Runs the wipe script (without the final rm) in a real container and checks
+// each file keeps its size and is zeroed. Skipped when docker is unavailable.
+func TestWipeScript_BoundedToFileSize(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("docker daemon not reachable")
+	}
+	script := strings.Replace(wipeScript, `rm -f "$1"`, `echo "$(wc -c < "$1") $(tr -d "\\000" < "$1" | wc -c)"`, 1)
+	script = `mkdir -p /data/sub; echo -n hello > /data/a; head -c 5000 /dev/urandom > /data/sub/b; ` + script
+	out, err := exec.Command("docker", "run", "--rm", "--network", "none", wipeImage, "sh", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Skipf("cannot run %s: %v: %s", wipeImage, err, out)
+	}
+	// per file: "<size> <non-zero byte count>"
+	f := strings.Fields(string(out))
+	got := map[string]bool{}
+	for i := 0; i+1 < len(f); i += 2 {
+		got[f[i]+" "+f[i+1]] = true
+	}
+	if !got["5 0"] || !got["5000 0"] {
+		t.Fatalf("sizes changed or data not zeroed: %q", out)
 	}
 }

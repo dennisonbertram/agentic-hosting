@@ -27,7 +27,7 @@ const basePayload = () => ({
       },
     },
   }],
-  tool_choice: { type: 'function', function: { name: 'add_numbers' } },
+  tool_choice: 'auto',
   parallel_tool_calls: false,
   max_tokens: 512,
   reasoning: { effort: 'low' },
@@ -119,18 +119,54 @@ test('pins destination, model, headers, tools, and output budget before provider
   assert.equal(call.payload.stream, false);
   assert.equal(call.payload.tools.length, 1);
   assert.equal(call.payload.tools[0].function.name, 'add_numbers');
+  assert.equal(call.payload.tool_choice, 'auto');
+  assert.equal(call.payload.tools[0].function.strict, true);
   assert.doesNotMatch(JSON.stringify(call), /synthetic-relay-token/);
+});
+
+test('accepts auto for the first turn and rejects forced tool choice', async () => {
+  let providerCalls = 0;
+  await withServer({ providerRequest: async () => {
+    providerCalls += 1;
+    return { statusCode: 200, body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) };
+  } }, async (baseURL) => {
+    const forced = basePayload();
+    forced.tool_choice = { type: 'function', function: { name: 'add_numbers' } };
+    const rejected = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(forced),
+    });
+    assert.equal(rejected.status, 400);
+
+    const accepted = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(basePayload()),
+    });
+    assert.equal(accepted.status, 200);
+  });
+  assert.equal(providerCalls, 1);
 });
 
 test('preserves bounded assistant reasoning details for the second tool round', async () => {
   let sentMessages;
+  const sentTools = [];
   const reasoningDetails = [{ type: 'reasoning.text', text: 'synthetic opaque reasoning detail' }];
   await withServer({
     providerRequest: async ({ payload }) => {
       sentMessages = payload.messages;
+      sentTools.push(JSON.parse(JSON.stringify(payload.tools)));
       return { statusCode: 200, body: JSON.stringify({ choices: [{ message: { content: '42' } }] }) };
     },
   }, async (baseURL) => {
+    const firstResponse = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(basePayload()),
+    });
+    assert.equal(firstResponse.status, 200);
+
     const payload = basePayload();
     payload.tool_choice = 'none';
     payload.messages.push(
@@ -154,6 +190,9 @@ test('preserves bounded assistant reasoning details for the second tool round', 
     assert.equal(response.status, 200);
   });
   assert.deepEqual(sentMessages[2].reasoning_details, reasoningDetails);
+  assert.deepEqual(sentTools[0], sentTools[1]);
+  assert.equal(sentTools[1][0].function.strict, true);
+  assert.equal(sentTools[1][0].function.name, 'add_numbers');
 });
 
 test('rejects caller-selected models, destinations, tools, and malformed bounded messages', async () => {

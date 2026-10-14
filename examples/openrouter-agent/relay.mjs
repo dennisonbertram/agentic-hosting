@@ -214,6 +214,7 @@ const ADD_NUMBERS_TOOL = [{
   function: {
     name: 'add_numbers',
     description: 'Add two finite numbers, each between -1000000 and 1000000.',
+    strict: true,
     parameters: {
       type: 'object',
       properties: { a: { type: 'number' }, b: { type: 'number' } },
@@ -237,10 +238,7 @@ function validatePayload(body) {
   const isFirstRound = Array.isArray(body.messages) && body.messages.length === 2;
   const choice = body.tool_choice;
   if (isFirstRound) {
-    if (
-      !hasOnlyKeys(choice, ['type', 'function']) || choice.type !== 'function' ||
-      !hasOnlyKeys(choice.function, ['name']) || choice.function.name !== 'add_numbers'
-    ) throw new RelayError(400, 'unsupported tool choice');
+    if (choice !== 'auto') throw new RelayError(400, 'unsupported tool choice');
   } else if (choice !== 'none') {
     throw new RelayError(400, 'unsupported tool choice');
   }
@@ -255,7 +253,7 @@ function validatePayload(body) {
     model: MODEL_ID,
     messages: validateMessages(body.messages),
     tools: ADD_NUMBERS_TOOL,
-    tool_choice: isFirstRound ? { type: 'function', function: { name: 'add_numbers' } } : 'none',
+    tool_choice: isFirstRound ? 'auto' : 'none',
     parallel_tool_calls: false,
     max_tokens: Math.min(body.max_tokens, MAX_OUTPUT_TOKENS),
     reasoning: { effort: 'low' },

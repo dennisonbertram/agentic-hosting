@@ -128,6 +128,13 @@ type MockDockerClient struct {
 	PruneDanglingImagesFn    func(ctx context.Context) (int, error)
 	PruneDanglingImagesCalls int
 
+	PruneAnonymousVolumesFn    func(ctx context.Context) (int, error)
+	PruneAnonymousVolumesCalls int
+	ListImagesFn               func(ctx context.Context) ([]docker.ImageInfo, error)
+	ListContainerImagesFn      func(ctx context.Context) ([]string, error)
+	// ListNetworkContainersFn returns the names of containers on a network.
+	ListNetworkContainersFn func(ctx context.Context, networkName string) ([]string, error)
+
 	// ListVolumes
 	ListVolumesFn    func(ctx context.Context, prefix string) ([]string, error)
 	ListVolumesCalls []string // prefixes queried
@@ -376,6 +383,35 @@ func (m *MockDockerClient) PruneDanglingImages(ctx context.Context) (int, error)
 		return m.PruneDanglingImagesFn(ctx)
 	}
 	return 0, nil
+}
+
+func (m *MockDockerClient) PruneAnonymousVolumes(ctx context.Context) (int, error) {
+	m.PruneAnonymousVolumesCalls++
+	if m.PruneAnonymousVolumesFn != nil {
+		return m.PruneAnonymousVolumesFn(ctx)
+	}
+	return 0, nil
+}
+
+func (m *MockDockerClient) ListImages(ctx context.Context) ([]docker.ImageInfo, error) {
+	if m.ListImagesFn != nil {
+		return m.ListImagesFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockDockerClient) ListContainerImages(ctx context.Context) ([]string, error) {
+	if m.ListContainerImagesFn != nil {
+		return m.ListContainerImagesFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockDockerClient) ListNetworkContainers(ctx context.Context, networkName string) ([]string, error) {
+	if m.ListNetworkContainersFn != nil {
+		return m.ListNetworkContainersFn(ctx, networkName)
+	}
+	return nil, nil
 }
 
 func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]string, error) {

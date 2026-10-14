@@ -34,6 +34,7 @@ type Client interface {
 	RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
 	StartContainer(ctx context.Context, containerID string) error
+	RestartContainer(ctx context.Context, containerID string) error
 	RemoveContainer(ctx context.Context, containerID string) error
 	LogsContainer(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
 	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
@@ -106,6 +107,7 @@ type ContainerInfo struct {
 	StartedAt    string
 	ExitCode     int
 	HealthStatus string // "", "starting", "healthy", "unhealthy", "none"
+	RestartCount int    // times Docker's restart policy has restarted this container
 }
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
@@ -348,6 +350,12 @@ func (c *DockerClient) StartContainer(ctx context.Context, containerID string) e
 	return c.cli.ContainerStart(ctx, containerID, container.StartOptions{})
 }
 
+// RestartContainer restarts a container (stop with 10s timeout, then start).
+func (c *DockerClient) RestartContainer(ctx context.Context, containerID string) error {
+	timeout := 10
+	return c.cli.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
+}
+
 // RemoveContainer force-removes a container.
 func (c *DockerClient) RemoveContainer(ctx context.Context, containerID string) error {
 	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
@@ -385,6 +393,7 @@ func (c *DockerClient) InspectContainer(ctx context.Context, containerID string)
 		StartedAt:    info.State.StartedAt,
 		ExitCode:     info.State.ExitCode,
 		HealthStatus: healthStatus,
+		RestartCount: info.RestartCount,
 	}, nil
 }
 

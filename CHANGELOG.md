@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Documentation site** — Astro docs in `docs-site/` matching the agentic.hosting landing-page look, covering the live `/v1/` API and operations. GitHub Pages workflow at `.github/workflows/docs.yml`.
+- **Agent onboarding** — repo-root `llms.txt` / `llms-full.txt` (also served at the docs site `/llms.txt`) and a standalone skill at `skills/agentic-hosting/SKILL.md` so an agent can install and operate ah from one URL.
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)
   - `ahc deploy` — deploy from Docker images or git repos with build log streaming
   - `ahc service` — full service lifecycle management with env var support

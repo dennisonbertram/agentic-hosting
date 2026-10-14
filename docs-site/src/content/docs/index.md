@@ -72,6 +72,15 @@ SQLite + master.key    /var/lib/ah/
 Private registry       127.0.0.1:5000
 ```
 
+## Give this to your agent
+
+One file is enough to onboard:
+
+- [`llms.txt`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt) — llmstxt.org index
+- [Operator skill](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md) — install, register, deploy, databases, logs, API
+
+Details: [Give this to your agent](./for-agents/).
+
 The public site is [agentic.hosting](https://agentic.hosting). Source is [github.com/dennisonbertram/agentic-hosting](https://github.com/dennisonbertram/agentic-hosting).
 
 <a href="https://github.com/dennisonbertram/agentic-hosting">★ Star on GitHub</a> if you run this or send agents to it.

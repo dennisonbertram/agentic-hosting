@@ -18,7 +18,7 @@ test-coverage:
 	@echo "Coverage report: coverage.html"
 
 docs:
-	cd docs-site && npm ci && npm run build
+	cd docs-site && npm ci && npm run llms && npm run build
 
 docs-dev:
 	cd docs-site && npm install && npm run dev

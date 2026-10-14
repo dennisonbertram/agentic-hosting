@@ -7,7 +7,9 @@ order: 14
 
 # Claude Code skill and slash commands
 
-The repo ships a skill at `.claude/skills/agentic-hosting/SKILL.md` and commands under `.claude/commands/`. The homepage, `install.sh`, and `install-skill.sh` all install the six `/ah-*` commands.
+**Share this instead of a runbook:** the standalone skill at [`skills/agentic-hosting/SKILL.md`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md) plus [`llms.txt`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt). See [Give this to your agent](./for-agents/).
+
+The repo also ships a Claude Code skill at `.claude/skills/agentic-hosting/SKILL.md` and commands under `.claude/commands/`. The homepage, `install.sh`, and `install-skill.sh` all install the six `/ah-*` commands.
 
 ## Install
 

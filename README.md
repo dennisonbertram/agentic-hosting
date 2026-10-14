@@ -9,6 +9,18 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 - **Binary**: `ah`
 - **Default port**: 8080 (loopback only, behind Traefik)
 
+## Give this to your agent
+
+One shareable link is enough for an agent to install the control plane, register a tenant, deploy from git, add Postgres/Redis, and read logs.
+
+| What | URL (after merge to `main`) |
+|------|-------------------------------|
+| **llms.txt** (llmstxt.org index) | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt |
+| **llms-full.txt** (all docs) | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms-full.txt |
+| **Operator skill** | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md |
+
+Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://dennisonbertram.github.io/agentic-hosting/llms.txt`). The Claude Code skill and `/ah-*` slash commands in `.claude/` are the same API, split for interactive use. Details: [Give this to your agent](https://dennisonbertram.github.io/agentic-hosting/for-agents/).
+
 ## Design Principles
 
 1. **Agentic-first** — AI agents use the REST API directly. The dashboard is optional and supervisory, not the primary operating surface.

@@ -8,7 +8,7 @@ The landing page is hand-written HTML + Tailwind CDN. Docs need markdown, a side
 
 ## Canonical source of truth
 
-`internal/api/server.go` and the handler structs. README, homepage, skill, and slash commands were aligned to the same facts. The before/after list is `docs-site/CORRECTIONS.md`.
+`internal/api/server.go` and the handler structs. README, homepage, skill, and slash commands were aligned to the same facts. The before/after list is `docs-site/CORRECTIONS.md`. Agent onboarding files: repo-root `llms.txt` / `llms-full.txt` and `skills/agentic-hosting/SKILL.md` (see `docs/docs-site/agent-onboard.md`).
 
 ## Commands
 

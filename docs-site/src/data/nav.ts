@@ -13,6 +13,7 @@ export const nav: NavSection[] = [
     label: 'Start',
     items: [
       { slug: '', title: 'Overview' },
+      { slug: 'for-agents', title: 'Give this to your agent' },
       { slug: 'why', title: 'Why it exists' },
       { slug: 'architecture', title: 'Architecture' },
       { slug: 'install', title: 'Install & quickstart' },

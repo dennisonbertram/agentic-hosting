@@ -729,3 +729,5 @@ func randomHex(n int) (string, error) {
 	}
 	return fmt.Sprintf("%x", b), nil
 }
+
+func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {}

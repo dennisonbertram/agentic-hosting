@@ -28,15 +28,19 @@ func TestValidateImage_AllowsPlatformLocalRegistry(t *testing.T) {
 	}{
 		{name: "docker hub image", image: "nginx:latest"},
 		{name: "docker hub namespace image", image: "library/nginx:latest"},
-		{name: "loopback registry by ip", image: "127.0.0.1:5000/tenant/my-app:latest"},
-		{name: "loopback registry by localhost", image: "localhost:5000/tenant/my-app:latest"},
-		{name: "build output image tag", image: "127.0.0.1:5000/ah/tenant-service:build123"},
+		{name: "loopback registry other tenant path", image: "127.0.0.1:5000/tenant/my-app:latest", wantErr: true},
+		{name: "localhost registry with port", image: "localhost:5000/ah/tenant-1-service:b1", wantErr: true},
+		{name: "localhost without port", image: "localhost/ah/tenant-1-service:b1", wantErr: true},
+		{name: "own build output image tag", image: "127.0.0.1:5000/ah/tenant-1-service:build123"},
+		{name: "other tenant build image", image: "127.0.0.1:5000/ah/tenant-2-service:build123", wantErr: true},
+		{name: "own snapshot image", image: "127.0.0.1:5000/snapshots/tenant-1:snap1"},
+		{name: "other tenant snapshot image", image: "127.0.0.1:5000/snapshots/tenant-2:snap1", wantErr: true},
 		{name: "external registry remains blocked", image: "evil.example.com/team/app:latest", wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateImage(tc.image)
+			err := ValidateImage("tenant-1", tc.image)
 			if tc.wantErr && err == nil {
 				t.Fatalf("ValidateImage(%q) unexpectedly succeeded", tc.image)
 			}

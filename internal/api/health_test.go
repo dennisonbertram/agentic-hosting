@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,6 +61,49 @@ func TestHealthDetailed_DefaultUsesCache(t *testing.T) {
 		"cached response should still show 'ok' even though DB is now closed")
 }
 
+// ageHealthCache makes the cached health result older than the ?fresh=true minimum interval.
+func ageHealthCache() {
+	detailedHealthCacheMu.Lock()
+	detailedHealthCacheTime = time.Now().Add(-detailedHealthFreshMinInterval - time.Second)
+	detailedHealthCacheMu.Unlock()
+}
+
+// TestHealthDetailed_FreshRateLimited verifies ?fresh=true within the minimum interval reuses the cache.
+func TestHealthDetailed_FreshRateLimited(t *testing.T) {
+	resetDetailedHealthCache()
+	t.Cleanup(resetDetailedHealthCache)
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	var calls int32
+	mockDocker := &testutil.MockDockerClient{
+		DiskUsageFn: func(ctx context.Context) (*docker.StorageUsage, error) {
+			atomic.AddInt32(&calls, 1)
+			return &docker.StorageUsage{}, nil
+		},
+	}
+	srv := NewServer(ServerConfig{Store: &db.Store{StateDB: stateDB}, MasterKey: masterKey, DevMode: true, Docker: mockDocker})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Call the handler directly: the router's rate limiter has an unrelated race.
+			req := httptest.NewRequest(http.MethodGet, "/v1/system/health/detailed?fresh=true", nil)
+			srv.handleHealthDetailed(httptest.NewRecorder(), req)
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "concurrent fresh requests must share one probe")
+}
+
+// TestBuildDetailedHealth_UsesConfiguredDataDir verifies the disk check follows the configured data dir.
+func TestBuildDetailedHealth_UsesConfiguredDataDir(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	srv := NewServer(ServerConfig{Store: &db.Store{StateDB: stateDB}, MasterKey: []byte("0123456789abcdef0123456789abcdef"), DevMode: true, DataDir: t.TempDir()})
+	resp := srv.buildDetailedHealth()
+	assert.NotZero(t, resp.Disk.TotalGB, "disk info should come from the configured data dir")
+}
+
 // TestHealthDetailed_FreshBypassesCache verifies that ?fresh=true skips the cache
 // and returns live probe results, allowing operators to see real-time status
 // during incident response.
@@ -89,6 +134,7 @@ func TestHealthDetailed_FreshBypassesCache(t *testing.T) {
 
 	// Close the DB so buildDetailedHealth will return "degraded".
 	stateDB.Close()
+	ageHealthCache()
 
 	// Second request WITH ?fresh=true — should bypass cache and return "degraded".
 	rr2 := httptest.NewRecorder()
@@ -128,6 +174,7 @@ func TestHealthDetailed_FreshUpdatesCache(t *testing.T) {
 
 	// Close DB, then do a fresh request to update cache to "degraded".
 	stateDB.Close()
+	ageHealthCache()
 
 	rr2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodGet, "/v1/system/health/detailed?fresh=true", nil)
@@ -165,8 +212,8 @@ func TestDetailedHealth_IncludesDockerStorage(t *testing.T) {
 			return &docker.StorageUsage{
 				ImagesSize:     1024 * 1024 * 1024 * 2, // 2 GB
 				ContainersSize: 1024 * 1024 * 500,      // 500 MB
-				VolumesSize:    1024 * 1024 * 1024,      // 1 GB
-				BuildCacheSize: 1024 * 1024 * 256,       // 256 MB
+				VolumesSize:    1024 * 1024 * 1024,     // 1 GB
+				BuildCacheSize: 1024 * 1024 * 256,      // 256 MB
 			}, nil
 		},
 	}

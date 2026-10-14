@@ -63,7 +63,7 @@ var dockerHubImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:
 
 // localRegistryImagePattern accepts the platform-managed loopback registry and
 // requires at least two path segments after the registry prefix.
-var localRegistryImagePattern = regexp.MustCompile(`^(?:127\.0\.0\.1|localhost):5000/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+(?::[a-zA-Z0-9._-]+)?$`)
+var localRegistryImagePattern = regexp.MustCompile(`^127\.0\.0\.1:5000/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+(?::[a-zA-Z0-9._-]+)?$`)
 
 // envKeyPattern validates environment variable key names.
 var envKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,127}$`)
@@ -395,7 +395,7 @@ func (m *Manager) checkTenantActive(ctx context.Context, tenantID string) error 
 }
 
 // ValidateImage checks that an image reference is allowed.
-func ValidateImage(img string) error {
+func ValidateImage(tenantID, img string) error {
 	if img == "" {
 		return apierr.Validation("image is required")
 	}
@@ -403,8 +403,17 @@ func ValidateImage(img string) error {
 		return apierr.Validation("image reference too long")
 	}
 
+	// Docker treats "localhost" as a registry host, so it is never allowed.
+	if first, _, _ := strings.Cut(img, "/"); first == "localhost" || strings.HasPrefix(first, "localhost:") {
+		return apierr.Validation("custom registries not allowed")
+	}
 	if localRegistryImagePattern.MatchString(img) {
-		return nil
+		// Only the caller's own build output or snapshot images may be used.
+		if strings.HasPrefix(img, "127.0.0.1:5000/ah/"+tenantID+"-") ||
+			strings.HasPrefix(img, "127.0.0.1:5000/snapshots/"+tenantID+":") {
+			return nil
+		}
+		return apierr.Validation("local registry image does not belong to this tenant")
 	}
 
 	if slashIdx := strings.IndexByte(img, '/'); slashIdx > 0 {
@@ -444,7 +453,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
 		return nil, err
 	}
-	if err := ValidateImage(req.Image); err != nil {
+	if err := ValidateImage(tenantID, req.Image); err != nil {
 		return nil, err
 	}
 	// Only enforce DNS-safe name when a base domain is configured — when baseDomain

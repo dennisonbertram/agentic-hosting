@@ -42,6 +42,7 @@ type ServerConfig struct {
 	EnvironmentManager *environments.Manager
 	BaseDomain         string
 	TraefikConfigDir   string
+	DataDir            string // data dir for health disk checks (default /var/lib/ah)
 }
 
 type kanbanManager interface {
@@ -72,6 +73,7 @@ type Server struct {
 	bootstrapTokens   []string
 	openRegistration  bool
 	baseDomain        string
+	dataDir           string
 	router            chi.Router
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
@@ -119,6 +121,7 @@ func NewServer(cfg ServerConfig) *Server {
 		bootstrapTokens:   cfg.BootstrapTokens,
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
+		dataDir:           cfg.DataDir,
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,

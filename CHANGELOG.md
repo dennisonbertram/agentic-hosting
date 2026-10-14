@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- GC: tenant networks younger than 15 minutes or with stopped containers are kept; unused built/snapshot images (over 1h old, unreferenced) and anonymous volumes are removed; container ownership is checked by ID across all tables. PullImage now returns pull-stream errors; RemoveContainer removes anonymous volumes.
 - `ah backup`: retention now keeps the newest 10 state and 10 metering backups separately (state backups were being deleted first), the source DB is opened truly read-only, and the metering path reuses `db.MeteringPath`.
 
 - Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).

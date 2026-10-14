@@ -14,14 +14,16 @@ import (
 // Collector samples CPU and memory of running service containers every
 // SampleSeconds and records them in usage_events and usage_daily.
 type Collector struct {
-	state   *sql.DB
-	meter   *sql.DB
-	docker  docker.Client
-	lastCPU map[string]uint64 // service ID -> cumulative CPU ns at previous sample
+	state        *sql.DB
+	meter        *sql.DB
+	docker       docker.Client
+	lastCPU      map[string]uint64 // container ID -> cumulative CPU ns at last recorded sample
+	warned       map[string]bool   // container IDs whose stats failure was already logged
+	statsTimeout time.Duration
 }
 
 func NewCollector(state, meter *sql.DB, d docker.Client) *Collector {
-	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}}
+	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}, warned: map[string]bool{}, statsTimeout: 10 * time.Second}
 }
 
 // Run collects until ctx is cancelled.
@@ -59,30 +61,52 @@ func (c *Collector) Tick(ctx context.Context) {
 	rows.Close()
 
 	now := time.Now().UTC()
+	seen := map[string]bool{}
 	for _, s := range svcs {
 		if ctx.Err() != nil {
 			return
 		}
-		st, err := c.docker.ContainerStats(ctx, s.container)
+		seen[s.container] = true
+		sctx, cancel := context.WithTimeout(ctx, c.statsTimeout)
+		st, err := c.docker.ContainerStats(sctx, s.container)
+		cancel()
 		if err != nil {
-			log.Printf("metering: stats for service %s: %v", s.id, err)
+			// A running row whose container is gone fails every tick; log it once.
+			if !c.warned[s.container] {
+				c.warned[s.container] = true
+				log.Printf("metering: stats for container %s (service %s): %v (further failures not logged)", s.container, s.id, err)
+			}
 			continue
 		}
-		// CPU counter is cumulative; record the delta. The first sample records 0;
-		// a counter reset (container restart) records the new total.
+		delete(c.warned, s.container)
+		// CPU counter is cumulative and keyed by container, so a replaced container
+		// starts a new baseline. The first sample records 0; a counter reset
+		// (container restart) records the new total.
 		var cpuSec float64
-		if prev, ok := c.lastCPU[s.id]; ok {
+		if prev, ok := c.lastCPU[s.container]; ok {
 			if st.CPUTotalNanos >= prev {
 				cpuSec = float64(st.CPUTotalNanos-prev) / 1e9
 			} else {
 				cpuSec = float64(st.CPUTotalNanos) / 1e9
 			}
 		}
-		c.lastCPU[s.id] = st.CPUTotalNanos
 		memMBSec := float64(st.MemoryBytes) / (1024 * 1024) * SampleSeconds
 
 		if err := c.record(s.tenant, s.id, cpuSec, memMBSec, now); err != nil {
 			log.Printf("metering: record service %s: %v", s.id, err)
+			continue // keep the old baseline so the next delta covers this interval
+		}
+		c.lastCPU[s.container] = st.CPUTotalNanos
+	}
+	// Drop state for containers that are no longer running services.
+	for id := range c.lastCPU {
+		if !seen[id] {
+			delete(c.lastCPU, id)
+		}
+	}
+	for id := range c.warned {
+		if !seen[id] {
+			delete(c.warned, id)
 		}
 	}
 }

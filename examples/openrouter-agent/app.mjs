@@ -13,6 +13,23 @@ export const PROVIDER_TIMEOUT_MS = 25_000;
 const MAX_NUMBER_ABS = 1_000_000;
 const MAX_PROVIDER_BODY_BYTES = 64 * 1024;
 const MAX_ANSWER_LENGTH = 4000;
+const FAILURE_CODES = new Set([
+  'provider_timeout',
+  'provider_transport_error',
+  'provider_http_error',
+  'provider_response_too_large',
+  'provider_invalid_json',
+  'provider_invalid_completion',
+  'provider_tool_call_missing',
+  'provider_tool_call_truncated',
+  'provider_tool_call_invalid',
+  'provider_tool_arguments_invalid',
+  'provider_tool_arguments_out_of_range',
+  'provider_tool_result_out_of_range',
+  'provider_final_answer_truncated',
+  'provider_final_answer_invalid',
+]);
+const FINISH_REASONS = new Set(['stop', 'tool_calls', 'length', 'content_filter', 'function_call']);
 const toolSpec = [{
   type: 'function',
   function: {
@@ -36,6 +53,37 @@ class RequestError extends Error {
     super(publicMessage);
     this.status = status;
   }
+}
+
+class AgentFailure extends Error {
+  constructor(code, details = {}) {
+    super(code);
+    this.code = code;
+    this.providerStatus = details.providerStatus;
+    this.finishReason = details.finishReason;
+  }
+}
+
+function sanitizedFailure(error) {
+  const record = {
+    event: 'openrouter_agent_failure',
+    code: error instanceof AgentFailure && FAILURE_CODES.has(error.code)
+      ? error.code
+      : 'agent_internal_error',
+  };
+  if (Number.isInteger(error?.providerStatus) && error.providerStatus >= 100 && error.providerStatus <= 599) {
+    record.provider_status = error.providerStatus;
+  }
+  if (error?.finishReason !== undefined) {
+    record.provider_finish_reason = FINISH_REASONS.has(error.finishReason)
+      ? error.finishReason
+      : 'other';
+  }
+  return record;
+}
+
+function writeFailureDiagnostic(record) {
+  process.stderr.write(`${JSON.stringify(record)}\n`);
 }
 
 function writeJson(response, status, body, headers = {}) {
@@ -123,7 +171,7 @@ function validateMessage(value) {
 function validateToolCall(message) {
   const calls = message?.tool_calls;
   if (!Array.isArray(calls) || calls.length !== 1) {
-    throw new Error('provider did not return exactly one tool call');
+    throw new AgentFailure('provider_tool_call_invalid');
   }
   const call = calls[0];
   if (
@@ -134,14 +182,14 @@ function validateToolCall(message) {
     typeof call.function.arguments !== 'string' ||
     call.function.arguments.length > 1024
   ) {
-    throw new Error('provider returned an unsupported tool call');
+    throw new AgentFailure('provider_tool_call_invalid');
   }
 
   let args;
   try {
     args = JSON.parse(call.function.arguments);
   } catch {
-    throw new Error('provider returned invalid tool arguments');
+    throw new AgentFailure('provider_tool_arguments_invalid');
   }
   if (
     !args ||
@@ -153,44 +201,64 @@ function validateToolCall(message) {
     Math.abs(args.a) > MAX_NUMBER_ABS ||
     Math.abs(args.b) > MAX_NUMBER_ABS
   ) {
-    throw new Error('provider returned out-of-range tool arguments');
+    throw new AgentFailure('provider_tool_arguments_out_of_range');
   }
   return { id: call.id, args, call };
 }
 
 async function requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, toolChoice) {
-  const response = await fetchImpl(providerURL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${providerToken}`,
-      'Content-Type': 'application/json',
-    },
-    signal,
-    body: JSON.stringify({
-      model: MODEL_ID,
-      messages,
-      tools: toolSpec,
-      tool_choice: toolChoice,
-      parallel_tool_calls: false,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      reasoning: { effort: 'low' },
-      stream: false,
-    }),
-  });
+  let response;
+  try {
+    response = await fetchImpl(providerURL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${providerToken}`,
+        'Content-Type': 'application/json',
+      },
+      signal,
+      body: JSON.stringify({
+        model: MODEL_ID,
+        messages,
+        tools: toolSpec,
+        tool_choice: toolChoice,
+        parallel_tool_calls: false,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        reasoning: { effort: 'low' },
+        stream: false,
+      }),
+    });
+  } catch (error) {
+    throw new AgentFailure(
+      error?.name === 'TimeoutError' || error?.name === 'AbortError'
+        ? 'provider_timeout'
+        : 'provider_transport_error',
+    );
+  }
 
-  if (!response.ok) throw new Error('provider returned an error status');
-  const responseText = await response.text();
+  if (!response.ok) {
+    throw new AgentFailure('provider_http_error', { providerStatus: response.status });
+  }
+  let responseText;
+  try {
+    responseText = await response.text();
+  } catch (error) {
+    throw new AgentFailure(
+      error?.name === 'TimeoutError' || error?.name === 'AbortError'
+        ? 'provider_timeout'
+        : 'provider_transport_error',
+    );
+  }
   if (Buffer.byteLength(responseText, 'utf8') > MAX_PROVIDER_BODY_BYTES) {
-    throw new Error('provider response exceeded the size limit');
+    throw new AgentFailure('provider_response_too_large');
   }
   let data;
   try {
     data = JSON.parse(responseText);
   } catch {
-    throw new Error('provider returned invalid JSON');
+    throw new AgentFailure('provider_invalid_json');
   }
-  if (data?.error || !Array.isArray(data?.choices)) {
-    throw new Error('provider returned an invalid completion');
+  if (data?.error || !Array.isArray(data?.choices) || !data.choices[0] || typeof data.choices[0] !== 'object') {
+    throw new AgentFailure('provider_invalid_completion');
   }
   return data.choices[0];
 }
@@ -207,11 +275,17 @@ async function runCalculatorAgent(message, { providerURL, providerToken, fetchIm
 
   const firstChoice = await requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, 'auto');
   if (firstChoice?.finish_reason !== 'tool_calls' || !firstChoice.message) {
-    throw new Error('provider did not request the required tool');
+    if (firstChoice?.finish_reason === 'length') {
+      throw new AgentFailure('provider_tool_call_truncated', { finishReason: firstChoice.finish_reason });
+    }
+    if (firstChoice?.finish_reason === 'stop') {
+      throw new AgentFailure('provider_tool_call_missing', { finishReason: firstChoice.finish_reason });
+    }
+    throw new AgentFailure('provider_invalid_completion', { finishReason: firstChoice?.finish_reason });
   }
   const { id, args, call } = validateToolCall(firstChoice.message);
   const result = args.a + args.b;
-  if (!Number.isFinite(result)) throw new Error('tool result is out of range');
+  if (!Number.isFinite(result)) throw new AgentFailure('provider_tool_result_out_of_range');
 
   const assistantToolMessage = {
     role: 'assistant',
@@ -227,15 +301,18 @@ async function runCalculatorAgent(message, { providerURL, providerToken, fetchIm
     assistantToolMessage,
     { role: 'tool', tool_call_id: id, content: String(result) },
   ], signal, 'none');
+  if (secondChoice?.finish_reason === 'length') {
+    throw new AgentFailure('provider_final_answer_truncated', { finishReason: secondChoice.finish_reason });
+  }
   if (
-    !secondChoice?.message ||
-    secondChoice.finish_reason !== 'stop' ||
+    secondChoice?.finish_reason !== 'stop' ||
+    !secondChoice.message ||
     secondChoice.message.tool_calls?.length ||
     typeof secondChoice.message.content !== 'string' ||
     secondChoice.message.content.trim().length === 0 ||
     secondChoice.message.content.length > MAX_ANSWER_LENGTH
   ) {
-    throw new Error('provider did not return a bounded final answer');
+    throw new AgentFailure('provider_final_answer_invalid', { finishReason: secondChoice?.finish_reason });
   }
 
   return {
@@ -250,6 +327,7 @@ async function handleRequest(request, response, {
   authToken,
   fetchImpl,
   providerTimeoutMs,
+  diagnosticSink,
 }) {
   if (request.method === 'GET' && request.url === '/health') {
     writeJson(response, 200, { status: 'ok' });
@@ -283,7 +361,11 @@ async function handleRequest(request, response, {
       writeJson(response, error.status, { error: error.message });
       return;
     }
-    // Do not log provider responses, user input, API keys, or demo tokens.
+    try {
+      diagnosticSink(sanitizedFailure(error));
+    } catch {
+      // Diagnostics must never affect the generic public response.
+    }
     writeJson(response, 502, { error: 'agent request failed' });
   }
 }
@@ -295,6 +377,7 @@ export function createAgentServer({
   authToken,
   fetchImpl = globalThis.fetch,
   providerTimeoutMs = PROVIDER_TIMEOUT_MS,
+  diagnosticSink = writeFailureDiagnostic,
 } = {}) {
   const useRelay = typeof relayToken === 'string' && relayToken.length > 0;
   if (relayIP !== undefined && !useRelay) {
@@ -309,6 +392,7 @@ export function createAgentServer({
   }
   if (typeof authToken !== 'string' || authToken.length < 32) throw new Error('DEMO_AUTH_TOKEN must contain at least 32 characters');
   if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
+  if (typeof diagnosticSink !== 'function') throw new Error('diagnostic sink must be a function');
   const providerURL = useRelay ? relayURL(relayIP) : OPENROUTER_CHAT_URL;
 
   const server = createServer((request, response) => {
@@ -318,6 +402,7 @@ export function createAgentServer({
       authToken,
       fetchImpl,
       providerTimeoutMs,
+      diagnosticSink,
     });
   });
   server.headersTimeout = 15_000;

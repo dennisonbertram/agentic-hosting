@@ -322,6 +322,105 @@ test('does not execute or loop on unsupported tool calls and hides provider erro
   assert.equal(providerCalls, 1);
 });
 
+test('logs only a sanitized provider status and constant code on provider failure', async () => {
+  const sentinels = {
+    key: 'OPENROUTER_KEY_SENTINEL_SECRET',
+    token: 'DEMO_TOKEN_SENTINEL_SECRET_0123456789',
+    prompt: 'PROMPT_SENTINEL_PRIVATE_INPUT',
+    providerBody: 'PROVIDER_BODY_SENTINEL_PRIVATE_ERROR',
+  };
+  const diagnostics = [];
+  await withServer({
+    apiKey: sentinels.key,
+    authToken: sentinels.token,
+    diagnosticSink: (record) => diagnostics.push(record),
+    fetchImpl: async () => new Response(JSON.stringify({ error: { message: sentinels.providerBody } }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sentinels.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: sentinels.prompt }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'agent request failed' });
+  });
+
+  assert.deepEqual(diagnostics, [{
+    event: 'openrouter_agent_failure',
+    code: 'provider_http_error',
+    provider_status: 429,
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), new RegExp(Object.values(sentinels).join('|')));
+});
+
+test('diagnoses missing tool calls and truncated final answers with allowlisted reasons', async () => {
+  const diagnostics = [];
+  let providerCalls = 0;
+  const fetchImpl = async () => {
+    providerCalls += 1;
+    const choice = providerCalls === 1
+      ? { finish_reason: 'tool_calls', message: {
+          role: 'assistant', content: null, tool_calls: [{
+            id: 'diagnostic_call_1',
+            type: 'function',
+            function: { name: 'add_numbers', arguments: '{"a":2,"b":3}' },
+          }],
+        } }
+      : { finish_reason: 'length', message: { role: 'assistant', content: 'The answer may be' } };
+    return new Response(JSON.stringify({ choices: [choice] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await withServer({ diagnosticSink: (record) => diagnostics.push(record), fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 2 and 3.' }),
+    });
+    assert.equal(response.status, 502);
+  });
+  assert.deepEqual(diagnostics, [{
+    event: 'openrouter_agent_failure',
+    code: 'provider_final_answer_truncated',
+    provider_finish_reason: 'length',
+  }]);
+
+  diagnostics.length = 0;
+  await withServer({
+    diagnosticSink: (record) => diagnostics.push(record),
+    fetchImpl: async () => new Response(JSON.stringify({ choices: [{
+      finish_reason: 'stop',
+      message: { role: 'assistant', content: 'The sum is 5.' },
+    }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 2 and 3.' }),
+    });
+    assert.equal(response.status, 502);
+  });
+  assert.deepEqual(diagnostics, [{
+    event: 'openrouter_agent_failure',
+    code: 'provider_tool_call_missing',
+    provider_finish_reason: 'stop',
+  }]);
+});
+
 test('stops after the final-answer request if the provider tries another tool call', async () => {
   let providerCalls = 0;
   const fetchImpl = async () => {
@@ -360,6 +459,7 @@ test('stops after the final-answer request if the provider tries another tool ca
 
 test('bounds provider wait and returns a generic error on timeout', async () => {
   let providerCalls = 0;
+  const diagnostics = [];
   const fetchImpl = async (_url, init) => {
     providerCalls += 1;
     await new Promise((_resolve, reject) => {
@@ -367,7 +467,11 @@ test('bounds provider wait and returns a generic error on timeout', async () => 
     });
   };
 
-  await withServer({ fetchImpl, providerTimeoutMs: 20 }, async (baseURL) => {
+  await withServer({
+    fetchImpl,
+    providerTimeoutMs: 20,
+    diagnosticSink: (record) => diagnostics.push(record),
+  }, async (baseURL) => {
     const response = await fetch(`${baseURL}/chat`, {
       method: 'POST',
       headers: {
@@ -381,6 +485,7 @@ test('bounds provider wait and returns a generic error on timeout', async () => 
   });
 
   assert.equal(providerCalls, 1);
+  assert.deepEqual(diagnostics, [{ event: 'openrouter_agent_failure', code: 'provider_timeout' }]);
 });
 
 test('exposes a small public health response without contacting the provider', async () => {

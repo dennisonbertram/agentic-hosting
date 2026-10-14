@@ -58,9 +58,15 @@ files. Build it from the repository root with
 
 ## Hosting limitation
 
-This example is prepared for local testing. The current agentic-hosting tenant
-network blocks outbound provider connections, so a deployed instance cannot
-reach OpenRouter yet. Do not present it as a working hosted agent until a
-narrow, reviewed provider-egress path is implemented and a real authenticated
-request has been observed. The automated tool round-trip uses a mock provider;
-it makes no paid model request.
+Failures keep the public response generic and write a small structured record
+to stderr with a constant failure code and, where applicable, an upstream HTTP
+status or allowlisted finish reason. The record never includes prompts,
+credentials, provider response bodies, or raw provider error messages.
+
+In the latest integration check, the gVisor app could not resolve the relay's
+Docker service alias; a health request to the relay's current private IP
+returned HTTP 200 after the app container restarted. The first authenticated
+model request still returned HTTP 502, and its cause is not yet known. This
+example is not proven to complete a hosted model turn until a real authenticated
+request succeeds. The automated tool round-trip uses a mock provider and makes
+no paid model request.

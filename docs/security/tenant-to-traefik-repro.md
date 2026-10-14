@@ -1,37 +1,291 @@
-# Tenant-to-Traefik Reachability
+# Security Spike: Tenant-to-Traefik Reachability
 
-**Issue:** [#50](https://github.com/dennisonbertram/agentic-hosting/issues/50)
-**Verified:** 2026-10-14
-**Status:** Workload-to-proxy reachability is required for routing. Public Host-header routing remains public.
+## Current behavior (verified 2026-10-14)
 
-## Network layout
+Routed services and preview environments use separate internal ingress bridges. Each bridge contains only `paas-traefik` and its one workload. Tenant workloads remain on the tenant bridge with `Internal=true` and `enable_icc=false`; no other workload shares the ingress bridge. Route files use an alias scoped to that ingress bridge, avoiding ambiguous DNS responses from the tenant network.
 
-Tenant workloads remain on their tenant bridge (`Internal=true`, `enable_icc=false`). Each routed service and each environment with previews also joins its own internal ingress bridge with `paas-traefik`. That bridge contains only the proxy and the routed workload. The tenant bridge remains the boundary between tenant workloads; no workload ingress bridge is shared with another workload. Routes use a network-scoped alias on the ingress bridge, avoiding ambiguous DNS answers from the tenant bridge.
+The per-workload ingress bridge enables proxy-to-workload traffic while preserving direct network isolation between workloads. It does not make Traefik private: a workload can reach its own proxy ingress and send a Host header for another configured public route. That request is equivalent to calling the public hostname and remains subject to the target application’s own authentication and authorization. Do not treat Host-header routing as tenant authorization or publish private ports as public routes.
 
-Docker's `Internal` setting restricts access outside the internal network. `enable_icc=false` blocks communication between endpoints on the tenant bridge. It also blocks the proxy from reaching a workload when both are attached only to that bridge, which caused the observed HTTP 502. The per-workload ingress bridge enables communication for that proxy/workload pair only. Docker's `GET /networks` response may omit endpoint membership; cleanup code must use `NetworkInspect` before treating a listed network as empty.
+The 2026-03-20 reproduction and mitigation notes below are retained as historical evidence for the earlier shared-tenant-network design. Their topology and conclusions do not describe the current network layout. In particular, do not apply the old blanket DOCKER-USER rules as a current fix; they may block legitimate proxy traffic. No live validation of the new ingress deployment is recorded here yet.
 
-## Security boundary and remaining exposure
+---
 
-The ingress bridge prevents one workload from directly reaching another workload's private address or service port. It does not make the public reverse proxy private. A workload connected to its own ingress bridge can reach Traefik's entrypoint and can send a Host header for another configured public route. Traefik may then serve that public route, subject to the target application’s own authentication and authorization. This is equivalent to making a request to that public hostname from outside the platform; it is not a private-network authorization boundary.
+## Historical reproduction (2026-03-20)
 
-Do not use Host-header routing as tenant authorization. Applications that need private endpoints must enforce authentication themselves, and platform routes must not publish private service ports. This change does not claim to block a workload from making requests to public services or from reaching Traefik's public entrypoint.
+**Issue**: [#50](https://github.com/dennisonbertram/agentic-hosting/issues/50)
+**Date**: 2026-03-20
+**Status**: Confirmed reachable under the former shared tenant-network design
 
-## Reproduction checks
+---
 
-On an isolated synthetic deployment, inspect the workload and proxy network attachments:
+## 1. Former Network Topology
 
-```bash
-docker inspect <workload> --format '{{json .NetworkSettings.Networks}}'
-docker inspect paas-traefik --format '{{json .NetworkSettings.Networks}}'
+```
+                          Internet
+                             |
+                      [ Host: ports 80, 443 ]
+                             |
+                     +-------+-------+
+                     | paas-traefik  |   (Docker container, runtime: runc)
+                     |  - :80  HTTP  |   (redirects to HTTPS)
+                     |  - :443 HTTPS |   (TLS termination)
+                     +---+---+---+---+
+                         |   |   |
+            +------------+   |   +------------+
+            |                |                |
+    +-------+-------+ +-----+-------+ +------+--------+
+    | ah-tenant-AAA | | ah-tenant-BBB | | ah-tenant-CCC |
+    | (bridge,       | | (bridge,       | | (bridge,       |
+    |  internal,     | |  internal,     | |  internal,     |
+    |  ICC=false)    | |  ICC=false)    | |  ICC=false)    |
+    +-------+-------+ +-------+-------+ +-------+--------+
+            |                 |                  |
+    +-------+-------+ +------+--------+ +-------+--------+
+    | ah-AAA-svc1   | | ah-BBB-svc1   | | ah-CCC-svc1    |
+    | (gVisor/runsc, | | (gVisor/runsc, | | (gVisor/runsc,  |
+    |  CapDrop ALL,  | |  CapDrop ALL,  | |  CapDrop ALL,   |
+    |  RO rootfs)    | |  RO rootfs)    | |  RO rootfs)     |
+    +----------------+ +---------------+ +-----------------+
 ```
 
-The workload and proxy should share exactly its own `ah-ingress-<tenant>-service-<service>` bridge (or the corresponding environment ingress bridge for previews). They should not share a tenant ingress bridge with another workload. Confirm backend reachability from Traefik on the workload's configured published port, and confirm a second workload cannot connect directly to the first workload's private IP and port.
+**Key facts from the codebase** (`internal/docker/client.go`):
 
-To check the public Host-header limitation, send a request from the synthetic workload to Traefik's entrypoint using another configured public hostname. A response from that route demonstrates that the proxy remains a public routing surface; it does not demonstrate private backend connectivity or an authorization bypass. Do not run these checks against tenant data or change host firewall rules as part of this test.
+- Each tenant network is created with `Internal: true` and `ICC=false`
+  (lines 96-101 of `client.go`).
+- `Internal: true` means no default gateway to the host network -- containers
+  cannot reach the internet.
+- `ICC=false` means containers on the same bridge cannot reach each other
+  directly (Docker inserts iptables DROP rules for inter-container traffic).
+- Traefik (`paas-traefik`) is connected to **every** tenant network so it can
+  route HTTP traffic to tenant containers (lines 214-224 of `client.go`).
+- Tenant containers are hardcoded with `traefik.enable=false` (line 195 of
+  `client.go`), preventing Traefik's Docker provider from discovering them.
+- Routing is handled by the Traefik **file provider**: each service gets a
+  YAML file in `/etc/traefik/dynamic/` written by `writeTraefikRoute()`
+  (`internal/services/services.go`, lines 185-227).
+
+---
+
+## 2. Threat Model
+
+Because Traefik joins every tenant bridge, it has an IP address reachable from
+every tenant container on that bridge. Two concerns:
+
+| # | Threat | Description |
+|---|--------|-------------|
+| T1 | **Tenant reaches Traefik entrypoints** | A tenant container sends TCP traffic to Traefik's container IP on port 80 or 443, reaching the reverse proxy directly from inside the tenant network. |
+| T2 | **Cross-tenant routing via Host header** | After reaching Traefik, the tenant sends a crafted `Host:` header matching another tenant's subdomain (e.g., `Host: victim-app.apps.example.com`). Traefik routes the request to the victim's container. |
+
+---
+
+## 3. Reproduction: T1 -- Tenant Container Reaches Traefik
+
+### Prerequisites
+
+- A running agentic-hosting instance with at least one deployed service.
+- SSH access to the server: `ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254`
+
+### Steps
+
+```bash
+# 1. Identify a running tenant container
+docker ps --filter "label=ah.tenant" --format "{{.ID}} {{.Names}}" | head -1
+# Example output: a1b2c3d4e5f6  ah-TENANT1-svc1
+
+# 2. Identify Traefik's IP on the tenant's network
+TENANT_NET=$(docker inspect ah-TENANT1-svc1 \
+  --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+  | tr ' ' '\n' | grep ah-tenant)
+TRAEFIK_IP=$(docker inspect paas-traefik \
+  --format "{{(index .NetworkSettings.Networks \"$TENANT_NET\").IPAddress}}")
+echo "Traefik IP on $TENANT_NET: $TRAEFIK_IP"
+# Example output: Traefik IP on ah-tenant-TENANT1: 172.19.0.2
+
+# 3. Exec into the tenant container and attempt TCP connection to Traefik
+#    Note: gVisor (runsc) blocks docker exec by default. To reproduce,
+#    temporarily start a test container on the same tenant network with
+#    the default runc runtime:
+docker run --rm -it --network "$TENANT_NET" curlimages/curl:latest \
+  curl -v --max-time 5 "http://$TRAEFIK_IP:80/"
+```
+
+### Expected result (WITHOUT mitigation)
+
+The `curl` command **succeeds**. Traefik responds with its default HTTP-to-HTTPS
+redirect (301) or, if the `Host:` header matches a configured route, serves the
+response from the backend. This confirms **T1: tenant containers can reach
+Traefik on ports 80 and 443 over the shared bridge**.
+
+### Why gVisor does not prevent this
+
+gVisor intercepts syscalls at the container boundary but does **not** filter
+network traffic. TCP connections to other containers on the same Docker bridge
+are standard socket operations that gVisor passes through to the network stack.
+gVisor's isolation is at the kernel-API level, not the network level.
+
+---
+
+## 4. Reproduction: T2 -- Cross-Tenant Host Header Routing
+
+### Prerequisites
+
+- Two tenants (Tenant A, Tenant B) each with a deployed service.
+- Both services have Traefik file-provider routes (YAML files in
+  `/etc/traefik/dynamic/`).
+
+### Steps
+
+```bash
+# 1. Confirm both services have Traefik routes
+ls /etc/traefik/dynamic/
+# Example: svc-AAA.yml  svc-BBB.yml
+
+# 2. Get Tenant B's hostname from the route file
+cat /etc/traefik/dynamic/svc-BBB.yml
+# Shows: rule: "Host(`tenant-b-app.apps.example.com`)"
+# And:   url: "http://ah-TENANTB-svcBBB:8000"
+
+# 3. From Tenant A's network, reach Traefik with Tenant B's Host header
+TENANT_A_NET="ah-tenant-TENANTA"
+TRAEFIK_IP=$(docker inspect paas-traefik \
+  --format "{{(index .NetworkSettings.Networks \"$TENANT_A_NET\").IPAddress}}")
+
+docker run --rm --network "$TENANT_A_NET" curlimages/curl:latest \
+  curl -v --max-time 5 \
+  -H "Host: tenant-b-app.apps.example.com" \
+  "http://$TRAEFIK_IP:80/"
+```
+
+### Expected result (WITHOUT mitigation)
+
+Traefik receives the request, matches the `Host:` header to Tenant B's route,
+and **forwards the request to Tenant B's container**. The response from Tenant
+B's application is returned to the caller on Tenant A's network.
+
+This confirms **T2: a tenant can route requests to another tenant's backend
+by sending a crafted Host header to Traefik**.
+
+### Why this works
+
+Traefik is connected to **all** tenant networks simultaneously. When Traefik
+receives a request on any network interface, it resolves the backend container
+name via Docker DNS. Because Traefik is a member of every tenant network,
+Docker DNS resolution succeeds for any tenant's container name. The file-provider
+route simply specifies `url: "http://ah-{tenantID}-{serviceID}:{port}"` -- Traefik
+can reach any of these because it shares a bridge with each of them.
+
+---
+
+## 5. Risk Assessment
+
+| Factor | Assessment |
+|--------|------------|
+| **Exploitability** | Low-Medium. Requires the attacker to (a) achieve code execution inside their gVisor-sandboxed container, (b) discover Traefik's IP on the bridge (predictable -- usually .2 or .3), and (c) know or guess the victim's `Host:` header (subdomain is the DNS label chosen at service creation, publicly visible in DNS). |
+| **Impact** | Medium. The attacker can send HTTP requests to another tenant's application as if they were an external user. They cannot bypass application-level authentication, but they can reach endpoints that may not be intended for public access if the tenant relies on network isolation. No direct container escape or privilege escalation. |
+| **Existing mitigations** | gVisor (syscall sandbox), CapDrop ALL, no-new-privileges, read-only rootfs, PidsLimit, ICC=false (blocks container-to-container, but NOT container-to-Traefik). `Internal: true` blocks internet egress but does not prevent intra-bridge communication with Traefik. |
+| **What ICC=false does NOT do** | ICC (Inter-Container Communication) disables direct container-to-container traffic. However, Traefik is not "just another container" from iptables' perspective -- it has its own iptables rules for port publishing. Traffic from a container to Traefik's bridge IP is routed through the bridge, not through ICC rules. |
+
+---
+
+## 6. Historical Short-Term Mitigation Proposal: iptables DOCKER-USER Rules
+
+The least invasive, operator-side control that requires no code changes, no
+per-tenant Traefik deployment, and no network architecture rewrite.
+
+### What to apply
+
+```bash
+# Block new TCP connections to Traefik's listening ports within Docker networks.
+# DOCKER-USER is evaluated before Docker's own forwarding rules and survives
+# container restarts. These rules apply to all Docker bridge traffic.
+
+# Block port 80 (HTTP)
+iptables -I DOCKER-USER -m conntrack --ctstate NEW -p tcp --dport 80 -j DROP
+
+# Block port 443 (HTTPS)
+iptables -I DOCKER-USER -m conntrack --ctstate NEW -p tcp --dport 443 -j DROP
+```
+
+### Why this works
+
+- The `DOCKER-USER` chain is a Docker-managed hook specifically designed for
+  operator-inserted rules. Docker never overwrites rules in this chain, and
+  they persist across container restarts and Docker daemon restarts.
+- `-m conntrack --ctstate NEW` matches only new connection attempts. Established
+  and related traffic (such as Traefik's outbound connections to backend
+  containers) is not affected. This means Traefik can still **initiate**
+  connections to tenant containers for proxying, but tenant containers cannot
+  **initiate** connections to Traefik.
+- `-j DROP` silently discards the packet. Use `-j REJECT` instead if you prefer
+  tenant code to receive an immediate connection-refused error rather than a
+  timeout.
+
+### Make persistent across reboots
+
+```bash
+apt-get install -y iptables-persistent
+netfilter-persistent save
+```
+
+### Verification after applying
+
+```bash
+# Re-run the T1 repro from Section 3:
+docker run --rm --network "$TENANT_NET" curlimages/curl:latest \
+  curl -v --max-time 5 "http://$TRAEFIK_IP:80/"
+
+# Expected: connection times out (DROP) or connection refused (REJECT).
+# Traefik is no longer reachable from tenant containers.
+```
+
+### Scope and limitations
+
+- These rules block **all** Docker-bridged containers from initiating
+  connections to ports 80 and 443. This is acceptable because:
+  - Tenant containers are on `Internal: true` networks (no internet access
+    anyway).
+  - The only legitimate traffic to ports 80/443 comes from external clients
+    via the host's published ports, which bypass DOCKER-USER (they enter
+    through the host's INPUT/FORWARD chains).
+- If Traefik's entrypoint ports change, the iptables rules must be updated
+  to match.
+- This does not block tenant containers from reaching Traefik on the
+  dashboard port (8090) if Traefik is configured with `api.insecure: true`.
+  Consider adding a rule for port 8090 as well, or disabling the insecure
+  dashboard in production:
+
+  ```bash
+  iptables -I DOCKER-USER -m conntrack --ctstate NEW -p tcp --dport 8090 -j DROP
+  ```
+
+---
+
+## 7. Long-Term Considerations (Out of Scope for This Spike)
+
+These are noted for future reference but are explicitly **not** recommended as
+short-term actions:
+
+1. **Dedicated Traefik network per tenant** -- Each tenant gets its own Traefik
+   sidecar or a Traefik instance that only joins one tenant network. Eliminates
+   cross-tenant routing entirely but significantly increases operational
+   complexity.
+
+2. **Network policy enforcement** -- Use a CNI plugin (Calico, Cilium) instead
+   of Docker's default bridge driver for fine-grained network policies. Requires
+   a container orchestrator (Kubernetes) or standalone CNI setup.
+
+3. **Traefik on host network only** -- Run Traefik on the host network and
+   publish tenant container ports to localhost. Removes Traefik from tenant
+   bridges entirely but requires port allocation management and changes to the
+   routing architecture.
+
+---
 
 ## References
 
-- `internal/docker/client.go` creates tenant and per-workload ingress bridges and assigns the route aliases.
-- `internal/services/services.go` writes service routes and manages service ingress networks.
-- `internal/environments/environments.go` writes preview routes and manages environment ingress networks.
-- Docker Engine bridge networking documentation: <https://docs.docker.com/engine/network/drivers/bridge/>
+- `internal/docker/client.go` -- network creation (lines 82-119), RunContainer
+  with Traefik connection (lines 137-232)
+- `internal/services/services.go` -- writeTraefikRoute (lines 185-227)
+- `.claude/skills/agentic-hosting/references/server-setup.md` -- "Security:
+  Isolating Tenant Containers from Traefik" section
+- `deploy/traefik/traefik.yml` -- Traefik static configuration

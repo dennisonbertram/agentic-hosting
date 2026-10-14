@@ -17,6 +17,9 @@ type Metric struct {
 	ServiceID       string  `json:"service_id,omitempty"`
 }
 
+// SampleSeconds is how long one usage_events sample row represents.
+const SampleSeconds = 60
+
 // Store wraps the metering SQLite database connection to provide
 // resource usage query methods.
 type Store struct {

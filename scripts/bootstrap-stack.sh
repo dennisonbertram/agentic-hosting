@@ -4,8 +4,8 @@ IFS=$'\n\t'
 
 # Verified upstream artifacts; review this table when refreshing the installer.
 readonly DOCKER_KEY_FINGERPRINT=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
-readonly GO_VERSION=1.27.2 GO_SHA256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
-readonly NIXPACKS_VERSION=1.41.0 NIXPACKS_SHA256=995aa2e3cc2986d069e2f7dc19e111d005c48b98bc90eaccec97f001267d8437
+readonly GO_VERSION=1.27.2 GO_SHA256=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+readonly NIXPACKS_VERSION=1.41.0 NIXPACKS_SHA256=0f55de7874507b9cf7502113120bd96f2ab6979f78d10eaf2eb2ade9207b3af6
 readonly TRAEFIK_DIGEST=sha256:5902d68e00708015736416b62faa49d23a2e1d4415649e5831d20b79ba301508
 readonly REGISTRY_DIGEST=sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
 readonly NGINX_DIGEST=sha256:a60ab79b8d1cbc6c0860ca9829908c5e7e83ed887034e778fc7adf0b1bfe5e47
@@ -123,8 +123,10 @@ log 'installing verified Go and Nixpacks binaries'
 curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "$tmpdir/go.tgz"
 echo "$GO_SHA256  $tmpdir/go.tgz" | sha256sum -c - >/dev/null || die 'Go checksum mismatch'
 tar -C /usr/local -xzf "$tmpdir/go.tgz"
-curl -fsSL "https://github.com/railwayapp/nixpacks/releases/download/v${NIXPACKS_VERSION}/nixpacks-linux-x86_64" -o "$tmpdir/nixpacks"
-echo "$NIXPACKS_SHA256  $tmpdir/nixpacks" | sha256sum -c - >/dev/null || die 'Nixpacks checksum mismatch'
+curl -fsSL "https://github.com/railwayapp/nixpacks/releases/download/v${NIXPACKS_VERSION}/nixpacks-v${NIXPACKS_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o "$tmpdir/nixpacks.tgz"
+echo "$NIXPACKS_SHA256  $tmpdir/nixpacks.tgz" | sha256sum -c - >/dev/null || die 'Nixpacks checksum mismatch'
+tar -tzf "$tmpdir/nixpacks.tgz" | grep -Fxq nixpacks || die 'Nixpacks archive layout mismatch'
+tar -C "$tmpdir" -xzf "$tmpdir/nixpacks.tgz" nixpacks
 install -m 0755 "$tmpdir/nixpacks" /usr/local/bin/nixpacks
 
 log 'creating service users and persistent paths'

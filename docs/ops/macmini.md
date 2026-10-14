@@ -12,6 +12,8 @@ For public URLs, keep the Mac powered on and awake, keep it connected to the net
 - A domain you intend to use as the base domain, for example `demo.example.com`. Choose it before bootstrapping; the installer uses it to generate service URLs. You can configure ngrok later.
 - When you are ready to expose the demo, the ngrok CLI installed and authenticated, plus an agent config with an exact endpoint for `api.<domain>` and a reserved wildcard `*.apps.<domain>`. Follow [ngrok's setup guide](https://ngrok.com/docs/getting-started/) to install and authenticate it. Wildcard domains must be reserved before ngrok can serve a wildcard endpoint. Confirm domain eligibility and any account charges in your ngrok account; this guide does not create domains or change billing. See [ngrok wildcard endpoints](https://ngrok.com/docs/gateway/endpoints/cloud-endpoints/http/#wildcard-endpoints), [custom domains](https://ngrok.com/docs/gateway/domains/custom-domains/), and [agent config v3](https://ngrok.com/docs/agent/config/v3/).
 
+In this mode Traefik marks every plain-HTTP request as HTTPS, because ngrok terminates TLS. That is safe here only because guest TCP/80 is forwarded solely to host loopback. Do not use `--external-tls-terminated` on a host whose port 80 is reachable from a network.
+
 The ngrok account and tunnel do not need to be ready for the local VM health check. Pick the final domain first; configure ngrok after the application is healthy locally.
 
 ## Get the committed setup

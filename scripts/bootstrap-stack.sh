@@ -58,6 +58,9 @@ Usage: sudo scripts/bootstrap-stack.sh --domain DOMAIN [--acme-email EMAIL] [--e
        scripts/bootstrap-stack.sh --self-test
 Runs on a fresh Ubuntu 24.04 amd64 or arm64 host from this repository checkout. DNS can be
 configured afterward; public ACME certificates issue after DNS points here.
+--external-tls-terminated marks every HTTP request as HTTPS. Use it only when TCP/80 is
+reachable solely through a trusted TLS tunnel (for example the Mac mini VM forward), never
+on a host whose port 80 is reachable from a network.
 EOF
 }
 die() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }

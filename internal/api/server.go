@@ -50,6 +50,7 @@ type kanbanManager interface {
 	GetAdminToken(ctx context.Context, tenantID string) (string, error)
 	Delete(ctx context.Context, tenantID string) error
 	StopForTenant(ctx context.Context, tenantID string)
+	StartForTenant(ctx context.Context, tenantID string)
 }
 
 type databaseManager interface {
@@ -60,6 +61,7 @@ type databaseManager interface {
 	GetConnectionString(ctx context.Context, tenantID, dbID string) (string, error)
 	Delete(ctx context.Context, tenantID, dbID string) error
 	StopAllForTenant(ctx context.Context, tenantID string)
+	StartAllForTenant(ctx context.Context, tenantID string)
 }
 
 type Server struct {

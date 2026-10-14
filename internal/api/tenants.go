@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -545,6 +546,21 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	// Recreate the database and kanban containers that suspension removed.
+	// They wait for health checks (up to ~30-60s each), so run in the background.
+	if s.dbManager != nil || s.kanbanManager != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if s.dbManager != nil {
+				s.dbManager.StartAllForTenant(ctx, tenantID)
+			}
+			if s.kanbanManager != nil {
+				s.kanbanManager.StartForTenant(ctx, tenantID)
+			}
+		}()
 	}
 
 	// Return token in format "keyID.secret" for O(1) lookup.

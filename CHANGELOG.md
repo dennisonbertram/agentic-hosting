@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).
 
 - **Master key rotation no longer invalidates API keys** — API key hashes now use a dedicated HMAC key stored encrypted in new `server_secrets` table (seeded from the current master key so existing keys keep working); `ah rotate-key` re-encrypts it.
+### Fixed (W2-C databases/kanban)
+
+- Redis create no longer fails (readiness check now AUTHs); NULL `container_id` no longer 500s Get/Delete/reconcile; failed kanban can be re-created; kanban setup failure is `failed`, not `ready`.
+- Tenant reactivation now restarts databases and kanban from their stored volumes/credentials. Database containers are pulled first and get memory/pids limits, no-new-privileges and a reduced capability set.
 
 ### Added
 

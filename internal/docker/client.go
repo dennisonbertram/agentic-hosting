@@ -598,18 +598,16 @@ func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
 	return nil
 }
 
-// RunDatabase creates and starts a container with host port mapping and
-// persistent volume. Uses gVisor (runsc) runtime. Bound to 127.0.0.1 only.
-// Used for databases and other infrastructure containers (e.g. Vikunja kanban).
-func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
-	env := make([]string, 0, len(cfg.Env))
-	for k, v := range cfg.Env {
-		env = append(env, k+"="+v)
-	}
+const (
+	databaseMemoryBytes = 512 * 1024 * 1024
+	databasePidsLimit   = 256
+)
 
-	portStr := fmt.Sprintf("%d/tcp", cfg.ContainerPort)
+var databaseCaps = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"}
 
-	hostCfg := &container.HostConfig{
+// databaseHostConfig builds the hardened host config for database containers.
+func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostConfig {
+	return &container.HostConfig{
 		Runtime: "runsc",
 		PortBindings: nat.PortMap{
 			nat.Port(portStr): []nat.PortBinding{
@@ -624,7 +622,35 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 			},
 		},
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		Resources: container.Resources{
+			Memory:     databaseMemoryBytes,
+			MemorySwap: databaseMemoryBytes, // no swap
+			PidsLimit:  int64Ptr(databasePidsLimit),
+		},
+		SecurityOpt: []string{"no-new-privileges"},
+		// Official postgres/redis/vikunja entrypoints chown the data dir and
+		// drop to an unprivileged user, so keep only the caps that needs.
+		CapDrop: []string{"ALL"},
+		CapAdd:  databaseCaps,
 	}
+}
+
+// RunDatabase creates and starts a container with host port mapping and
+// persistent volume. Uses gVisor (runsc) runtime. Bound to 127.0.0.1 only.
+// Used for databases and other infrastructure containers (e.g. Vikunja kanban).
+func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
+	if err := c.PullImage(ctx, cfg.Image); err != nil {
+		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
+	}
+
+	env := make([]string, 0, len(cfg.Env))
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
+	}
+
+	portStr := fmt.Sprintf("%d/tcp", cfg.ContainerPort)
+
+	hostCfg := databaseHostConfig(cfg, portStr)
 
 	labels := map[string]string{
 		"ah.managed": "true",

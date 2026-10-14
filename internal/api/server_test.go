@@ -3058,3 +3058,15 @@ func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) st
 
 	return keyID + "." + secret
 }
+
+// startCalls receives the tenant ID each time a manager restarts a tenant's
+// resources (reactivation runs the restart in a goroutine).
+var startCalls = make(chan string, 8)
+
+func (f *fakeDatabaseManager) StartAllForTenant(ctx context.Context, tenantID string) {
+	startCalls <- "db:" + tenantID
+}
+
+func (f *fakeKanbanManager) StartForTenant(ctx context.Context, tenantID string) {
+	startCalls <- "kanban:" + tenantID
+}

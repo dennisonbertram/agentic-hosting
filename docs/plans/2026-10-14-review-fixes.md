@@ -1,7 +1,17 @@
 # Plan: fix the 2026-10-14 codebase review findings
 
-Status: proposed, not started.
+Status: decisions made, not started.
 Source: full-repo review on 2026-10-14 (five read-only reviewers, one per area).
+
+Context: the operator is the only user today; the agentic-hosting website
+is the only deployed service. So:
+
+- Bugs that need a hostile second tenant (global throttle exhaustion,
+  bootstrap-token misuse, quota races, hostname collisions) are moved to
+  later waves. Fix them before opening registration to other people.
+- Breaking API changes do not need the 90-day deprecation window while
+  there are no other clients. Note each one in CHANGELOG.
+- Data loss and broken core features come first.
 
 ## How to read this plan
 
@@ -58,14 +68,10 @@ directory. If state backups are already gone, take one manually now.
 |---|---|
 | API key hashes are `HMAC(secret, masterKey)`; rotation never updates them, so every key returns 401 after rotation | Confirmed |
 
-Fix options (pick one in the PR; option 1 is recommended):
-
-1. Derive the API-key HMAC key from the master key once, store it encrypted
-   under the master key (new `server_secrets` row), and re-encrypt that row
-   during rotation. Key hashes then never change. Needs a migration that
-   creates the row from the current master key, so existing hashes stay valid.
-2. Until (1) ships: make `rotate-key` refuse to run without `--i-understand-keys-are-revoked`
-   and print the recovery steps.
+Fix (decided): store a dedicated API-key hashing key, encrypted under the
+master key (new `server_secrets` row), and re-encrypt that row during
+rotation. Key hashes then never change. The migration creates the row from
+the current master key, so existing hashes stay valid.
 
 This touches the master key path, so it needs the security review noted in CLAUDE.md.
 
@@ -91,44 +97,20 @@ Test: unit test asserting the generated command bounds each write, plus a
 Docker-tagged integration test (skipped without Docker) that wipes a volume
 on a small tmpfs and checks the file size stays the same.
 
-### W1-D: global request cap and long-running routes (`internal/api/server.go`, `cmd/ah/main.go`)
+### W1-D: long-running routes are cut off at 30s (`cmd/ah/main.go`)
 
 | Finding | Status |
 |---|---|
-| `Throttle(200)` is global and pre-auth; 200 slow `exec` calls from one tenant make the whole API return 429 | Plausible |
 | `http.Server.WriteTimeout` is 30s, which cuts off `exec`, log follow and slow creates | Confirmed |
 | `--listen-addr ::1` builds `::1:8080` | Reproduced |
 
 Fix: remove the server-wide `WriteTimeout` (keep `ReadHeaderTimeout`; the
 per-route `chimw.Timeout` already covers normal routes), or extend the write
 deadline per request on long routes with
-`http.NewResponseController(w).SetWriteDeadline`. Move long-lived routes
-(exec, log follow, provisioning) out of the global throttle and give them a
-per-tenant in-flight cap (for example 4). Use `net.JoinHostPort`.
+`http.NewResponseController(w).SetWriteDeadline`. Use `net.JoinHostPort`.
 
 Test: server test with a 2s handler on a long route asserting the client gets
-the full response. A throttle test asserting tenant B still gets 200 while
-tenant A holds its maximum number of exec slots.
-
-### W1-E: separate operator token from registration token (`internal/api/recovery.go`, `internal/api/tenants.go`, `internal/api/bootstrap.go`, `internal/config/`)
-
-| Finding | Status |
-|---|---|
-| The registration token also authorizes recover, reactivate and quota update for any tenant | Plausible (depends on how the token is shared) |
-| Invalid requests consume the global 20/hour budget, so anonymous junk blocks registration and recovery | Plausible |
-| First 8 chars of a rejected token are logged (`cmd/ah/main.go:96`) | Reproduced |
-
-Fix: add `AH_ADMIN_TOKEN` for recover, reactivate and quota update. Keep the
-bootstrap token for registration only. Charge the global bucket only after
-the token validates; keep the per-IP bucket for all requests. Log only token
-length. This is bootstrap-token logic, so it needs the security review.
-
-Compatibility: if `AH_ADMIN_TOKEN` is unset, log a startup warning and fall
-back to the current behavior for one release, then remove the fallback.
-Document the new variable in the ops docs and CHANGELOG.
-
-Test: recover with a bootstrap token returns 403 when an admin token is set.
-Twenty invalid-token requests do not block a valid registration.
+the full response.
 
 ## Wave 2: core flows that do not work
 
@@ -173,8 +155,8 @@ keeps the port.
 | `isNotFoundError` matches any error containing `404`, including container IDs | Confirmed |
 | A failed lease-expiry stop is never retried | Reproduced |
 
-Fix: decide the intended state machine first and write it at the top of
-`reconciler.go`. Recommended: count crashes from Docker's `RestartCount`
+Fix (decided): write the state machine at the top of `reconciler.go`.
+Count crashes from Docker's `RestartCount`
 (delta since the last tick, stored per service) and keep scanning
 `crashed` rows; trip the breaker when the count crosses the threshold within
 the window. Replace step 1a's stop with a restart, or remove 1a and let
@@ -220,8 +202,7 @@ Get/Delete, failed kanban re-create, suspend then reactivate restarts both.
 | `memory_mb_avg` returns a sum | Reproduced |
 | `AH_METER_DB_PATH` is never used | Reproduced |
 
-Decision needed before work starts: build a collector, or remove the
-metering endpoints and docs. If building: sample `ContainerStats` for each
+Fix (decided: build the collector): sample `ContainerStats` for each
 running service every 60s, insert into `usage_events`, roll up daily. Fix the
 average. Wire `MeterDBPath` through `db.Open`.
 
@@ -247,19 +228,9 @@ Fix all in one PR. Share status constants with the server where practical
 (export them from a small package both sides import) so the two cannot drift
 again. Replace the CLI test fixtures that use invented statuses.
 
-## Wave 3: races, quotas and resource leaks
+## Wave 3: races and resource leaks
 
 Run after Wave 2, because these touch the same files.
-
-### W3-A: quota checks inside the insert transaction (services, databases, environments)
-
-| Finding | Status |
-|---|---|
-| Service, database and environment quotas are checked outside the insert transaction | Reproduced |
-
-Fix: count and insert inside one `BEGIN IMMEDIATE` transaction in each
-package. Test: 8 concurrent creates against a file DB with
-`max_*=1` create exactly one.
 
 ### W3-B: cancellation actually stops work (`internal/builds/`, `internal/builder/`, `internal/deployments/`)
 
@@ -323,9 +294,55 @@ container (running or stopped). Set `RemoveVolumes: true`. Remove superseded
 tenant images on redeploy and delete. Decode the pull stream and return its
 error.
 
-## Wave 4: hardening and cleanup
+## Wave 4: multi-tenant abuse (moved from Wave 1)
 
-Low-risk items. Can run as one or two PRs after Wave 3.
+These need a second, hostile tenant. Do them before opening registration.
+
+### W4-A: per-tenant cap on long-running requests (`internal/api/server.go`)
+
+| Finding | Status |
+|---|---|
+| `Throttle(200)` is global and pre-auth; 200 slow `exec` calls from one tenant make the whole API return 429 | Plausible |
+
+Fix: move long-lived routes (exec, log follow, provisioning) out of the
+global throttle and give them a per-tenant in-flight cap (for example 4).
+
+Test: tenant B still gets 200 while tenant A holds its maximum number of
+exec slots.
+
+### W4-B: separate operator token from registration token (`internal/api/recovery.go`, `internal/api/tenants.go`, `internal/api/bootstrap.go`, `internal/config/`)
+
+| Finding | Status |
+|---|---|
+| The registration token also authorizes recover, reactivate and quota update for any tenant | Plausible (depends on how the token is shared) |
+| Invalid requests consume the global 20/hour budget, so anonymous junk blocks registration and recovery | Plausible |
+| First 8 chars of a rejected token are logged (`cmd/ah/main.go:96`) | Reproduced |
+
+Fix: add `AH_ADMIN_TOKEN` for recover, reactivate and quota update. Keep the
+bootstrap token for registration only. Charge the global bucket only after
+the token validates; keep the per-IP bucket for all requests. Log only token
+length. This is bootstrap-token logic, so it needs the security review.
+
+Compatibility: if `AH_ADMIN_TOKEN` is unset, log a startup warning and fall
+back to the current behavior for one release, then remove the fallback.
+Document the new variable in the ops docs and CHANGELOG.
+
+Test: recover with a bootstrap token returns 403 when an admin token is set.
+Twenty invalid-token requests do not block a valid registration.
+
+### W4-C: quota checks inside the insert transaction (services, databases, environments)
+
+| Finding | Status |
+|---|---|
+| Service, database and environment quotas are checked outside the insert transaction | Reproduced |
+
+Fix: count and insert inside one `BEGIN IMMEDIATE` transaction in each
+package. Test: 8 concurrent creates against a file DB with
+`max_*=1` create exactly one.
+
+## Wave 5: hardening and cleanup
+
+Low-risk items. Can run as one or two PRs at any point after Wave 2; the script deletion can go first.
 
 - Rate limiter data race on `lastSeen`; use `GetOrSet` for limiter creation (`internal/middleware/ratelimit.go`).
 - Enforce the per-tenant `api_rate_limit` quota or remove it from the API.
@@ -335,23 +352,24 @@ Low-risk items. Can run as one or two PRs after Wave 3.
 - `ValidateImage` accepts `localhost/...` and other tenants' local-registry paths; require the caller's tenant prefix.
 - Install script: verify `checksums.txt`, wrap in `main`, fix the printed `register` syntax; add a goreleaser release workflow.
 - `deploy/ah.service`: `ReadWritePaths=/etc/traefik/dynamic` (directory). Verify on the server with a test deploy.
-- `scripts/deploy.sh`, `db-provision.sh`, `status.sh`, `logs.sh`: fix request bodies and status values, use `curl -fsS`, pass arguments via `sys.argv`. Or delete the scripts now that `ahc` exists.
+- Delete `scripts/deploy.sh`, `db-provision.sh`, `status.sh` and `logs.sh` (decided); `ahc` covers them. Update docs that mention them.
 
-## Open decisions
+## Decisions (2026-10-14)
 
-1. W1-B: store a derived API-key HMAC key (recommended), or block rotation until that exists?
-2. W1-E: how is the bootstrap token distributed today? If only the operator holds it, W1-E drops to medium priority.
-3. W2-D: build the metering collector, or remove metering from the API?
-4. W2-B: confirm the intended crash/circuit-breaker state machine before the rewrite.
-5. Wave 4: keep or delete the shell scripts in `scripts/`.
+1. W1-B: store a dedicated API-key hashing key encrypted under the master key.
+2. Bootstrap token: only the operator holds it, so the admin-token split (W4-B) moves to Wave 4.
+3. W2-D: build the metering collector.
+4. W2-B: count crashes from Docker's restart count; Docker keeps restarting containers.
+5. Wave 5: delete the shell scripts in `scripts/`.
 
 ## Suggested order and size
 
 | Wave | PRs | Parallel | Notes |
 |---|---|---|---|
-| 1 | W1-A to W1-E | yes | W1-B and W1-E need the security review |
+| 1 | W1-A to W1-D | yes | W1-B needs the security review |
 | 2 | W2-A to W2-E | yes (merge W2-A before W2-B) | W2-B needs the security review |
-| 3 | W3-A to W3-E | yes after Wave 2 merges | |
-| 4 | 1–2 PRs | yes | |
+| 3 | W3-B to W3-E | yes after Wave 2 merges | |
+| 4 | W4-A to W4-C | yes | Before opening registration to others; W4-B needs the security review |
+| 5 | 1–2 PRs | yes | Script deletion can ship any time |
 
 Each workstream is sized for one implementation subagent and one PR.

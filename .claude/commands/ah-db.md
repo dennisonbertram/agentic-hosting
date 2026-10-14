@@ -1,5 +1,5 @@
 ---
-description: Provision a Postgres or Redis database and wire it to a service. Usage: /db <service-name> <postgres|redis> [db-name]
+description: Provision a Postgres or Redis database and wire it to a service. Usage: /ah-db <service-name> <postgres|redis> [db-name]
 argument-hint: <service-name> <postgres|redis> [db-name]
 allowed-tools: Bash
 ---

@@ -35,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Documentation site** — Astro docs in `docs-site/` matching the agentic.hosting landing-page look, covering the live `/v1/` API and operations. GitHub Pages workflow at `.github/workflows/docs.yml`.
+- **Agent onboarding** — repo-root `llms.txt` / `llms-full.txt` (also served at the docs site `/llms.txt`) and a standalone skill at `skills/agentic-hosting/SKILL.md` so an agent can install and operate ah from one URL.
 - **Usage metering collector**: samples CPU and memory of running services every 60s into the metering DB. `memory_mb_avg` is now a real average (it was a sum). `AH_METER_DB_PATH` is honored when set.
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)
   - `ahc deploy` — deploy from Docker images or git repos with build log streaming
@@ -47,6 +49,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `ahc register` / `ahc key` — tenant registration and API key management
 
 ### Changed
+
+- **Docs alignment** — README, homepage, Claude skill/commands, and `website/install.sh` now match the live API: `/ah-*` slash commands, build fields `source_type`/`source_url`/`source_ref`, `POST /v1/system/bootstrap-token/validate`, `POST /v1/tenants/{id}/reactivate`, 90% disk block, 10-minute idempotency TTL, and `GET /v1/services/{id}/logs`. Audit list: `docs-site/CORRECTIONS.md`. Deploys use `ahc` (`scripts/deploy.sh` was removed on main).
 
 ### Fixed
 

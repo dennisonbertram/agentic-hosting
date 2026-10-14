@@ -72,7 +72,7 @@ Traefik watches `/etc/traefik/dynamic/` on the server for `.yml` files. Drop a f
 ssh root@<server> "docker ps --format '{{.Names}}' | grep <service-id-prefix>"
 ```
 
-Container names follow the pattern: `paasd-<tenant-id>-<service-id>`
+Container names follow the pattern: `ah-{tenantID}-{serviceID}`
 
 ### Step 2 — Write the dynamic config
 
@@ -148,9 +148,9 @@ To enable `--base-domain apps.example.com`:
 
 1. **Wildcard DNS record**: Add `*.apps.example.com A <server-ip>` at your DNS provider. This routes all subdomains to the server.
 
-2. **Start paasd with the flag**:
+2. **Start ah with the flag**:
    ```bash
-   paasd serve --base-domain apps.example.com ...
+   ah serve --base-domain apps.example.com ...
    ```
    The daemon writes Traefik dynamic config files under `/etc/traefik/dynamic/` automatically when services are deployed.
 

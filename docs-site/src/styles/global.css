@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Instrument Serif", "Instrument Serif Fallback", serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Fira Mono", "JetBrains Mono", "Roboto Mono", "Courier New", monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5.5rem;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+.font-instrument-serif {
+  font-family: var(--font-serif);
+}
+
+.font-mono-stack {
+  font-family: var(--font-mono);
+}
+
+.prose {
+  color: #57534e;
+  line-height: 1.7;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: #1c1917;
+  font-weight: 500;
+  scroll-margin-top: 6rem;
+}
+
+.prose h1 {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 2.5rem;
+  line-height: 1.15;
+  margin: 0 0 1rem;
+}
+
+.prose h2 {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.875rem;
+  line-height: 1.25;
+  margin: 2.5rem 0 0.85rem;
+}
+
+.prose h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 1.75rem 0 0.6rem;
+}
+
+.prose p {
+  margin: 0 0 1rem;
+}
+
+.prose a {
+  color: #1c1917;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.prose a:hover {
+  color: #44403c;
+}
+
+.prose ul,
+.prose ol {
+  margin: 0 0 1.1rem;
+  padding-left: 1.25rem;
+}
+
+.prose li {
+  margin: 0.3rem 0;
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose ol {
+  list-style: decimal;
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  background: #e7e5e4;
+  color: #1c1917;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.25rem;
+}
+
+.prose pre {
+  font-family: var(--font-mono);
+  background: #1c1917;
+  color: #e7e5e4;
+  border-radius: 0.75rem;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  margin: 0 0 1.25rem;
+  border: 1px solid #292524;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.prose pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.5rem;
+  font-size: 0.875rem;
+}
+
+.prose th,
+.prose td {
+  text-align: left;
+  border-bottom: 1px solid #e7e5e4;
+  padding: 0.55rem 0.65rem;
+  vertical-align: top;
+}
+
+.prose th {
+  color: #1c1917;
+  font-weight: 600;
+  background: #f5f5f4;
+}
+
+.prose blockquote {
+  border-left: 3px solid #d6d3d1;
+  padding-left: 1rem;
+  margin: 0 0 1.25rem;
+  color: #78716c;
+}
+
+.prose hr {
+  border: 0;
+  border-top: 1px solid #e7e5e4;
+  margin: 2rem 0;
+}
+
+.prose strong {
+  color: #1c1917;
+  font-weight: 600;
+}
+
+.method {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  display: inline-block;
+}
+
+.method-get { background: rgba(59, 130, 246, 0.12); color: #2563eb; }
+.method-post { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.method-patch { background: rgba(245, 158, 11, 0.14); color: #d97706; }
+.method-delete { background: rgba(239, 68, 68, 0.12); color: #dc2626; }

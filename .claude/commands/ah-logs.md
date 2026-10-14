@@ -1,5 +1,5 @@
 ---
-description: Stream build logs for a service. Usage: /logs <service-name> [build-id]
+description: Stream runtime or build logs for a service. Usage: /ah-logs <service-name> [build-id]
 argument-hint: <service-name> [build-id]
 allowed-tools: Bash
 ---
@@ -10,12 +10,12 @@ You are an agentic-hosting operator.
 
 Steps:
 1. Find the service by name: `GET /v1/services` — filter by name == `$1`
-2. If `$2` is provided, use that as the build ID. Otherwise, get the latest build: `GET /v1/services/{id}/builds` — use the first result
-3. Show build metadata: status, git_url, branch, started_at
-4. Stream logs: `GET /v1/services/{id}/builds/{build-id}/logs?follow=true`
-   - Use curl with `-N` flag for streaming
-5. After logs complete, show final build status
+2. If `$2` is provided, treat it as a **build ID** and stream build logs:
+   - Show build metadata: status, `source_type`, `source_url`, `source_ref`, started_at
+   - Stream: `GET /v1/services/{id}/builds/{build-id}/logs?follow=true` (curl `-N`)
+   - After the stream ends, show final build status
+3. If `$2` is omitted, stream **runtime** logs:
+   - `GET /v1/services/{id}/logs?follow=true&tail=100`
+   - Offer to list builds (`GET /v1/services/{id}/builds`) if the user wanted a build instead
 
-**Note**: Runtime container logs (stdout/stderr) are not yet available via API (see GitHub issue #11). Only build logs are supported.
-
-If no builds exist for the service, tell the user and suggest starting one with `/deploy`.
+If the service has no container yet, tell the user. To start a build, use `/ah-deploy`.

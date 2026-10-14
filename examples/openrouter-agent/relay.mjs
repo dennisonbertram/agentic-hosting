@@ -52,6 +52,32 @@ export class RelayError extends Error {
   }
 }
 
+class ProviderFailure extends Error {
+  constructor(category, message, statusCode) {
+    super(message);
+    this.category = category;
+    this.statusCode = statusCode;
+  }
+}
+
+const PROVIDER_FAILURE_CATEGORIES = new Set([
+  'dns', 'transport', 'timeout', 'body', 'upstream_http_status', 'provider_json_invalid',
+]);
+
+function writeFailureDiagnostic(error, writer) {
+  const category = error instanceof ProviderFailure && PROVIDER_FAILURE_CATEGORIES.has(error.category)
+    ? error.category
+    : 'transport';
+  const status = category === 'upstream_http_status' && Number.isInteger(error.statusCode) && error.statusCode >= 100 && error.statusCode <= 599
+    ? ` status=${error.statusCode}`
+    : '';
+  try {
+    writer(`relay_failure category=${category}${status}\n`);
+  } catch {
+    // Diagnostics must not alter the generic client response.
+  }
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -270,10 +296,10 @@ export async function resolvePublicIPv4(resolve4Impl = resolve4) {
   try {
     addresses = await resolve4Impl(PROVIDER_HOST);
   } catch {
-    throw new Error('provider DNS lookup failed');
+    throw new ProviderFailure('dns', 'provider DNS lookup failed');
   }
   if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((address) => !isPublicIPv4(address))) {
-    throw new Error('provider DNS did not resolve to public IPv4 addresses');
+    throw new ProviderFailure('dns', 'provider DNS did not resolve to public IPv4 addresses');
   }
   return addresses[0];
 }
@@ -328,16 +354,16 @@ function sendHTTPS({ apiKey, payload, address, signal, httpsRequestImpl = httpsR
       response.on('data', (chunk) => {
         bytes += chunk.length;
         if (bytes > MAX_PROVIDER_BODY_BYTES) {
-          request.destroy(new Error('provider response too large'));
+          request.destroy(new ProviderFailure('body', 'provider response too large'));
           return;
         }
         chunks.push(chunk);
       });
-      response.once('error', () => reject(new Error('provider request failed')));
+      response.once('error', (error) => reject(error instanceof ProviderFailure ? error : new ProviderFailure('transport', 'provider request failed')));
       response.once('end', () => resolve({ statusCode: response.statusCode ?? 502, body: Buffer.concat(chunks).toString('utf8') }));
     });
-    request.setTimeout(PROVIDER_TIMEOUT_MS, () => request.destroy(new Error('provider request timed out')));
-    request.once('error', () => reject(new Error('provider request failed')));
+    request.setTimeout(PROVIDER_TIMEOUT_MS, () => request.destroy(new ProviderFailure('timeout', 'provider request timed out')));
+    request.once('error', (error) => reject(error instanceof ProviderFailure ? error : new ProviderFailure('transport', 'provider request failed')));
     request.end(body);
   });
 }
@@ -350,25 +376,41 @@ async function requestOpenRouter({
   timeoutMs = PROVIDER_TIMEOUT_MS,
 }) {
   const signal = AbortSignal.timeout(timeoutMs);
-  const address = await waitWithSignal(resolvePublicIPv4(resolve4Impl), signal);
-  return sendHTTPS({ apiKey, payload, address, signal, httpsRequestImpl });
+  let address;
+  try {
+    address = await waitWithSignal(resolvePublicIPv4(resolve4Impl), signal);
+  } catch (error) {
+    if (signal.aborted) throw new ProviderFailure('timeout', 'provider request timed out');
+    if (error instanceof ProviderFailure) throw error;
+    throw new ProviderFailure('dns', 'provider DNS lookup failed');
+  }
+  try {
+    return await sendHTTPS({ apiKey, payload, address, signal, httpsRequestImpl });
+  } catch (error) {
+    if (signal.aborted) throw new ProviderFailure('timeout', 'provider request timed out');
+    if (error instanceof ProviderFailure) throw error;
+    throw new ProviderFailure('transport', 'provider request failed');
+  }
 }
 
 function validateProviderResponse(result) {
-  if (!result || result.statusCode < 200 || result.statusCode >= 300 || typeof result.body !== 'string') {
-    throw new Error('provider request failed');
+  if (!result || !Number.isInteger(result.statusCode) || typeof result.body !== 'string') {
+    throw new ProviderFailure('transport', 'provider request failed');
+  }
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw new ProviderFailure('upstream_http_status', 'provider request failed', result.statusCode);
   }
   if (Buffer.byteLength(result.body, 'utf8') > MAX_PROVIDER_BODY_BYTES) {
-    throw new Error('provider response too large');
+    throw new ProviderFailure('body', 'provider response too large');
   }
   let data;
   try {
     data = JSON.parse(result.body);
   } catch {
-    throw new Error('provider returned invalid JSON');
+    throw new ProviderFailure('provider_json_invalid', 'provider returned invalid JSON');
   }
   if (!isRecord(data) || !Array.isArray(data.choices) || data.error) {
-    throw new Error('provider returned invalid completion');
+    throw new ProviderFailure('provider_json_invalid', 'provider returned invalid completion');
   }
   return result.body;
 }
@@ -435,8 +477,9 @@ async function handleRequest(request, response, state) {
       'X-Content-Type-Options': 'nosniff',
     });
     response.end(body);
-  } catch {
+  } catch (error) {
     // Do not log provider request/response bodies, credentials, or relay tokens.
+    writeFailureDiagnostic(error, state.writeDiagnostic);
     writeJson(response, 502, { error: 'provider request failed' });
   } finally {
     state.active = false;
@@ -450,6 +493,7 @@ export function createRelayServer({
   resolve4Impl = resolve4,
   httpsRequestImpl = httpsRequest,
   providerTimeoutMs = PROVIDER_TIMEOUT_MS,
+  writeDiagnostic = (line) => process.stderr.write(line),
 } = {}) {
   if (typeof apiKey !== 'string' || apiKey.trim().length < 20 || /[\r\n]/.test(apiKey)) {
     throw new Error('a valid provider key is required');
@@ -467,6 +511,7 @@ export function createRelayServer({
       timeoutMs: providerTimeoutMs,
     })),
     resolve4Impl,
+    writeDiagnostic,
     active: false,
     requestCount: 0,
   };

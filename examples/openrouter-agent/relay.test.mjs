@@ -283,9 +283,11 @@ test('pinned HTTPS lookup supports Node all-address callbacks and keeps the vali
 });
 
 test('bounds DNS resolution within the same total provider deadline', async () => {
+  const diagnostics = [];
   await withServer({
     providerRequest: undefined,
     providerTimeoutMs: 25,
+    writeDiagnostic: (line) => diagnostics.push(line),
     resolve4Impl: () => new Promise(() => {}),
     httpsRequestImpl: () => { throw new Error('HTTPS must not start after DNS timeout'); },
   }, async (baseURL) => {
@@ -297,6 +299,30 @@ test('bounds DNS resolution within the same total provider deadline', async () =
     assert.equal(response.status, 502);
     assert.deepEqual(await response.json(), { error: 'provider request failed' });
   });
+  assert.deepEqual(diagnostics, ['relay_failure category=timeout\n']);
+});
+
+test('logs only sanitized upstream status, never provider body, key, relay token, or prompt', async () => {
+  const diagnostics = [];
+  await withServer({
+    writeDiagnostic: (line) => diagnostics.push(line),
+    providerRequest: async () => ({
+      statusCode: 400,
+      body: 'private provider detail provider-key-sentinel relay-token-sentinel prompt-sentinel',
+    }),
+  }, async (baseURL) => {
+    const payload = basePayload();
+    payload.messages[1].content = 'prompt-sentinel';
+    const response = await fetch(`${baseURL}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: 'provider request failed' });
+  });
+  assert.deepEqual(diagnostics, ['relay_failure category=upstream_http_status status=400\n']);
+  assert.doesNotMatch(diagnostics.join(''), /private provider detail|provider-key-sentinel|relay-token-sentinel|prompt-sentinel/);
 });
 
 test('hides provider errors and caps provider response size', async () => {

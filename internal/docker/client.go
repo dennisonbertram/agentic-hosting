@@ -147,7 +147,11 @@ func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, 
 
 // ConnectNetwork connects a container to an additional network.
 func (c *DockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
-	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+	err := c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+	if err != nil && (strings.Contains(strings.ToLower(err.Error()), "already connected") || strings.Contains(strings.ToLower(err.Error()), "already exists")) {
+		return nil
+	}
+	return err
 }
 
 // NetworkDisconnect disconnects a container from a network.

@@ -285,6 +285,8 @@ func TestTenantDeleteStopsEnvironmentsAndDisablesPreviewRoutes(t *testing.T) {
 	_, err = stateDB.Exec(`UPDATE tenants SET status = 'active' WHERE id = 'tenant-1'`)
 	require.NoError(t, err)
 	require.NoError(t, envManager.Start(context.Background(), "tenant-1", "env-suspend"))
+	assert.Contains(t, mock.ConnectNetworkCalls, [2]string{"net-ah-tenant-tenant-1", "paas-traefik"},
+		"environment reactivation must reconnect Traefik to the recreated tenant network")
 	_, err = os.Stat(routePath)
 	assert.NoError(t, err, "starting the environment after reactivation should restore its preview route")
 }

@@ -441,7 +441,20 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		return apierr.Validation(fmt.Sprintf("environment must be stopped to start (current: %s)", e.Status))
 	}
 
+	// Tenant suspension removes the shared network and disconnects Traefik.
+	// Recreate it and restore Traefik's connection before publishing preview
+	// routes again.
+	networkName := docker.TenantNetworkName(tenantID)
+	networkID, err := m.docker.EnsureNetwork(ctx, networkName)
+	if err != nil {
+		return fmt.Errorf("ensure environment network: %w", err)
+	}
+	if err := m.docker.ConnectNetwork(ctx, networkID, "paas-traefik"); err != nil {
+		return fmt.Errorf("connect Traefik to environment network: %w", err)
+	}
+
 	containerID := e.ContainerID
+	recreated := false
 	if err := m.docker.StartContainer(ctx, e.ContainerID); err != nil {
 		if !isNotFoundError(err) {
 			return fmt.Errorf("start container: %w", err)
@@ -469,10 +482,6 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		if tmplErr != nil {
 			return fmt.Errorf("load environment template for recovery: %w", tmplErr)
 		}
-		networkName := docker.TenantNetworkName(tenantID)
-		if _, networkErr := m.docker.EnsureNetwork(ctx, networkName); networkErr != nil {
-			return fmt.Errorf("ensure environment network for recovery: %w", networkErr)
-		}
 		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
 			TenantID: tenantID, EnvID: envID, Image: tmpl.BaseImage,
 			MemoryMB: int64(tmpl.MemoryMB), CPUMillis: int64(tmpl.CPUMillis),
@@ -482,6 +491,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		if err != nil {
 			return fmt.Errorf("recreate missing environment container: %w", err)
 		}
+		recreated = true
+	}
+	if err := m.docker.ConnectNetwork(ctx, networkID, containerID); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = m.docker.StopContainer(cleanupCtx, containerID)
+		if recreated {
+			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		cancel()
+		return fmt.Errorf("connect environment to tenant network: %w", err)
 	}
 
 	now := time.Now().Unix()
@@ -500,7 +519,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	if err != nil || updated != 1 {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = m.docker.StopContainer(cleanupCtx, containerID)
-		if containerID != e.ContainerID {
+		if recreated {
 			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
 		}
 		cancel()

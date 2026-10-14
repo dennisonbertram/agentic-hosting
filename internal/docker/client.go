@@ -575,9 +575,12 @@ const wipeScript = `find /data -type f -exec sh -c 'head -c "$(wc -c < "$1")" /d
 // DAC_OVERRIDE/FOWNER because volume files may belong to other UIDs.
 func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
 	return &container.Config{
-			Image: wipeImage,
-			Cmd:   []string{"sh", "-c", wipeScript},
+			Image:  wipeImage,
+			Cmd:    []string{"sh", "-c", wipeScript},
+			Labels: map[string]string{"ah.managed": "true", "ah.type": "wipe"},
 		}, &container.HostConfig{
+			// AutoRemove releases the volume even if this process dies mid-wipe.
+			AutoRemove:  true,
 			Runtime:     "runsc",
 			NetworkMode: "none",
 			CapDrop:     []string{"ALL"},
@@ -607,18 +610,21 @@ func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("wipe volume %s: create container: %w", name, err)
 	}
-	// Always force-remove (kills if running); fresh context so it works after ctx expiry.
+	// Force-remove (kills if running) on every exit path, including ctx expiry
+	// (fresh context). Not-found is expected: AutoRemove usually got there first.
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = c.cli.ContainerRemove(cctx, resp.ID, container.RemoveOptions{Force: true})
 	}()
 
+	// With AutoRemove the container vanishes on exit, so wait for "removed",
+	// registered before start (as the docker CLI does for --rm); the exit code
+	// is still reported.
+	statusCh, errCh := c.cli.ContainerWait(ctx, resp.ID, container.WaitConditionRemoved)
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("wipe volume %s: start container: %w", name, err)
 	}
-
-	statusCh, errCh := c.cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
 	select {
 	case err := <-errCh:
 		if err != nil {

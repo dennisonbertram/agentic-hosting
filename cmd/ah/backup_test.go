@@ -47,6 +47,27 @@ func TestBackupDSN_ReadOnly(t *testing.T) {
 	assert.Contains(t, err.Error(), "readonly")
 }
 
+func TestBackupDSN_RelativePath(t *testing.T) {
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	defer os.Chdir(wd)
+
+	require.NoError(t, os.Mkdir("data", 0700))
+	rw, err := sql.Open("sqlite3", "data/ah.db")
+	require.NoError(t, err)
+	_, err = rw.Exec("CREATE TABLE t (x)")
+	require.NoError(t, err)
+	rw.Close()
+
+	ro, err := sql.Open("sqlite3", backupDSN("data/ah.db"))
+	require.NoError(t, err)
+	defer ro.Close()
+	_, err = ro.Exec("SELECT * FROM t")
+	require.NoError(t, err)
+}
+
 func TestMeteringPath_ShortPath(t *testing.T) {
 	assert.NotPanics(t, func() {
 		assert.Equal(t, "a-metering.db", db.MeteringPath("a"))

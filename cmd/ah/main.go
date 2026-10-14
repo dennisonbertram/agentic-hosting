@@ -94,7 +94,7 @@ func main() {
 				continue
 			}
 			if len(tok) < 32 {
-				log.Fatalf("each bootstrap token must be at least 32 characters for brute-force resistance (got %d for token starting with %.8s...)", len(tok), tok)
+				log.Fatalf("each bootstrap token must be at least 32 characters for brute-force resistance (got %d characters)", len(tok))
 			}
 			bootstrapTokens = append(bootstrapTokens, tok)
 		}
@@ -102,8 +102,24 @@ func main() {
 			log.Fatalf("AH_BOOTSTRAP_TOKEN is set but contains no valid tokens")
 		}
 		if len(bootstrapTokens) > 1 {
-			log.Printf("bootstrap token rotation: %d tokens configured (all are valid for registration and recovery)", len(bootstrapTokens))
+			log.Printf("bootstrap token rotation: %d tokens configured (all are valid for registration)", len(bootstrapTokens))
 		}
+	}
+
+	// Admin token: authorizes recover, reactivate and quota update. Comma-separated for rotation.
+	var adminTokens []string
+	for _, tok := range strings.Split(cfg.AdminToken, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if len(tok) < 32 {
+			log.Fatalf("each AH_ADMIN_TOKEN must be at least 32 characters (got %d characters)", len(tok))
+		}
+		adminTokens = append(adminTokens, tok)
+	}
+	if len(adminTokens) == 0 && len(bootstrapTokens) > 0 {
+		log.Printf("WARNING: AH_ADMIN_TOKEN is not set; bootstrap tokens are also accepted for recover, reactivate and quota update. This fallback is deprecated and will be removed; set AH_ADMIN_TOKEN.")
 	}
 
 	if *openRegistration && !*devMode {
@@ -214,6 +230,7 @@ func main() {
 		MasterKey:          masterKey[:32],
 		DevMode:            *devMode,
 		BootstrapTokens:    bootstrapTokens,
+		AdminTokens:        adminTokens,
 		OpenRegistration:   *openRegistration,
 		Docker:             dockerClient,
 		BuildManager:       buildMgr,

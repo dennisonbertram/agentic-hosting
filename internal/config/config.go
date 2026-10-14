@@ -23,6 +23,8 @@ type Config struct {
 	KanbanPortStart  int    // inclusive start of kanban port range (default: 7100)
 	KanbanPortEnd    int    // inclusive end of kanban port range (default: 9100)
 
+	AdminToken string // AH_ADMIN_TOKEN: operator token for recover/reactivate/quota (comma-separated for rotation; empty = fall back to bootstrap tokens)
+
 	// Snapshot retention
 	SnapshotMaxPerService int           // max snapshots kept per service (default: 10, 0 = unlimited)
 	SnapshotMaxAge        time.Duration // max age before a snapshot is eligible for cleanup (default: 30d, 0 = unlimited)
@@ -75,6 +77,7 @@ func FromEnv() Config {
 		NixpacksPath:          envOr("AH_NIXPACKS_PATH", "/usr/local/bin/nixpacks"),
 		DockerDataDir:         envOr("AH_DOCKER_DATA_DIR", "/var/lib/docker"),
 		BaseDomain:            strings.TrimSpace(os.Getenv("AH_BASE_DOMAIN")),
+		AdminToken:            strings.TrimSpace(os.Getenv("AH_ADMIN_TOKEN")),
 		TraefikConfigDir:      envOr("AH_TRAEFIK_CONFIG_DIR", "/etc/traefik/dynamic"),
 		KanbanPortStart:       envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart),
 		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),

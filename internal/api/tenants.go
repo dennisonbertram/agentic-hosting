@@ -112,7 +112,8 @@ func init() {
 }
 
 // allow returns whether the request is permitted and, if blocked, how long
-// until the relevant window resets.
+// until the relevant window resets. It charges the per-IP bucket for every
+// request but only checks (does not charge) the global bucket.
 func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -130,15 +131,27 @@ func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 	entry, exists := rl.entries.Get(ip)
 	if !exists || now.After(entry.windowAt) {
 		rl.entries.Set(ip, &regEntry{count: 1, windowAt: now.Add(regWindow)})
-		rl.globalCount++
 		return true, 0
 	}
 	if entry.count >= regMaxPerIPPerHour {
 		return false, time.Until(entry.windowAt)
 	}
 	entry.count++
-	rl.globalCount++
 	return true, 0
+}
+
+// chargeGlobal counts one authenticated request against the global hourly
+// budget. allow only checks the global bucket; it is charged here, after the
+// token validated, so invalid requests cannot exhaust it.
+func (rl *registrationLimiter) chargeGlobal() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	if rl.globalWindowAt.IsZero() || now.After(rl.globalWindowAt) {
+		rl.globalCount = 0
+		rl.globalWindowAt = now.Add(regWindow)
+	}
+	rl.globalCount++
 }
 
 func generateID() (string, error) {
@@ -179,6 +192,7 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	regLimiter.chargeGlobal()
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -454,7 +468,7 @@ type ReactivateResponse struct {
 // Security model:
 //   - Rate-limited by the same per-IP / global limiter used for tenant
 //     registration (5/IP/hour, 20/global/hour).
-//   - Requires bootstrap token via X-Bootstrap-Token header.
+//   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only suspended tenants can be reactivated; already-active returns 409.
 //   - A new API key is generated and returned (one-time display).
 func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) {
@@ -471,16 +485,7 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Fail closed: reject if no bootstrap tokens are configured.
-	if len(s.bootstrapTokens) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "reactivation temporarily unavailable")
-		return
-	}
-
-	// Verify bootstrap token via HMAC-compare (no length leak).
-	provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
-	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
-		writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+	if !s.requireAdmin(w, adminTokenFromRequest(r, r.Header.Get("X-Bootstrap-Token")), "reactivation temporarily unavailable") {
 		return
 	}
 
@@ -618,7 +623,7 @@ const (
 // Security model:
 //   - Rate-limited by the same per-IP / global limiter used for tenant
 //     registration (5/IP/hour, 20/global/hour).
-//   - Requires bootstrap token via X-Bootstrap-Token header.
+//   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only updates fields that are present in the request body (partial update).
 //   - Validates that all values are positive and within defined caps.
 func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
@@ -635,16 +640,7 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail closed: reject if no bootstrap tokens are configured.
-	if len(s.bootstrapTokens) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "quota update temporarily unavailable")
-		return
-	}
-
-	// Verify bootstrap token via HMAC-compare (no length leak).
-	provided := strings.TrimSpace(r.Header.Get("X-Bootstrap-Token"))
-	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
-		writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+	if !s.requireAdmin(w, adminTokenFromRequest(r, r.Header.Get("X-Bootstrap-Token")), "quota update temporarily unavailable") {
 		return
 	}
 
@@ -799,4 +795,44 @@ func validateBootstrapToken(provided string, tokens []string, masterKey []byte) 
 		}
 	}
 	return matched
+}
+
+// requireAdmin authorizes an operator-only request. When admin tokens are
+// configured only they are accepted (a valid bootstrap token gets 403);
+// otherwise it falls back to bootstrap tokens (deprecated, warned at startup).
+// On success it charges the global rate-limit bucket. On failure it writes the
+// response and returns false.
+func (s *Server) requireAdmin(w http.ResponseWriter, provided, unavailableMsg string) bool {
+	provided = strings.TrimSpace(provided)
+	if len(s.adminTokens) > 0 {
+		if !validateBootstrapToken(provided, s.adminTokens, s.masterKey) {
+			if validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
+				writeError(w, http.StatusForbidden, "this operation requires the admin token")
+			} else {
+				writeError(w, http.StatusUnauthorized, "missing or invalid admin token")
+			}
+			return false
+		}
+	} else {
+		// Fail closed: reject if no bootstrap tokens are configured.
+		if len(s.bootstrapTokens) == 0 {
+			writeError(w, http.StatusServiceUnavailable, unavailableMsg)
+			return false
+		}
+		if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid bootstrap token")
+			return false
+		}
+	}
+	regLimiter.chargeGlobal()
+	return true
+}
+
+// adminTokenFromRequest prefers the X-Admin-Token header and otherwise uses
+// fallback (the legacy X-Bootstrap-Token header or bootstrap_token body field).
+func adminTokenFromRequest(r *http.Request, fallback string) string {
+	if v := r.Header.Get("X-Admin-Token"); v != "" {
+		return v
+	}
+	return fallback
 }

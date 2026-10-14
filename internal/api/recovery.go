@@ -8,14 +8,13 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 )
 
 // KeyRecoverRequest is the body accepted by POST /v1/auth/recover.
-// Authentication is via bootstrap token, not an API key, so this endpoint
+// Authentication is via the admin token (bootstrap token if none configured), not an API key, so this endpoint
 // can be called even when the tenant has no valid keys remaining.
 type KeyRecoverRequest struct {
 	Email          string `json:"email"`
@@ -41,7 +40,7 @@ type KeyRecoverResponse struct {
 //   - Rate-limited by the same per-IP / global limiter used for tenant
 //     registration (5/IP/hour, 20/global/hour) — limits brute-force of the
 //     bootstrap token.
-//   - Bootstrap token is verified via HMAC-compare (no length leak).
+//   - The token is verified via HMAC-compare (no length leak).
 //   - Unknown-email and bad-token responses are deliberately identical (401)
 //     to prevent email enumeration.
 func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
@@ -58,22 +57,13 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail closed: reject if no bootstrap tokens are configured.
-	if len(s.bootstrapTokens) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "recovery temporarily unavailable")
-		return
-	}
-
 	var req KeyRecoverRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
 
-	// HMAC-compare against all configured tokens to support graceful rotation.
-	provided := strings.TrimSpace(req.BootstrapToken)
-	if !validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey) {
-		writeError(w, http.StatusUnauthorized, "invalid bootstrap token or email")
+	if !s.requireAdmin(w, adminTokenFromRequest(r, req.BootstrapToken), "recovery temporarily unavailable") {
 		return
 	}
 

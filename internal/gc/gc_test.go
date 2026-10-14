@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -467,6 +468,55 @@ func TestCollectOnce_PreservesPoolVolumeOwnedByEnvironment(t *testing.T) {
 		"GC must preserve a pool volume after ownership transfers to an environment")
 	assert.NotContains(t, mock.RemoveContainerCalls, "pool-ctr-owned",
 		"GC must preserve a pool-labeled container after ownership transfers to an environment")
+}
+
+func TestCollectOnce_DuringPoolClaimSeesEnvironmentOwnership(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		VALUES ('tenant_gc', 'GC test', 'gc@test.invalid', 'active', ?, ?)`, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas
+		(tenant_id, max_services, max_databases, max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit, max_environments)
+		VALUES ('tenant_gc', 5, 3, 2048, 2.0, 20, 100, 2)`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		VALUES ('wp_race', 'tmpl_default', 'pool-container-race', 'ah-pool-race', 'ready', 1)`)
+	require.NoError(t, err)
+	mock := &testutil.MockDockerClient{}
+	manager := environments.NewManager(stateDB, mock, "", "")
+	manager.SetPool(environments.NewPoolManager(stateDB, mock, environments.PoolConfig{PoolSize: 1, MaxTotal: 1}))
+	collector := New(stateDB, mock, time.Minute, t.TempDir())
+	var collectErr error
+	mock.ListContainersByLabelFn = func(_ context.Context, label, value string) ([]string, error) {
+		if label == "ah.type" && value == "warm-pool" {
+			return []string{"pool-container-race"}, nil
+		}
+		return nil, nil
+	}
+	mock.InspectContainerFn = func(context.Context, string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running", CreatedAt: time.Unix(1, 0)}, nil
+	}
+	mock.ListVolumesFn = func(_ context.Context, prefix string) ([]string, error) {
+		if prefix == "ah-pool-" {
+			return []string{"ah-pool-race"}, nil
+		}
+		return nil, nil
+	}
+	mock.NetworkDisconnectFn = func(ctx context.Context, _, _ string) error {
+		collectErr = collector.collectOnce(ctx)
+		return nil
+	}
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		return "cold-unused", nil
+	}
+	_, err = manager.Create(context.Background(), "tenant_gc", environments.CreateRequest{Name: "gc-race", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, collectErr)
+	assert.NotContains(t, mock.RemoveContainerCalls, "pool-container-race",
+		"GC running during warm-pool transfer must see environment ownership")
+	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-race",
+		"GC running during warm-pool transfer must see environment volume ownership")
 }
 
 // TestCollectOnce_RemovesOrphanedPoolContainers verifies that warm-pool

@@ -224,7 +224,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	var containerID string
 	usedPool := false
 	if m.pool != nil {
-		poolContainerID, poolVolumeName, poolErr := m.pool.Acquire(ctx, tmpl.ID)
+		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, tmpl.ID, tenantID, id)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
 			transferErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
@@ -235,17 +235,19 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 				transferErr = m.docker.RenameContainer(ctx, poolContainerID,
 					fmt.Sprintf("ah-env-%s-%s", tenantID, id))
 			}
-			if transferErr == nil {
-				_, transferErr = m.db.ExecContext(ctx,
-					`UPDATE environments SET volume_name = ? WHERE id = ?`, poolVolumeName, id)
-			}
 			if transferErr != nil {
 				log.Printf("environments: warm container transfer failed, falling back to cold start: %v", transferErr)
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				_ = m.docker.StopContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveVolume(cleanupCtx, poolVolumeName)
+				_, resetErr := m.db.ExecContext(cleanupCtx,
+					`UPDATE environments SET container_id = '', volume_name = ? WHERE id = ?`, volumeName, id)
 				cancel()
+				if resetErr != nil {
+					m.updateStatus(ctx, id, "failed")
+					return nil, fmt.Errorf("reset environment after warm transfer failure: %w", resetErr)
+				}
 			} else {
 				volumeName = poolVolumeName
 				containerID = poolContainerID
@@ -285,18 +287,36 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	// Update DB with container_id, status=running, lease
 	leaseExpiresAt := now + int64(leaseDuration)
-	_, err = m.db.ExecContext(ctx,
+	var updateResult sql.Result
+	updateResult, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running',
 		 lease_expires_at = ?, last_activity_at = ?, updated_at = ?
-		 WHERE id = ?`,
-		containerID, leaseExpiresAt, now, now, id,
+		 WHERE id = ? AND tenant_id = ? AND status = 'creating'
+		 AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = environments.tenant_id AND tenants.status = 'active')`,
+		containerID, leaseExpiresAt, now, now, id, tenantID,
 	)
 	if err != nil {
 		log.Printf("environments: failed to update container_id for %s: %v", id, err)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		m.removeCreatedEnvironment(containerID, volumeName)
+		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("update environment: %w", err)
+	}
+	updated, err := updateResult.RowsAffected()
+	if err != nil {
+		m.removeCreatedEnvironment(containerID, volumeName)
+		m.updateStatus(ctx, id, "failed")
+		return nil, fmt.Errorf("check environment creation update: %w", err)
+	}
+	if updated != 1 {
+		m.removeCreatedEnvironment(containerID, volumeName)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, deleteErr := m.db.ExecContext(cleanupCtx,
+			`DELETE FROM environments WHERE id = ? AND tenant_id = ?`, id, tenantID)
+		cancel()
+		if deleteErr != nil {
+			log.Printf("environments: remove interrupted creation %s: %v", id, deleteErr)
+		}
+		return nil, fmt.Errorf("environment creation was interrupted before ownership could be committed")
 	}
 
 	return &Environment{
@@ -428,6 +448,23 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		}
 		// The container may have been removed while its named workspace volume
 		// survived. Recreate it from the same template and keep that volume.
+		if e.VolumeName == "" {
+			return fmt.Errorf("workspace volume is missing; refusing to recreate an empty environment")
+		}
+		volumes, volumeErr := m.docker.ListVolumes(ctx, e.VolumeName)
+		if volumeErr != nil {
+			return fmt.Errorf("check workspace volume for recovery: %w", volumeErr)
+		}
+		volumeFound := false
+		for _, name := range volumes {
+			if name == e.VolumeName {
+				volumeFound = true
+				break
+			}
+		}
+		if !volumeFound {
+			return fmt.Errorf("workspace volume %q is missing; refusing to recreate an empty environment", e.VolumeName)
+		}
 		tmpl, tmplErr := m.GetTemplate(ctx, e.TemplateID)
 		if tmplErr != nil {
 			return fmt.Errorf("load environment template for recovery: %w", tmplErr)
@@ -449,14 +486,31 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(e.LeaseDurationSeconds)
-	_, err = m.db.ExecContext(ctx,
+	var updateResult sql.Result
+	updateResult, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running', lease_expires_at = ?,
-		 last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		containerID, leaseExpiresAt, now, now, envID,
+		 last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'stopped'
+		 AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = environments.tenant_id AND tenants.status = 'active')`,
+		containerID, leaseExpiresAt, now, now, envID, tenantID,
 	)
-	if err != nil && containerID != e.ContainerID {
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
+	updated := int64(0)
+	if err == nil {
+		updated, err = updateResult.RowsAffected()
+	}
+	if err != nil || updated != 1 {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = m.docker.StopContainer(cleanupCtx, containerID)
+		if containerID != e.ContainerID {
+			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		cancel()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("environment start was interrupted before ownership could be committed")
+	}
+	if err == nil {
+		m.restorePreviews(ctx, envID, tenantID)
 	}
 	return err
 }

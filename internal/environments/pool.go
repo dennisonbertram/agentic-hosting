@@ -268,6 +268,17 @@ func (p *PoolManager) refill(ctx context.Context) error {
 // and volume name. The caller is responsible for renaming/reconnecting the container.
 // Returns ErrPoolEmpty if no container is available.
 func (p *PoolManager) Acquire(ctx context.Context, templateID string) (containerID, volumeName string, err error) {
+	return p.acquire(ctx, templateID, "", "")
+}
+
+// AcquireForEnvironment assigns ownership to the creating environment in the
+// same transaction that removes the ready pool row. GC can therefore never see
+// a claimed container or volume without an owning database record.
+func (p *PoolManager) AcquireForEnvironment(ctx context.Context, templateID, tenantID, envID string) (containerID, volumeName string, err error) {
+	return p.acquire(ctx, templateID, tenantID, envID)
+}
+
+func (p *PoolManager) acquire(ctx context.Context, templateID, tenantID, envID string) (containerID, volumeName string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -291,20 +302,23 @@ func (p *PoolManager) Acquire(ctx context.Context, templateID string) (container
 		return "", "", fmt.Errorf("select ready container: %w", err)
 	}
 
-	// Mark as claimed.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE warm_pool SET status = 'claimed' WHERE id = ?`, id); err != nil {
-		return "", "", fmt.Errorf("claim container: %w", err)
+	if envID != "" {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE environments SET container_id = ?, volume_name = ?
+			 WHERE id = ? AND tenant_id = ? AND status = 'creating'`,
+			containerID, volumeName, envID, tenantID)
+		if err != nil {
+			return "", "", fmt.Errorf("assign environment ownership: %w", err)
+		}
+		if affected, _ := res.RowsAffected(); affected != 1 {
+			return "", "", fmt.Errorf("assign environment ownership: environment %s is not creating", envID)
+		}
 	}
-
+	if _, err := tx.ExecContext(ctx, `DELETE FROM warm_pool WHERE id = ?`, id); err != nil {
+		return "", "", fmt.Errorf("remove claimed pool row: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
-		return "", "", fmt.Errorf("commit: %w", err)
-	}
-
-	// Delete the claimed row.
-	if _, err := p.db.ExecContext(ctx,
-		`DELETE FROM warm_pool WHERE id = ?`, id); err != nil {
-		log.Printf("warm-pool: delete claimed row %s failed (non-fatal): %v", id, err)
+		return "", "", fmt.Errorf("commit claim: %w", err)
 	}
 
 	return containerID, volumeName, nil

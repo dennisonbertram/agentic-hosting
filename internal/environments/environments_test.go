@@ -842,11 +842,83 @@ func TestStartRecreatesMissingContainerWithExistingWorkspaceVolume(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
 	mock.StartContainerFn = func(context.Context, string) error { return fmt.Errorf("No such container: original-container") }
+	mock.ListVolumesFn = func(_ context.Context, prefix string) ([]string, error) { return []string{prefix}, nil }
 	require.NoError(t, mgr.Start(context.Background(), testTenantID, env.ID))
 	recovered, err := mgr.Get(context.Background(), testTenantID, env.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "replacement-container", recovered.ContainerID)
 	assert.Equal(t, env.VolumeName, recovered.VolumeName, "recovery must preserve existing workspace contents")
+}
+
+func TestStartDoesNotRecreateMissingWorkspaceVolume(t *testing.T) {
+	mgr, mock, _, _ := newTestManagerWithPool(t, 5)
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) { return "original-container", nil }
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "missing-volume", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	runsBeforeStart := mock.RunEnvironmentCalls
+	mock.StartContainerFn = func(context.Context, string) error { return fmt.Errorf("No such container: original-container") }
+	mock.ListVolumesFn = func(context.Context, string) ([]string, error) { return nil, nil }
+	err = mgr.Start(context.Background(), testTenantID, env.ID)
+	require.ErrorContains(t, err, "workspace volume")
+	assert.Equal(t, runsBeforeStart, mock.RunEnvironmentCalls,
+		"Start must not create a fresh empty volume when the workspace volume is missing")
+}
+
+func TestCreateCannotResurrectEnvironmentAfterTenantSuspension(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		close(entered)
+		<-release
+		return "late-container", nil
+	}
+	type createResult struct {
+		env *Environment
+		err error
+	}
+	resultCh := make(chan createResult, 1)
+	go func() {
+		env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "suspend-race", TemplateID: "default"})
+		resultCh <- createResult{env: env, err: err}
+	}()
+	<-entered
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+	close(release)
+	result := <-resultCh
+	require.Error(t, result.err, "creation must fail after suspension wins the status race")
+	assert.Contains(t, mock.RemoveContainerCalls, "late-container", "the late container must be cleaned up")
+	var count int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND name = 'suspend-race'`, testTenantID).Scan(&count))
+	assert.Equal(t, 0, count, "a failed in-flight creation must not leave a stopped row with deleted storage")
+}
+
+func TestStartCannotResurrectEnvironmentAfterTenantSuspension(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) { return "existing-container", nil }
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "start-suspend-race", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mock.StartContainerFn = func(context.Context, string) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- mgr.Start(context.Background(), testTenantID, env.ID) }()
+	<-entered
+	_, err = stateDB.Exec(`UPDATE tenants SET status = 'suspended' WHERE id = ?`, testTenantID)
+	require.NoError(t, err)
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+	close(release)
+	require.Error(t, <-startResult, "start must fail after tenant suspension wins the status race")
+	assert.Contains(t, mock.StopContainerCalls, "existing-container", "the container started after suspension must be stopped")
+	recovered, err := mgr.Get(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", recovered.Status)
 }
 
 // insertWarmPoolEntry inserts a ready warm pool entry into the given DB.

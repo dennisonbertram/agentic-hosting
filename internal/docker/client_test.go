@@ -376,7 +376,10 @@ func TestWipeScript_BoundedToFileSize(t *testing.T) {
 	}
 	script := strings.Replace(wipeScript, `rm -f "$1"`, `echo "$(wc -c < "$1") $(tr -d "\\000" < "$1" | wc -c)"`, 1)
 	script = `mkdir -p /data/sub; echo -n hello > /data/a; head -c 5000 /dev/urandom > /data/sub/b; ` + script
-	out, err := exec.Command("docker", "run", "--rm", "--network", "none", wipeImage, "sh", "-c", script).CombinedOutput()
+	if err := exec.Command("docker", "pull", "-q", wipeImage).Run(); err != nil {
+		t.Skipf("cannot pull %s: %v", wipeImage, err)
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--network", "none", wipeImage, "sh", "-c", script).Output()
 	if err != nil {
 		t.Skipf("cannot run %s: %v: %s", wipeImage, err, out)
 	}

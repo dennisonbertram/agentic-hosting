@@ -108,7 +108,7 @@ func TestReconciler_AutoRecovery(t *testing.T) {
 	assert.Nil(t, circuitRetryAt, "circuit_retry_at should be cleared after recovery")
 }
 
-// TestReconciler_UnhealthyRestart verifies that unhealthy containers are stopped.
+// TestReconciler_UnhealthyRestart verifies that unhealthy containers are restarted.
 func TestReconciler_UnhealthyRestart(t *testing.T) {
 	db := testutil.NewStateDB(t)
 	ctx := context.Background()
@@ -141,8 +141,9 @@ func TestReconciler_UnhealthyRestart(t *testing.T) {
 	r := reconciler.New(db, mock, time.Minute, nil)
 	require.NoError(t, r.ReconcileOnce(ctx))
 
-	assert.Contains(t, mock.StopContainerCalls, "container-xyz",
-		"StopContainer should be called for unhealthy container")
+	assert.Contains(t, mock.RestartContainerCalls, "container-xyz",
+		"RestartContainer should be called for unhealthy container (a stop is never undone by unless-stopped)")
+	assert.Empty(t, mock.StopContainerCalls)
 
 	var status string
 	err = db.QueryRowContext(ctx, `SELECT status FROM services WHERE id = ?`, "svc-3").Scan(&status)

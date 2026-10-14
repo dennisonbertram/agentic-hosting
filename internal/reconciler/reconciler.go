@@ -1,4 +1,38 @@
 // Package reconciler syncs DB state with actual Docker state.
+//
+// # Service crash state machine
+//
+// Containers run with restart policy unless-stopped, so Docker itself restarts
+// a crashed container. The reconciler does not restart crashes; it observes
+// them and decides when to give up.
+//
+// Each tick, every service with status 'running' or 'crashed', circuit_open=0
+// and a container_id is inspected. Crash events seen on one tick are:
+//   - RestartCount grew since the last tick (services.last_restart_count):
+//     one event per restart. This is how a crash loop appears, because Docker
+//     reports a looping container as 'restarting', not 'exited'.
+//   - a 'running' row whose container is exited/dead, or definitively gone
+//     (Docker not-found): one event. A 'crashed' row with a gone container is
+//     not counted again.
+//   - container running but health check 'unhealthy': one event, and the
+//     reconciler restarts the container (a manual stop would never be undone
+//     by unless-stopped).
+//
+// Transitions (all UPDATEs are compare-and-swap on status and container_id as
+// read at scan time; if no row changed, a concurrent deploy won and no Docker
+// action is taken):
+//
+//	running --crash event(s)--> crashed   crash_count += events in a 600s window
+//	crashed --crash event(s)--> crashed   (still watched, count keeps growing)
+//	any     --crash_count >= 5 in window--> circuit_open=1: container is
+//	        stopped and removed; row leaves the scan until recovery
+//	crashed --no events, Docker running and not unhealthy--> running
+//	circuit_open --circuit_retry_at elapsed--> stopped, counters reset; the
+//	        service is NOT restarted automatically (redeploy/start to resume)
+//
+// Known ceiling: a crash seen as 'exited' on one tick and then restarted by
+// Docker is counted again by the RestartCount delta on a later tick, so the
+// breaker can trip slightly early (rare: needs a tick inside the restart backoff).
 package reconciler
 
 import (
@@ -7,11 +41,16 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	dockerclient "github.com/docker/docker/client"
+)
+
+const (
+	crashThreshold  = 5   // crash events within the window that open the circuit
+	crashWindowSecs = 600 // crash window length in seconds
 )
 
 // Reconciler periodically checks DB state against Docker state.
@@ -81,16 +120,19 @@ func (r *Reconciler) safeReconcile(ctx context.Context) {
 	}
 }
 
-// isNotFoundError returns true if the error indicates a container definitively
-// does not exist (Docker 404). Transient errors (daemon down, timeout) return false.
+// isNotFoundError returns true only if Docker reported the object as not found.
+// Transient errors (daemon down, timeout) return false, even if their text
+// happens to contain "404".
 func isNotFoundError(err error) bool {
-	if err == nil {
-		return false
+	return err != nil && dockerclient.IsErrNotFound(err)
+}
+
+// shortID truncates a container ID for logs without panicking on short IDs.
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "No such container") ||
-		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "404")
+	return id
 }
 
 // circuitRetryBackoff returns how long to wait before auto-recovering an open circuit,
@@ -122,208 +164,165 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 	var checked, fixed int
 
-	// 1. Check services marked "running" — if container gone or exited, mark "crashed"
+	// 1. Watch services marked "running" or "crashed" and apply the state machine
+	// described at the top of this file.
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, container_id, tenant_id, circuit_open_count FROM services WHERE status = 'running' AND container_id != ''`)
+		`SELECT id, container_id, tenant_id, status, crash_count, crash_window_start, circuit_open_count, last_restart_count
+		 FROM services WHERE status IN ('running', 'crashed') AND circuit_open = 0 AND container_id != ''`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
 	type svcRecord struct {
-		id, containerID, tenantID string
-		circuitOpenCount          int
+		id, containerID, tenantID, status string
+		crashCount, circuitOpenCount      int
+		windowStart, lastRestartCount     sql.NullInt64
 	}
-	var runningServices []svcRecord
+	var watched []svcRecord
 	for rows.Next() {
 		var s svcRecord
-		if err := rows.Scan(&s.id, &s.containerID, &s.tenantID, &s.circuitOpenCount); err != nil {
+		if err := rows.Scan(&s.id, &s.containerID, &s.tenantID, &s.status, &s.crashCount,
+			&s.windowStart, &s.circuitOpenCount, &s.lastRestartCount); err != nil {
 			continue
 		}
-		runningServices = append(runningServices, s)
+		watched = append(watched, s)
 	}
 	rows.Close()
 
-	for _, s := range runningServices {
+	for _, s := range watched {
 		checked++
 
-		shouldMarkCrashed := false
-		crashReason := ""
-
-		if !containerSet[s.containerID] {
-			// Container not in list — double-check with direct inspect
-			_, inspectErr := r.docker.InspectContainer(ctx, s.containerID)
-			if inspectErr != nil {
-				if isNotFoundError(inspectErr) {
-					// Definitively gone
-					shouldMarkCrashed = true
-					crashReason = "container not found by reconciler"
-				} else {
-					// Transient Docker error — do NOT mark as crashed
-					log.Printf("reconciler: transient Docker error for service %s (container %s), skipping: %v",
-						s.id, s.containerID[:12], inspectErr)
-					continue
-				}
+		info, inspectErr := r.docker.InspectContainer(ctx, s.containerID)
+		gone := false
+		if inspectErr != nil {
+			if !isNotFoundError(inspectErr) {
+				// Transient Docker error — do NOT change state.
+				log.Printf("reconciler: transient Docker error for service %s (container %s), skipping: %v",
+					s.id, shortID(s.containerID), inspectErr)
+				continue
 			}
-			// If inspect succeeded but container wasn't in list, it exists — check its status below
-			if !shouldMarkCrashed {
-				info, _ := r.docker.InspectContainer(ctx, s.containerID)
-				if info != nil && (info.Status == "exited" || info.Status == "dead") {
-					shouldMarkCrashed = true
+			gone = true
+		}
+
+		crashes := 0
+		crashReason := ""
+		needRestart := false
+		switch {
+		case gone:
+			if s.status == "running" {
+				crashes, crashReason = 1, "container not found by reconciler"
+			}
+		default:
+			if s.lastRestartCount.Valid && info.RestartCount > int(s.lastRestartCount.Int64) {
+				crashes = info.RestartCount - int(s.lastRestartCount.Int64)
+				crashReason = fmt.Sprintf("container restarted %d time(s) by Docker (state %s, exit code %d)",
+					crashes, info.Status, info.ExitCode)
+			}
+			if info.Status == "exited" || info.Status == "dead" {
+				if s.status == "running" && crashes == 0 {
+					crashes = 1
+				}
+				if crashes > 0 {
 					crashReason = fmt.Sprintf("container %s (exit code %d)", info.Status, info.ExitCode)
 				}
 			}
-		} else {
-			// Container exists in list — check if it's actually running or exited/dead
-			info, inspectErr := r.docker.InspectContainer(ctx, s.containerID)
-			if inspectErr != nil {
-				// Can't inspect but container is in list — skip, don't mark crashed
-				continue
-			}
-			if info.Status == "exited" || info.Status == "dead" {
-				shouldMarkCrashed = true
-				crashReason = fmt.Sprintf("container %s (exit code %d)", info.Status, info.ExitCode)
+			if crashes == 0 && info.Status == "running" && info.HealthStatus == "unhealthy" {
+				crashes, crashReason, needRestart = 1, "container unhealthy (health check failed)", true
 			}
 		}
 
-		if shouldMarkCrashed {
-			now := time.Now().Unix()
-			// Two-step circuit breaker to avoid SQLite column evaluation order issues:
-			// Step 1: Update crash window and count
-			_, err := r.db.ExecContext(ctx, `
-				UPDATE services SET
-					status = 'crashed',
-					crash_window_start = CASE
-						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN ?
-						ELSE crash_window_start
-					END,
-					crash_count = CASE
-						WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 1
-						ELSE crash_count + 1
-					END,
-					last_crashed_at = ?,
-					last_error = ?,
-					updated_at = ?
-				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, now, crashReason, now, s.id, s.tenantID)
-			if err != nil {
-				log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
-				continue
-			}
-			// Step 2: Evaluate circuit_open based on the now-updated values.
-			// circuit_open_count + 1 is the new count after this opening; use it for the backoff
-			// so the delay escalates correctly: 1st open → 30m, 2nd → 1h, 3rd+ → 4h.
-			_, err = r.db.ExecContext(ctx, `
-				UPDATE services SET
-					circuit_open = CASE
-						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN 1
-						WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) >= 600 THEN 0
-						ELSE circuit_open
-					END,
-					circuit_retry_at = CASE
-						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN ?
-						ELSE circuit_retry_at
-					END,
-					circuit_open_count = CASE
-						WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN circuit_open_count + 1
-						ELSE circuit_open_count
-					END
-				WHERE id = ? AND tenant_id = ?`,
-				now, now, now, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), now, s.id, s.tenantID)
-			if err != nil {
-				log.Printf("reconciler: failed to update circuit breaker for service %s: %v", s.id, err)
-			}
-			var circuitOpen int
-			r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
-			if circuitOpen == 1 {
-				log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
-				// Stop the container when circuit opens to defeat Docker restart policy.
-				_ = r.docker.StopContainer(ctx, s.containerID)
-				_ = r.docker.RemoveContainer(ctx, s.containerID)
-			}
-			log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
-			// Record crash as deployment event. Need to look up the image for the record.
-			var crashImage string
-			r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, s.id).Scan(&crashImage)
-			crashNow := time.Now().Unix()
-			r.recordDeployment(ctx, &deployments.Deployment{
-				ServiceID:    s.id,
-				TenantID:     s.tenantID,
-				Image:        crashImage,
-				Status:       deployments.StatusCrashed,
-				Trigger:      deployments.TriggerReconciler,
-				ErrorMessage: crashReason,
-				StartedAt:    crashNow,
-				CompletedAt:  &crashNow,
-			})
-			fixed++
-		}
-	}
-
-	// 1a. Restart unhealthy containers — Docker health check reports "unhealthy".
-	// Stopping the container allows the RestartPolicy to restart it automatically.
-	for _, s := range runningServices {
-		info, inspectErr := r.docker.InspectContainer(ctx, s.containerID)
-		if inspectErr != nil {
-			continue
-		}
-		if info.HealthStatus != "unhealthy" {
-			continue
-		}
-		log.Printf("reconciler: service %s container %s is unhealthy — stopping to trigger restart", s.id, s.containerID[:12])
-		if stopErr := r.docker.StopContainer(ctx, s.containerID); stopErr != nil {
-			log.Printf("reconciler: failed to stop unhealthy container for service %s: %v", s.id, stopErr)
-			continue
-		}
 		now := time.Now().Unix()
-		_, err := r.db.ExecContext(ctx, `
+		newBaseline := s.lastRestartCount
+		if info != nil {
+			newBaseline = sql.NullInt64{Int64: int64(info.RestartCount), Valid: true}
+		}
+
+		if crashes == 0 {
+			newStatus := s.status
+			if s.status == "crashed" && info != nil && info.Status == "running" &&
+				(info.HealthStatus == "" || info.HealthStatus == "healthy" || info.HealthStatus == "none") {
+				newStatus = "running"
+			}
+			if newStatus == s.status && newBaseline == s.lastRestartCount {
+				continue
+			}
+			res, err := r.db.ExecContext(ctx, `
+				UPDATE services SET status = ?, last_restart_count = ?,
+					updated_at = CASE WHEN status = ? THEN updated_at ELSE ? END
+				WHERE id = ? AND tenant_id = ? AND status = ? AND container_id = ?`,
+				newStatus, newBaseline, newStatus, now, s.id, s.tenantID, s.status, s.containerID)
+			if err != nil {
+				log.Printf("reconciler: failed to update service %s: %v", s.id, err)
+			} else if n, _ := res.RowsAffected(); n > 0 && newStatus != s.status {
+				log.Printf("reconciler: service %s recovered, container running again", s.id)
+				fixed++
+			}
+			continue
+		}
+
+		// Crash window and circuit breaker, computed here so one CAS UPDATE sets everything.
+		windowStart, crashCount := s.windowStart.Int64, s.crashCount+crashes
+		if !s.windowStart.Valid || now-windowStart >= crashWindowSecs {
+			windowStart, crashCount = now, crashes
+		}
+		open := crashCount >= crashThreshold
+		openInt := 0
+		if open {
+			openInt = 1
+		}
+		res, err := r.db.ExecContext(ctx, `
 			UPDATE services SET
 				status = 'crashed',
-				crash_window_start = CASE
-					WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN ?
-					ELSE crash_window_start
-				END,
-				crash_count = CASE
-					WHEN crash_window_start IS NULL OR (? - crash_window_start) >= 600 THEN 1
-					ELSE crash_count + 1
-				END,
+				crash_window_start = ?,
+				crash_count = ?,
 				last_crashed_at = ?,
-				last_error = 'container unhealthy (health check failed)',
+				last_error = ?,
+				last_restart_count = ?,
+				circuit_open = ?,
+				circuit_retry_at = CASE WHEN ? = 1 THEN ? ELSE circuit_retry_at END,
+				circuit_open_count = circuit_open_count + ?,
 				updated_at = ?
-			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, now, now, s.id, s.tenantID)
+			WHERE id = ? AND tenant_id = ? AND status = ? AND container_id = ?`,
+			windowStart, crashCount, now, crashReason, newBaseline,
+			openInt, openInt, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), openInt,
+			now, s.id, s.tenantID, s.status, s.containerID)
 		if err != nil {
-			log.Printf("reconciler: failed to update crash state for unhealthy service %s: %v", s.id, err)
+			log.Printf("reconciler: failed to mark service %s as crashed: %v", s.id, err)
 			continue
 		}
-		// circuit_open_count + 1 is the new count after this opening; use it for the backoff
-		// so the delay escalates correctly: 1st open → 30m, 2nd → 1h, 3rd+ → 4h.
-		_, err = r.db.ExecContext(ctx, `
-			UPDATE services SET
-				circuit_open = CASE
-					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN 1
-					WHEN crash_window_start IS NOT NULL AND (? - crash_window_start) >= 600 THEN 0
-					ELSE circuit_open
-				END,
-				circuit_retry_at = CASE
-					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN ?
-					ELSE circuit_retry_at
-				END,
-				circuit_open_count = CASE
-					WHEN crash_count >= 5 AND crash_window_start IS NOT NULL AND (? - crash_window_start) < 600 THEN circuit_open_count + 1
-					ELSE circuit_open_count
-				END
-			WHERE id = ? AND tenant_id = ?`,
-			now, now, now, time.Now().Add(circuitRetryBackoff(s.circuitOpenCount+1)).Unix(), now, s.id, s.tenantID)
-		if err != nil {
-			log.Printf("reconciler: failed to update circuit breaker for unhealthy service %s: %v", s.id, err)
+		if n, _ := res.RowsAffected(); n == 0 {
+			log.Printf("reconciler: service %s changed during reconcile, skipping crash handling", s.id)
+			continue
 		}
-		var circuitOpen int
-		r.db.QueryRowContext(ctx, `SELECT circuit_open FROM services WHERE id = ?`, s.id).Scan(&circuitOpen)
-		if circuitOpen == 1 {
-			log.Printf("reconciler: service %s circuit breaker OPEN after unhealthy restarts — removing container", s.id)
+
+		if open {
+			log.Printf("reconciler: service %s circuit breaker OPEN — stopping container", s.id)
+			// Stop first to defeat the restart policy, then remove.
+			_ = r.docker.StopContainer(ctx, s.containerID)
 			_ = r.docker.RemoveContainer(ctx, s.containerID)
+		} else if needRestart {
+			// A manual stop would stay stopped under unless-stopped, so restart instead.
+			log.Printf("reconciler: service %s container %s is unhealthy — restarting", s.id, shortID(s.containerID))
+			if rerr := r.docker.RestartContainer(ctx, s.containerID); rerr != nil {
+				log.Printf("reconciler: failed to restart unhealthy container for service %s: %v", s.id, rerr)
+			}
 		}
+		log.Printf("reconciler: service %s marked crashed (%s)", s.id, crashReason)
+		// Record crash as deployment event. Need to look up the image for the record.
+		var crashImage string
+		r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, s.id).Scan(&crashImage)
+		crashNow := time.Now().Unix()
+		r.recordDeployment(ctx, &deployments.Deployment{
+			ServiceID:    s.id,
+			TenantID:     s.tenantID,
+			Image:        crashImage,
+			Status:       deployments.StatusCrashed,
+			Trigger:      deployments.TriggerReconciler,
+			ErrorMessage: crashReason,
+			StartedAt:    crashNow,
+			CompletedAt:  &crashNow,
+		})
 		fixed++
 	}
 
@@ -347,8 +346,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		recoveryRows.Close()
 
 		for _, rec := range toRecover {
-			log.Printf("reconciler: service %s circuit retry_at elapsed — resetting circuit breaker for auto-recovery attempt", rec.id)
-			_, err := r.db.ExecContext(ctx, `
+			log.Printf("reconciler: service %s circuit retry_at elapsed — resetting circuit breaker", rec.id)
+			res, err := r.db.ExecContext(ctx, `
 				UPDATE services SET
 					circuit_open = 0,
 					crash_count = 0,
@@ -356,27 +355,31 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 					circuit_retry_at = NULL,
 					status = 'stopped',
 					updated_at = ?
-				WHERE id = ? AND tenant_id = ?`,
+				WHERE id = ? AND tenant_id = ? AND circuit_open = 1`,
 				time.Now().Unix(), rec.id, rec.tenantID)
 			if err != nil {
 				log.Printf("reconciler: failed to reset circuit for service %s: %v", rec.id, err)
-			} else {
-				log.Printf("reconciler: service %s circuit reset to stopped — next tick will restart if applicable", rec.id)
-				// Record auto-recovery as deployment event.
-				var recoveryImage string
-				r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, rec.id).Scan(&recoveryImage)
-				recoveryNow := time.Now().Unix()
-				r.recordDeployment(ctx, &deployments.Deployment{
-					ServiceID:   rec.id,
-					TenantID:    rec.tenantID,
-					Image:       recoveryImage,
-					Status:      deployments.StatusStopped,
-					Trigger:     deployments.TriggerAutoRecovery,
-					StartedAt:   recoveryNow,
-					CompletedAt: &recoveryNow,
-				})
-				fixed++
+				continue
 			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
+			}
+			// The container was removed when the circuit opened and nothing restarts it
+			// here; the service stays stopped until it is started or redeployed.
+			log.Printf("reconciler: service %s circuit reset, service left stopped (start or redeploy to resume)", rec.id)
+			var recoveryImage string
+			r.db.QueryRowContext(ctx, `SELECT image FROM services WHERE id = ?`, rec.id).Scan(&recoveryImage)
+			recoveryNow := time.Now().Unix()
+			r.recordDeployment(ctx, &deployments.Deployment{
+				ServiceID:   rec.id,
+				TenantID:    rec.tenantID,
+				Image:       recoveryImage,
+				Status:      deployments.StatusStopped,
+				Trigger:     deployments.TriggerAutoRecovery,
+				StartedAt:   recoveryNow,
+				CompletedAt: &recoveryNow,
+			})
+			fixed++
 		}
 	}
 
@@ -488,8 +491,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				_, inspectErr := r.docker.InspectContainer(ctx, e.containerID)
 				if inspectErr != nil && isNotFoundError(inspectErr) {
 					_, err := r.db.ExecContext(ctx,
-						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
-						time.Now().Unix(), e.id, e.tenantID)
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'running' AND container_id = ?`,
+						time.Now().Unix(), e.id, e.tenantID, e.containerID)
 					if err != nil {
 						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
 					} else {
@@ -506,8 +509,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 				}
 				if info.Status == "exited" || info.Status == "dead" {
 					_, err := r.db.ExecContext(ctx,
-						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
-						time.Now().Unix(), e.id, e.tenantID)
+						`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'running' AND container_id = ?`,
+						time.Now().Unix(), e.id, e.tenantID, e.containerID)
 					if err != nil {
 						log.Printf("reconciler: failed to mark environment %s as stopped: %v", e.id, err)
 					} else {
@@ -532,32 +535,68 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		fixed += int(n)
 	}
 
-	// 4b. Expire environment leases: running environments past their lease expiry
-	envLeaseResult, err := r.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'stopped', updated_at = ?
-		 WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
-		time.Now().Unix(), time.Now().Unix())
-	if err != nil {
-		log.Printf("reconciler: failed to expire environment leases: %v", err)
-	} else if n, _ := envLeaseResult.RowsAffected(); n > 0 {
-		log.Printf("reconciler: expired %d environment leases", n)
-		// Stop the containers for expired leases
-		expiredRows, expErr := r.db.QueryContext(ctx,
-			`SELECT container_id FROM environments WHERE status = 'stopped' AND container_id != '' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
-			time.Now().Unix())
-		if expErr == nil {
-			for expiredRows.Next() {
-				var cid string
-				if err := expiredRows.Scan(&cid); err != nil {
+	// 4b. Expire environment leases. Stop the container first and only then mark the
+	// row stopped, so a failed stop leaves the row 'running' and is retried next tick.
+	leaseNow := time.Now().Unix()
+
+	// Retry: rows already stopped whose container is still running (an earlier stop failed).
+	retryRows, retryErr := r.db.QueryContext(ctx,
+		`SELECT container_id FROM environments WHERE status = 'stopped' AND container_id != '' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+		leaseNow)
+	if retryErr == nil {
+		var stoppedCIDs []string
+		for retryRows.Next() {
+			var cid string
+			if retryRows.Scan(&cid) == nil && containerSet[cid] {
+				stoppedCIDs = append(stoppedCIDs, cid)
+			}
+		}
+		retryRows.Close()
+		for _, cid := range stoppedCIDs {
+			info, ierr := r.docker.InspectContainer(ctx, cid)
+			if ierr != nil || (info.Status != "running" && info.Status != "restarting") {
+				continue
+			}
+			if stopErr := r.docker.StopContainer(ctx, cid); stopErr != nil {
+				log.Printf("reconciler: failed to stop expired environment container %s: %v", shortID(cid), stopErr)
+			}
+		}
+	}
+
+	leaseRows, leaseErr := r.db.QueryContext(ctx,
+		`SELECT id, tenant_id, container_id FROM environments WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+		leaseNow)
+	if leaseErr != nil {
+		log.Printf("reconciler: failed to query expired environment leases: %v", leaseErr)
+	} else {
+		type leaseRecord struct{ id, tenantID, containerID string }
+		var expired []leaseRecord
+		for leaseRows.Next() {
+			var l leaseRecord
+			var cid sql.NullString
+			if leaseRows.Scan(&l.id, &l.tenantID, &cid) == nil {
+				l.containerID = cid.String
+				expired = append(expired, l)
+			}
+		}
+		leaseRows.Close()
+		for _, l := range expired {
+			if l.containerID != "" {
+				if stopErr := r.docker.StopContainer(ctx, l.containerID); stopErr != nil && !isNotFoundError(stopErr) {
+					log.Printf("reconciler: failed to stop expired environment container %s, will retry: %v", shortID(l.containerID), stopErr)
 					continue
 				}
-				if stopErr := r.docker.StopContainer(ctx, cid); stopErr != nil {
-					log.Printf("reconciler: failed to stop expired environment container %s: %v", cid[:12], stopErr)
-				}
 			}
-			expiredRows.Close()
+			res, err := r.db.ExecContext(ctx,
+				`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'running' AND container_id = ?`,
+				time.Now().Unix(), l.id, l.tenantID, l.containerID)
+			if err != nil {
+				log.Printf("reconciler: failed to expire environment lease %s: %v", l.id, err)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("reconciler: expired environment lease %s", l.id)
+				fixed++
+			}
 		}
-		fixed += int(n)
 	}
 
 	// 5. Detect split-brain containers: ah.service-labeled containers not tracked in DB.
@@ -589,7 +628,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			}
 			if currentDBCID != cid {
 				log.Printf("reconciler: WARNING: split-brain detected — container %s claims service %s but DB has container_id=%q; GC will clean up after age gate",
-					cid[:12], svcID, currentDBCID)
+					shortID(cid), svcID, currentDBCID)
 			}
 		}
 	}

@@ -635,14 +635,18 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("ensure tenant network: %w", err)
 	}
 
-	// Snapshot images are only tagged locally and do not exist in any registry,
-	// so skip the pull when the image is already in the local store.
-	if exists, _ := m.docker.ImageExists(ctx, svc.Image); exists {
-		log.Printf("services: image %s already local; skipping pull for %s", svc.Image, serviceID)
-	} else if err := m.docker.PullImage(ctx, svc.Image); err != nil {
-		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
-		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("image pull failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
-		return fmt.Errorf("pull image: %w", err)
+	// Always try to pull so mutable tags get refreshed. Snapshot images exist only in
+	// the local store, so a failed pull is tolerated when the image is already local.
+	if err := m.docker.PullImage(ctx, svc.Image); err != nil {
+		if exists, _ := m.docker.ImageExists(ctx, svc.Image); exists {
+			log.Printf("WARNING: pull of %s failed (%v); using local image for %s", svc.Image, err, serviceID)
+			err = nil
+		}
+		if err != nil {
+			m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("image pull failed: %v", err))
+			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("image pull failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
+			return fmt.Errorf("pull image: %w", err)
+		}
 	}
 
 	// Re-verify service still exists after the slow image pull.

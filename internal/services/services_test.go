@@ -619,11 +619,28 @@ func TestDelete_WithSnapshot(t *testing.T) {
 	assert.Contains(t, mock.RemoveImageCalls, "127.0.0.1:5000/snapshots/tenant-1:snap1")
 }
 
-func TestDeploy_SkipsPullWhenImageLocal(t *testing.T) {
-	mock := &testutil.MockDockerClient{ImageExistsFn: func(ctx context.Context, img string) (bool, error) { return true, nil }}
-	mgr, _, svc := newTestMgr(t, mock, "")
-	require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
-	assert.Empty(t, mock.PullImageCalls)
+func TestDeploy_PullFailure(t *testing.T) {
+	pullErr := func(ctx context.Context, img string) error { return errors.New("not in registry") }
+	exists := func(v bool) func(context.Context, string) (bool, error) {
+		return func(context.Context, string) (bool, error) { return v, nil }
+	}
+	t.Run("pull fails, image local: deploys", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{PullImageFn: pullErr, ImageExistsFn: exists(true)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+		assert.Len(t, mock.PullImageCalls, 1)
+	})
+	t.Run("pull fails, not local: fails", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{PullImageFn: pullErr, ImageExistsFn: exists(false)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.Error(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+	})
+	t.Run("pull succeeds: pulls even if local", func(t *testing.T) {
+		mock := &testutil.MockDockerClient{ImageExistsFn: exists(true)}
+		mgr, _, svc := newTestMgr(t, mock, "")
+		require.NoError(t, mgr.Deploy(context.Background(), "tenant-1", svc.ID))
+		assert.Len(t, mock.PullImageCalls, 1)
+	})
 }
 
 func TestRestart_EarlyReturnMarksDeploymentFailed(t *testing.T) {

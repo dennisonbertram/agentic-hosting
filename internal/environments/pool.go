@@ -28,7 +28,7 @@ type PoolManager struct {
 	db     *sql.DB
 	docker docker.Client
 	config PoolConfig
-	mu     sync.Mutex
+	mu     sync.Mutex // guards only the Acquire DB transaction; never held across Docker calls
 }
 
 // NewPoolManager creates a new pool manager.
@@ -94,30 +94,28 @@ func (p *PoolManager) safeRefill(ctx context.Context) {
 
 // pruneStaleEntries removes warm_pool rows whose containers no longer exist in Docker.
 // This prevents ghost rows from making the pool appear full after server restarts or
-// docker prune events. Must be called with p.mu held.
+// docker prune events. Only a not-found Inspect error prunes a row.
 func (p *PoolManager) pruneStaleEntries(ctx context.Context) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM warm_pool WHERE status = 'ready'`)
+		`SELECT id, container_id, volume_name, status FROM warm_pool`)
 	if err != nil {
 		log.Printf("warm-pool: pruneStaleEntries query failed: %v", err)
 		return
 	}
-	defer rows.Close()
 
 	type entry struct {
-		id          string
-		containerID string
-		volumeName  string
+		id, containerID, volumeName, status string
 	}
 	var entries []entry
 	for rows.Next() {
 		var e entry
-		if err := rows.Scan(&e.id, &e.containerID, &e.volumeName); err != nil {
+		if err := rows.Scan(&e.id, &e.containerID, &e.volumeName, &e.status); err != nil {
 			log.Printf("warm-pool: pruneStaleEntries scan failed: %v", err)
 			continue
 		}
 		entries = append(entries, e)
 	}
+	rows.Close() // release the DB connection before Docker calls
 	if err := rows.Err(); err != nil {
 		log.Printf("warm-pool: pruneStaleEntries iterate failed: %v", err)
 		return
@@ -128,25 +126,24 @@ func (p *PoolManager) pruneStaleEntries(ctx context.Context) {
 			return
 		}
 		_, inspectErr := p.docker.InspectContainer(ctx, e.containerID)
-		if inspectErr == nil {
-			// Container exists — keep the row.
+		if inspectErr == nil || !isNotFoundError(inspectErr) {
+			// Container exists, or Docker failed transiently — keep the row.
 			continue
 		}
-		// Container gone — delete the row and try to clean up the volume.
 		log.Printf("warm-pool: pruning stale entry %s (container %s gone): %v",
 			e.id, e.containerID[:min(12, len(e.containerID))], inspectErr)
 		if _, delErr := p.db.ExecContext(ctx,
 			`DELETE FROM warm_pool WHERE id = ?`, e.id); delErr != nil {
 			log.Printf("warm-pool: failed to delete stale entry %s: %v", e.id, delErr)
 		}
-		_ = p.docker.RemoveVolume(ctx, e.volumeName)
+		// A claimed entry's volume belongs to its environment; only free ready ones.
+		if e.status == "ready" {
+			_ = p.docker.RemoveVolume(ctx, e.volumeName)
+		}
 	}
 }
 
 func (p *PoolManager) refill(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	// Remove rows that point to non-existent Docker containers before counting.
 	p.pruneStaleEntries(ctx)
 
@@ -163,8 +160,6 @@ func (p *PoolManager) refill(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list templates: %w", err)
 	}
-	defer rows.Close()
-
 	type tmplInfo struct {
 		ID        string
 		Image     string
@@ -180,6 +175,7 @@ func (p *PoolManager) refill(ctx context.Context) error {
 		}
 		templates = append(templates, t)
 	}
+	rows.Close() // release the DB connection before slow Docker calls
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate templates: %w", err)
 	}
@@ -300,19 +296,14 @@ func (p *PoolManager) Acquire(ctx context.Context, templateID string) (container
 		return "", "", fmt.Errorf("commit: %w", err)
 	}
 
-	// Delete the claimed row.
-	if _, err := p.db.ExecContext(ctx,
-		`DELETE FROM warm_pool WHERE id = ?`, id); err != nil {
-		log.Printf("warm-pool: delete claimed row %s failed (non-fatal): %v", id, err)
-	}
-
+	// The 'claimed' row is kept on purpose: the container still carries the
+	// immutable ah.type=warm-pool label, and GC keeps warm-pool containers that
+	// have a warm_pool row. Manager.Delete removes the row with the environment.
 	return containerID, volumeName, nil
 }
 
 // Stats returns the number of ready containers per template.
 func (p *PoolManager) Stats(ctx context.Context) (map[string]int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	return p.statsLocked(ctx)
 }
 
@@ -338,16 +329,11 @@ func (p *PoolManager) statsLocked(ctx context.Context) (map[string]int, error) {
 
 // Drain stops and removes all warm pool containers and cleans up the DB.
 func (p *PoolManager) Drain(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM warm_pool`)
+		`SELECT id, container_id, volume_name FROM warm_pool WHERE status = 'ready'`)
 	if err != nil {
 		return fmt.Errorf("list pool entries: %w", err)
 	}
-	defer rows.Close()
-
 	type entry struct {
 		id          string
 		containerID string
@@ -362,6 +348,7 @@ func (p *PoolManager) Drain(ctx context.Context) error {
 		}
 		entries = append(entries, e)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate pool entries: %w", err)
 	}

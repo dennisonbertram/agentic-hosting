@@ -200,7 +200,7 @@ func getBuildStatus(t *testing.T, stateDB *sql.DB, buildID string) string {
 
 func waitForBuildStatus(t *testing.T, stateDB *sql.DB, buildID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second) // generous: -race on a loaded machine made 2s flaky
 	for time.Now().Before(deadline) {
 		if got := getBuildStatus(t, stateDB, buildID); got == want {
 			return

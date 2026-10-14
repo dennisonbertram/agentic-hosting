@@ -355,9 +355,9 @@ func TestServiceRedeploy_CallsRestartAndReturnsService(t *testing.T) {
 	assert.Equal(t, 1, runCalls, "RunContainer should have been called once for the redeploy")
 }
 
-// TestServiceRedeploy_NoContainer_Returns409 verifies that redeploying a service
-// with no container returns a 409 Conflict (same as restart with no container).
-func TestServiceRedeploy_NoContainer_Returns409(t *testing.T) {
+// TestServiceRedeploy_NoContainer_Deploys verifies that redeploying a service
+// with no container (failed first deploy, circuit reset) runs the full deploy path.
+func TestServiceRedeploy_NoContainer_Deploys(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	token := seedAuthenticatedTenant(t, stateDB, masterKey)
@@ -383,7 +383,7 @@ func TestServiceRedeploy_NoContainer_Returns409(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
-	assert.Equal(t, http.StatusConflict, rr.Code, "redeploy with no container should return 409")
+	assert.Equal(t, http.StatusOK, rr.Code, "redeploy with no container should deploy it: %s", rr.Body.String())
 }
 
 // TestServiceDeployments_ReturnsPaginatedHistory verifies that GET /v1/services/{id}/deployments
@@ -3057,4 +3057,16 @@ func seedAuthenticatedTenant(t *testing.T, stateDB *sql.DB, masterKey []byte) st
 	require.NoError(t, err)
 
 	return keyID + "." + secret
+}
+
+// startCalls receives the tenant ID each time a manager restarts a tenant's
+// resources (reactivation runs the restart in a goroutine).
+var startCalls = make(chan string, 8)
+
+func (f *fakeDatabaseManager) StartAllForTenant(ctx context.Context, tenantID string) {
+	startCalls <- "db:" + tenantID
+}
+
+func (f *fakeKanbanManager) StartForTenant(ctx context.Context, tenantID string) {
+	startCalls <- "kanban:" + tenantID
 }

@@ -50,7 +50,7 @@ func TestBuildList_NoBuilds(t *testing.T) {
 	c := ahclient.NewClient(srv.URL, "test-key")
 
 	var buf bytes.Buffer
-	err := runBuildList(c, "my-svc", false, &buf)
+	err := runBuildList(c, "my-svc", false, &buf, false)
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "No builds found", "empty build list must say 'No builds found'")
 }
@@ -82,7 +82,7 @@ func TestBuildList_TableColumns(t *testing.T) {
 	c := ahclient.NewClient(srv.URL, "test-key")
 
 	var buf bytes.Buffer
-	err := runBuildList(c, "my-svc", false, &buf)
+	err := runBuildList(c, "my-svc", false, &buf, false)
 	require.NoError(t, err)
 	output := buf.String()
 
@@ -120,7 +120,7 @@ func TestBuildList_TruncatedID(t *testing.T) {
 	c := ahclient.NewClient(srv.URL, "test-key")
 
 	var buf bytes.Buffer
-	err := runBuildList(c, "my-svc", false, &buf)
+	err := runBuildList(c, "my-svc", false, &buf, false)
 	require.NoError(t, err)
 	output := buf.String()
 
@@ -224,7 +224,7 @@ func TestBuildList_All_UsesTenantWideEndpoint(t *testing.T) {
 	c := ahclient.NewClient(srv.URL, "test-key")
 
 	var buf bytes.Buffer
-	err := runBuildList(c, "", true /* allFlag */, &buf)
+	err := runBuildList(c, "", true /* allFlag */, &buf, false)
 	require.NoError(t, err)
 	assert.True(t, tenantEndpointCalled, "--all must call tenant-wide /v1/builds endpoint")
 	assert.False(t, serviceEndpointCalled, "--all must NOT call per-service builds endpoint")
@@ -384,7 +384,7 @@ func TestBuildList_ShowsAllBuilds(t *testing.T) {
 	c := ahclient.NewClient(srv.URL, "test-key")
 
 	var buf bytes.Buffer
-	err := runBuildList(c, "my-svc", false, &buf)
+	err := runBuildList(c, "my-svc", false, &buf, false)
 	require.NoError(t, err)
 	output := buf.String()
 

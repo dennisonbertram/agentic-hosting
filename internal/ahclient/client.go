@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,7 @@ type Client struct {
 // NewClient creates a new Client.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		BaseURL: baseURL,
+		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -33,7 +34,7 @@ func NewClient(baseURL, apiKey string) *Client {
 // Use this for streaming endpoints (logs, build output).
 func NewClientNoTimeout(baseURL, apiKey string) *Client {
 	return &Client{
-		BaseURL:    baseURL,
+		BaseURL:    strings.TrimRight(baseURL, "/"),
 		APIKey:     apiKey,
 		HTTPClient: &http.Client{},
 	}
@@ -44,6 +45,33 @@ func NewClientNoTimeout(baseURL, apiKey string) *Client {
 // doJSON sends a JSON request and decodes the response body into dest.
 // For 204 No Content, dest may be nil.
 func (c *Client) doJSON(method, path string, body any, dest any, extraHeaders map[string]string) error {
+	return c.doJSONWith(c.HTTPClient, method, path, body, dest, extraHeaders)
+}
+
+// longRequestTimeout bounds slow creates (database, environment). It sits
+// above the 300s ceiling the server allows for exec.
+const longRequestTimeout = 330 * time.Second
+
+// ExecRequestTimeout returns the HTTP timeout for an exec request. The server
+// defaults to 60s and caps at 300s; add 30s of slack on top.
+func ExecRequestTimeout(execSeconds int) time.Duration {
+	if execSeconds <= 0 {
+		execSeconds = 60
+	}
+	if execSeconds > 300 {
+		execSeconds = 300
+	}
+	return time.Duration(execSeconds)*time.Second + 30*time.Second
+}
+
+// doJSONLong is doJSON with a per-request timeout replacing the client default.
+func (c *Client) doJSONLong(timeout time.Duration, method, path string, body any, dest any) error {
+	cl := *c.HTTPClient
+	cl.Timeout = timeout
+	return c.doJSONWith(&cl, method, path, body, dest, nil)
+}
+
+func (c *Client) doJSONWith(cl *http.Client, method, path string, body any, dest any, extraHeaders map[string]string) error {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -68,7 +96,7 @@ func (c *Client) doJSON(method, path string, body any, dest any, extraHeaders ma
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return fmt.Errorf("ahclient: do request: %w", err)
 	}
@@ -388,7 +416,7 @@ func (c *Client) ListDeployments(serviceID string) ([]Deployment, error) {
 	return resp, nil
 }
 
-// CancelDeployment cancels an in-progress or queued deployment.
+// CancelDeployment cancels a deployment that has not started yet (status pending).
 func (c *Client) CancelDeployment(serviceID, deploymentID string) (*Deployment, error) {
 	var resp Deployment
 	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/deployments/"+deploymentID+"/cancel", nil, &resp, nil); err != nil {
@@ -516,7 +544,7 @@ func (c *Client) GetDatabase(dbID string) (*Database, error) {
 // CreateDatabase creates a new database.
 func (c *Client) CreateDatabase(req CreateDatabaseRequest) (*Database, error) {
 	var resp Database
-	if err := c.doJSON(http.MethodPost, "/v1/databases", req, &resp, nil); err != nil {
+	if err := c.doJSONLong(longRequestTimeout, http.MethodPost, "/v1/databases", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -560,7 +588,7 @@ func (c *Client) GetEnvironment(envID string) (*Environment, error) {
 // CreateEnvironment creates a new environment.
 func (c *Client) CreateEnvironment(req CreateEnvironmentRequest) (*Environment, error) {
 	var resp Environment
-	if err := c.doJSON(http.MethodPost, "/v1/environments", req, &resp, nil); err != nil {
+	if err := c.doJSONLong(longRequestTimeout, http.MethodPost, "/v1/environments", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -601,7 +629,7 @@ func (c *Client) EnvironmentExec(envID string, command []string, workDir string,
 		body["timeout"] = timeoutSeconds
 	}
 	var resp ExecResult
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp, nil); err != nil {
+	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

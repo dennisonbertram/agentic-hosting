@@ -504,7 +504,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		if !isDNSLabelSafe(dnsLabel) {
 			dnsLabel = "" // fallback to UUID-based URL
 		}
-		if reservedDNSLabels[dnsLabel] {
+		if reservedDNSLabels[dnsLabel] || strings.HasPrefix(dnsLabel, "env-") { // env- is reserved for environment preview hosts
 			return nil, apierr.Validation(fmt.Sprintf("service name %q is reserved and cannot be used as a subdomain", dnsLabel))
 		}
 	}
@@ -1418,7 +1418,7 @@ func (m *Manager) UpdateName(ctx context.Context, tenantID, serviceID, name stri
 		if !isDNSLabelSafe(dnsLabel) {
 			dnsLabel = "" // fallback to UUID-based URL
 		}
-		if reservedDNSLabels[dnsLabel] {
+		if reservedDNSLabels[dnsLabel] || strings.HasPrefix(dnsLabel, "env-") { // env- is reserved for environment preview hosts
 			return nil, apierr.Validation(fmt.Sprintf("service name %q is reserved and cannot be used as a subdomain", dnsLabel))
 		}
 	}

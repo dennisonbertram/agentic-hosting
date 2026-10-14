@@ -861,6 +861,23 @@ type RunEnvironmentConfig struct {
 	EgressAllow bool
 }
 
+// environmentLabels builds container labels; ah.* keys are set last and cannot be overridden.
+func environmentLabels(cfg RunEnvironmentConfig) map[string]string {
+	labels := make(map[string]string, len(cfg.Labels)+4)
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	labels["ah.tenant"] = cfg.TenantID
+	labels["ah.environment"] = cfg.EnvID
+	// Docker labels are immutable, so warm-pool containers keep ah.type=warm-pool
+	// until claimed; GC and ownership lookups for claimed ones go through the DB.
+	if labels["ah.type"] != "warm-pool" {
+		labels["ah.type"] = "environment"
+	}
+	labels["traefik.enable"] = "false"
+	return labels
+}
+
 // RunEnvironment creates and starts an environment container with gVisor runtime.
 // Environments are dev workspaces: writable rootfs, sleep infinity entrypoint,
 // workspace volume at /workspace.
@@ -875,15 +892,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	// Build labels; ah.* keys are set last and cannot be overridden.
-	labels := make(map[string]string, len(cfg.Labels)+4)
-	for k, v := range cfg.Labels {
-		labels[k] = v
-	}
-	labels["ah.tenant"] = cfg.TenantID
-	labels["ah.environment"] = cfg.EnvID
-	labels["ah.type"] = "environment"
-	labels["traefik.enable"] = "false"
+	labels := environmentLabels(cfg)
 
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
@@ -979,16 +988,27 @@ func (c *DockerClient) ExecRun(ctx context.Context, execID string, timeout time.
 	}
 	defer resp.Close()
 
+	// The hijacked connection ignores ctx, so close it when the deadline hits;
+	// that unblocks StdCopy below.
+	go func() {
+		<-ctx.Done()
+		resp.Close()
+	}()
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	// stdcopy.StdCopy demuxes the multiplexed Docker stream.
 	// Use cappedWriter to truncate output at maxExecOutputBytes.
-	_, err = stdcopy.StdCopy(
+	_, copyErr := stdcopy.StdCopy(
 		&cappedWriter{buf: &stdoutBuf, max: maxExecOutputBytes},
 		&cappedWriter{buf: &stderrBuf, max: maxExecOutputBytes},
 		resp.Reader,
 	)
-	if err != nil && ctx.Err() == nil {
-		return nil, nil, -1, fmt.Errorf("exec read: %w", err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Return partial output; the caller derives timed_out from the error.
+		return stdoutBuf.Bytes(), stderrBuf.Bytes(), -1, fmt.Errorf("exec aborted: %w", ctxErr)
+	}
+	if copyErr != nil {
+		return nil, nil, -1, fmt.Errorf("exec read: %w", copyErr)
 	}
 
 	inspect, err := c.cli.ContainerExecInspect(ctx, execID)

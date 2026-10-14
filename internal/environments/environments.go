@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -102,7 +103,10 @@ type CreatePreviewRequest struct {
 }
 
 // previewNamePattern matches valid preview names: 1-63 chars, alphanumeric + hyphens.
-var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
+var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,49}$`)
+
+// maxPreviewsPerEnv caps previews per environment; each gets its own TLS host.
+const maxPreviewsPerEnv = 5
 
 // Manager manages environment lifecycle.
 type Manager struct {
@@ -227,11 +231,20 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		poolContainerID, poolVolumeName, poolErr := m.pool.Acquire(ctx, tmpl.ID)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
-			// Move the pool container from ah-pool network to the tenant network.
+			// Rename to the tenant env name (preview routes target it), then move
+			// the container from the ah-pool network to the tenant network.
 			_ = m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
-			if connErr := m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID); connErr != nil {
-				log.Printf("environments: failed to connect pool container to tenant network, falling back to cold start: %v", connErr)
-				// Fall through to cold path; the pool container stays in its state.
+			claimErr := m.docker.RenameContainer(ctx, poolContainerID, fmt.Sprintf("ah-env-%s-%s", tenantID, id))
+			if claimErr == nil {
+				claimErr = m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID)
+			}
+			if claimErr != nil {
+				log.Printf("environments: failed to adopt pool container, falling back to cold start: %v", claimErr)
+				// Do not leak the claimed container: remove it and its volume.
+				_ = m.docker.StopContainer(ctx, poolContainerID)
+				_ = m.docker.RemoveContainer(ctx, poolContainerID)
+				_ = m.docker.RemoveVolume(ctx, poolVolumeName)
+				_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, poolContainerID)
 			} else {
 				// Update the DB volume_name to match the pool volume.
 				_, _ = m.db.ExecContext(ctx,
@@ -381,6 +394,11 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 		}
 	}
 
+	// A claimed pool container keeps its warm_pool row (for GC) until now.
+	if e.ContainerID != "" {
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, e.ContainerID)
+	}
+
 	// Remove volume
 	if e.VolumeName != "" {
 		if err := m.docker.RemoveVolume(ctx, e.VolumeName); err != nil {
@@ -476,8 +494,12 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 		req.Timeout = 300
 	}
 
+	// Backstop: coreutils timeout kills the process inside the container a few
+	// seconds after ExecRun gives up on the connection, so it does not run forever.
+	cmd := append([]string{"timeout", "-s", "KILL", fmt.Sprintf("%d", req.Timeout+5)}, req.Command...)
+
 	// Create exec
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, req.Command, req.WorkDir)
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, cmd, req.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
@@ -489,10 +511,7 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 
 	durationMs := time.Since(start).Milliseconds()
 
-	timedOut := false
-	if err != nil && ctx.Err() != nil {
-		timedOut = true
-	}
+	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
 	// If the exec timed out but we still got partial output, return it
 	if err != nil && !timedOut {
 		return nil, fmt.Errorf("exec run: %w", err)
@@ -708,8 +727,8 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "No such container") ||
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such container") ||
 		strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no such volume") ||
 		strings.Contains(msg, "404")
@@ -788,7 +807,7 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	// Validate name
 	if !previewNamePattern.MatchString(req.Name) {
-		return nil, apierr.Validation("preview name must be 1-63 characters, alphanumeric and hyphens, starting with alphanumeric")
+		return nil, apierr.Validation("preview name must be 1-50 characters, alphanumeric and hyphens, starting with alphanumeric")
 	}
 
 	// Validate port
@@ -811,12 +830,18 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	now := time.Now().Unix()
 
-	// Insert DB row
-	_, err = m.db.ExecContext(ctx,
+	// Insert DB row, enforcing the per-environment cap atomically.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environment_previews (id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now,
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environment_previews WHERE environment_id = ?) < ?`,
+		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now, envID, maxPreviewsPerEnv,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("maximum %d previews per environment reached", maxPreviewsPerEnv))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("preview with name %q already exists for this environment", req.Name))
@@ -970,6 +995,38 @@ func (m *Manager) deletePreviewTraefikRoute(previewID string) {
 	path := filepath.Join(m.traefikConfigDir, "env-preview-"+previewID+".yml")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		log.Printf("environments: failed to remove traefik route %s: %v", path, err)
+	}
+}
+
+// StopAllForTenant stops every running environment of a tenant (including
+// claimed warm-pool containers, found by DB row, not by label) and removes
+// their previews. Used when a tenant is suspended. Best effort: errors are logged.
+func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, container_id FROM environments WHERE tenant_id = ? AND status NOT IN ('stopped', 'failed')`, tenantID)
+	if err != nil {
+		log.Printf("environments: stop-all query for tenant %s: %v", tenantID, err)
+		return
+	}
+	var envs []struct{ id, containerID string }
+	for rows.Next() {
+		var e struct{ id, containerID string }
+		if err := rows.Scan(&e.id, &e.containerID); err != nil {
+			continue
+		}
+		envs = append(envs, e)
+	}
+	rows.Close()
+
+	for _, e := range envs {
+		m.cleanupPreviews(ctx, e.id)
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE environment_id = ?`, e.id)
+		if e.containerID != "" {
+			if err := m.docker.StopContainer(ctx, e.containerID); err != nil && !isNotFoundError(err) {
+				log.Printf("environments: stop container %s for env %s: %v", e.containerID, e.id, err)
+			}
+		}
+		m.updateStatus(ctx, e.id, "stopped")
 	}
 }
 

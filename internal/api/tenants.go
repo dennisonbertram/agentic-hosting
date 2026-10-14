@@ -408,24 +408,34 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		s.authInvalidator.InvalidateTenant(tenantID)
 	}
 
+	// Cleanup must outlive the request (30s cap, client disconnects), so run it
+	// on a detached context with its own timeout.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancelCleanup()
+
 	// Cancel all active builds for this tenant to free build slots
 	if s.buildManager != nil {
-		s.buildManager.CancelAllForTenant(r.Context(), tenantID)
+		s.buildManager.CancelAllForTenant(cleanupCtx, tenantID)
 	}
 
 	// Stop and remove all running containers for this tenant
 	if s.svcManager != nil {
-		s.svcManager.StopAllForTenant(r.Context(), tenantID)
+		s.svcManager.StopAllForTenant(cleanupCtx, tenantID)
 	}
 
 	// Stop all database containers for this tenant (records kept for potential reactivation)
 	if s.dbManager != nil {
-		s.dbManager.StopAllForTenant(r.Context(), tenantID)
+		s.dbManager.StopAllForTenant(cleanupCtx, tenantID)
 	}
 
 	// Stop the kanban board container for this tenant (record kept for potential reactivation)
 	if s.kanbanManager != nil {
-		s.kanbanManager.StopForTenant(r.Context(), tenantID)
+		s.kanbanManager.StopForTenant(cleanupCtx, tenantID)
+	}
+
+	// Stop all environments (and their previews) for this tenant.
+	if s.envManager != nil {
+		s.envManager.StopAllForTenant(cleanupCtx, tenantID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

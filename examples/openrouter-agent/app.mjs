@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { isIP } from 'node:net';
 
 export const MODEL_ID = 'anthropic/claude-sonnet-5.5';
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -54,6 +55,16 @@ function tokenMatches(authorization, expectedToken) {
   const actual = Buffer.from(match[1]);
   const expected = Buffer.from(expectedToken);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function relayURL(relayIP) {
+  if (relayIP === undefined) return OPENROUTER_RELAY_URL;
+  if (isIP(relayIP) !== 4) throw new Error('PROVIDER_RELAY_IP must be a private IPv4 literal in the tenant Docker pool');
+  const [first, second, , last] = relayIP.split('.').map(Number);
+  if (first !== 172 || second < 20 || second > 23 || last < 2 || last > 254) {
+    throw new Error('PROVIDER_RELAY_IP must be a private IPv4 literal in the tenant Docker pool');
+  }
+  return `http://${relayIP}:8080/api/v1/chat/completions`;
 }
 
 function readJsonBody(request) {
@@ -280,11 +291,15 @@ async function handleRequest(request, response, {
 export function createAgentServer({
   apiKey,
   relayToken,
+  relayIP,
   authToken,
   fetchImpl = globalThis.fetch,
   providerTimeoutMs = PROVIDER_TIMEOUT_MS,
 } = {}) {
   const useRelay = typeof relayToken === 'string' && relayToken.length > 0;
+  if (relayIP !== undefined && !useRelay) {
+    throw new Error('PROVIDER_RELAY_IP requires PROVIDER_RELAY_TOKEN');
+  }
   if (!useRelay && (typeof apiKey !== 'string' || apiKey.length === 0)) {
     throw new Error('OPENROUTER_API_KEY is required when PROVIDER_RELAY_TOKEN is not set');
   }
@@ -294,10 +309,11 @@ export function createAgentServer({
   }
   if (typeof authToken !== 'string' || authToken.length < 32) throw new Error('DEMO_AUTH_TOKEN must contain at least 32 characters');
   if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
+  const providerURL = useRelay ? relayURL(relayIP) : OPENROUTER_CHAT_URL;
 
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
-      providerURL: useRelay ? OPENROUTER_RELAY_URL : OPENROUTER_CHAT_URL,
+      providerURL,
       providerToken: useRelay ? relayToken : apiKey,
       authToken,
       fetchImpl,

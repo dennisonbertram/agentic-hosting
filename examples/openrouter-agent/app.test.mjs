@@ -173,6 +173,56 @@ test('uses only the fixed authenticated relay endpoint when relay mode is select
   assert.doesNotMatch(JSON.stringify(calls), /test-openrouter-key|https:\/\/openrouter\.ai\/api/);
 });
 
+test('allows only a validated private relay IP override with the fixed endpoint and token', async () => {
+  const relayToken = 'test-relay-token-0123456789abcdef';
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response('{}', { status: 502 });
+  };
+
+  await withServer({ apiKey: undefined, relayToken, relayIP: '172.20.7.3', fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 4 and 5.' }),
+    });
+    assert.equal(response.status, 502);
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://172.20.7.3:8080/api/v1/chat/completions');
+  assert.equal(calls[0].init.headers.Authorization, `Bearer ${relayToken}`);
+  assert.doesNotMatch(calls[0].url, /openrouter\.ai|https:/);
+});
+
+test('rejects unsafe relay IP overrides and an override without relay mode', () => {
+  const auth = { authToken: AUTH_TOKEN };
+  const relay = { relayToken: 'test-relay-token-0123456789abcdef' };
+  for (const relayIP of [
+    '8.8.8.8',
+    '127.0.0.1',
+    '172.20.7.0',
+    '172.20.7.1',
+    '172.20.7.255',
+    '172.24.0.2',
+    '172.20.7.3:8080',
+    'http://172.20.7.3',
+    '172.20.7.03',
+    '::1',
+  ]) {
+    assert.throws(() => createAgentServer({ ...auth, ...relay, relayIP }), /PROVIDER_RELAY_IP/);
+  }
+  assert.throws(() => createAgentServer({
+    ...auth,
+    apiKey: API_KEY,
+    relayIP: '172.20.7.3',
+  }), /PROVIDER_RELAY_IP requires PROVIDER_RELAY_TOKEN/);
+});
+
 test('rejects configurations that expose a direct key in relay mode', () => {
   assert.throws(() => createAgentServer({
     apiKey: API_KEY,

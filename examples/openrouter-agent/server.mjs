@@ -11,6 +11,7 @@ const relayToken = process.env.PROVIDER_RELAY_TOKEN;
 const server = createAgentServer({
   apiKey: relayToken ? undefined : process.env.OPENROUTER_API_KEY,
   relayToken,
+  relayIP: process.env.PROVIDER_RELAY_IP,
   authToken: process.env.DEMO_AUTH_TOKEN,
 });
 server.listen(port, '0.0.0.0', () => {

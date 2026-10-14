@@ -290,7 +290,14 @@ async function runCalculatorAgent(message, { providerURL, providerToken, fetchIm
   const assistantToolMessage = {
     role: 'assistant',
     content: firstChoice.message.content ?? null,
-    tool_calls: firstChoice.message.tool_calls,
+    tool_calls: [{
+      id,
+      type: 'function',
+      function: {
+        name: call.function.name,
+        arguments: call.function.arguments,
+      },
+    }],
   };
   if (firstChoice.message.reasoning_details !== undefined) {
     assistantToolMessage.reasoning_details = firstChoice.message.reasoning_details;

@@ -252,7 +252,12 @@ test('filters assistant metadata for the relay continuation while preserving rea
             tool_calls: [{
               id: 'metadata_call_1',
               type: 'function',
-              function: { name: 'add_numbers', arguments: '{"a":8,"b":13}' },
+              index: 0,
+              function: {
+                name: 'add_numbers',
+                arguments: '{"a":8,"b":13}',
+                provider_metadata: 'discard this',
+              },
             }],
           },
         }
@@ -279,6 +284,11 @@ test('filters assistant metadata for the relay continuation while preserving rea
     'content', 'reasoning_details', 'role', 'tool_calls',
   ]);
   assert.deepEqual(continuationAssistant.reasoning_details, reasoningDetails);
+  assert.deepEqual(continuationAssistant.tool_calls, [{
+    id: 'metadata_call_1',
+    type: 'function',
+    function: { name: 'add_numbers', arguments: '{"a":8,"b":13}' },
+  }]);
   assert.equal(continuationAssistant.reasoning, undefined);
   assert.equal(continuationAssistant.refusal, undefined);
   assert.equal(continuationAssistant.annotations, undefined);

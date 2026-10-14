@@ -50,7 +50,16 @@ type statusReport struct {
 
 // isUnhealthyServiceStatus returns true for service statuses that indicate failure.
 func isUnhealthyServiceStatus(status string) bool {
-	return status == "circuit_open" || status == "failed"
+	switch status {
+	case "circuit_open", "failed", "error", "crashed":
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnhealthyDatabaseStatus(status string) bool {
+	return status == "failed" || status == "error"
 }
 
 // runStatusCmd is the testable core of the status command.
@@ -73,12 +82,21 @@ func runStatusCmd(c *ahclient.Client, w io.Writer, jsonOutput bool) (int, error)
 
 	// Determine exit code
 	exitCode := 0
-	diskCritical := health.Disk.UsedPercent > 90.0
+	diskCritical := health.Disk.UsedPercent > 90.0 || health.DockerDisk.UsedPercent > 90.0
 	if diskCritical {
+		exitCode = 1
+	}
+	if health.Status != "ok" || !health.Docker.Available || !health.GVisor.Available {
 		exitCode = 1
 	}
 	for _, svc := range services {
 		if isUnhealthyServiceStatus(svc.Status) {
+			exitCode = 1
+			break
+		}
+	}
+	for _, db := range databases {
+		if isUnhealthyDatabaseStatus(db.Status) {
 			exitCode = 1
 			break
 		}

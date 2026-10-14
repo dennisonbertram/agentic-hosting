@@ -47,11 +47,7 @@ The new key is shown exactly once — save it immediately.`,
 				return fmt.Errorf("recovery failed: %w", err)
 			}
 
-			if root.jsonOutput {
-				return printJSON(cmd.OutOrStdout(), result)
-			}
-
-			if result.Warning != "" {
+			if !root.jsonOutput && result.Warning != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "WARNING: %s\n", result.Warning)
 				if result.RevokedKeyID != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "         Revoked key: %s\n", result.RevokedKeyID)
@@ -59,23 +55,27 @@ The new key is shown exactly once — save it immediately.`,
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Key ID : %s\n", result.ID)
-			fmt.Fprintf(cmd.OutOrStdout(), "Name   : %s\n", result.Name)
-			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
-			fmt.Fprintln(cmd.OutOrStdout(), "║           SAVE THIS RECOVERY KEY         ║")
-			fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
-			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
-			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.Key)
+			if !root.jsonOutput {
+				fmt.Fprintf(cmd.OutOrStdout(), "Key ID : %s\n", result.ID)
+				fmt.Fprintf(cmd.OutOrStdout(), "Name   : %s\n", result.Name)
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
+				fmt.Fprintln(cmd.OutOrStdout(), "║           SAVE THIS RECOVERY KEY         ║")
+				fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
+				fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
+				fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.Key)
+			}
 
 			if saveFlag {
 				cfgPath := defaultConfigPath()
-				serverURL := root.urlFlag
-				if err := saveAPIKey(cfgPath, result.Key, serverURL); err != nil {
+				if err := saveAPIKey(cfgPath, result.Key, c.BaseURL); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
-				} else {
+				} else if !root.jsonOutput {
 					fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
 				}
+			}
+			if root.jsonOutput {
+				return printJSON(cmd.OutOrStdout(), result)
 			}
 
 			return nil

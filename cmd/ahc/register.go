@@ -86,29 +86,26 @@ Set the AH_BOOTSTRAP_TOKEN environment variable or pass --bootstrap-token.`,
 				return fmt.Errorf("registration failed: %w", err)
 			}
 
-			if root.jsonOutput {
-				return printJSON(cmd.OutOrStdout(), result)
+			if !root.jsonOutput {
+				fmt.Fprintf(cmd.OutOrStdout(), "Tenant ID : %s\n", result.TenantID)
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
+				fmt.Fprintln(cmd.OutOrStdout(), "║              SAVE THIS API KEY           ║")
+				fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
+				fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
+				fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.APIKey)
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Tenant ID : %s\n", result.TenantID)
-			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
-			fmt.Fprintln(cmd.OutOrStdout(), "║              SAVE THIS API KEY           ║")
-			fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
-			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
-			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.APIKey)
 
 			if saveFlag {
 				cfgPath := defaultConfigPath()
-				serverURL := root.urlFlag
-				if serverURL == "" {
-					serverURL = os.Getenv("AH_URL")
-				}
-				if err := saveAPIKey(cfgPath, result.APIKey, serverURL); err != nil {
+				if err := saveAPIKey(cfgPath, result.APIKey, c.BaseURL); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
-				} else {
+				} else if !root.jsonOutput {
 					fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
 				}
+			}
+			if root.jsonOutput {
+				return printJSON(cmd.OutOrStdout(), result)
 			}
 
 			return nil

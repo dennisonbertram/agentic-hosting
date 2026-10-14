@@ -38,17 +38,9 @@ func DefaultConfigPath() (string, error) {
 // Returns an error if no configuration is found.
 func LoadConfig(opts LoadOptions) (*Config, error) {
 	cfg := &Config{}
-
-	// Priority 2: environment variables
-	envURL := os.Getenv("AH_URL")
-	envKey := os.Getenv("AH_KEY")
-	if envURL != "" || envKey != "" {
-		cfg.URL = envURL
-		cfg.Key = envKey
-		return cfg, nil
-	}
-
-	// Priority 3: config file
+	// Load the file first so each environment variable can override only its
+	// corresponding field. A partial environment configuration remains useful
+	// with the other value supplied by the saved config.
 	cfgPath := opts.ConfigPath
 	if cfgPath == "" {
 		var err error
@@ -59,16 +51,19 @@ func LoadConfig(opts LoadOptions) (*Config, error) {
 	}
 
 	f, err := os.Open(cfgPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("no configuration found — run 'ahc configure' or set AH_URL and AH_KEY environment variables")
+	if err == nil {
+		defer f.Close()
+		if err := json.NewDecoder(f).Decode(cfg); err != nil {
+			return nil, err
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	defer f.Close()
-
-	if err := json.NewDecoder(f).Decode(cfg); err != nil {
-		return nil, err
+	if envURL := os.Getenv("AH_URL"); envURL != "" {
+		cfg.URL = envURL
+	}
+	if envKey := os.Getenv("AH_KEY"); envKey != "" {
+		cfg.Key = envKey
 	}
 
 	if cfg.URL == "" && cfg.Key == "" {

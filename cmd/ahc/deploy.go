@@ -132,9 +132,37 @@ func runDeployGit(c *ahclient.Client, w io.Writer, gitURL, name string, port int
 	defer logsReader.Close()
 	streamBuildLogs(logsReader, w)
 
+	// A previously running service can remain available while a replacement
+	// build fails. Confirm this build's terminal state before treating the
+	// service's status as evidence that this deploy succeeded.
+	build, err := pollBuildUntilComplete(c, svc.ID, buildResp.BuildID)
+	if err != nil {
+		return err
+	}
+	if build.Status != "succeeded" {
+		return fmt.Errorf("build %s finished with status %q", build.ID, build.Status)
+	}
+
 	// Poll until service is running.
 	fmt.Fprint(w, "Waiting for service to start")
 	return pollUntilRunning(c, w, svc.ID, 0)
+}
+
+func pollBuildUntilComplete(c *ahclient.Client, serviceID, buildID string) (*ahclient.Build, error) {
+	for i := 0; i < 150; i++ {
+		if i > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		build, err := c.GetBuild(serviceID, buildID)
+		if err != nil {
+			return nil, fmt.Errorf("polling build status: %w", err)
+		}
+		switch build.Status {
+		case "succeeded", "failed", "cancelled":
+			return build, nil
+		}
+	}
+	return nil, fmt.Errorf("timeout: build %s did not finish within 5 minutes", buildID)
 }
 
 // runRedeploy finds a service by name and calls RedeployService, then prints the URL.

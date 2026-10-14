@@ -196,8 +196,13 @@ The --name flag controls the database name (defaults to
 				name = serviceName + "-" + dbType
 			}
 
+			progress := io.Writer(os.Stdout)
+			if root.jsonOutput {
+				progress = cmd.ErrOrStderr()
+			}
+
 			// Create the database
-			fmt.Fprintf(os.Stdout, "Provisioning %s database %q...\n", dbType, name)
+			fmt.Fprintf(progress, "Provisioning %s database %q...\n", dbType, name)
 			db, err := c.CreateDatabase(ahclient.CreateDatabaseRequest{
 				Name: name,
 				Type: dbType,
@@ -206,19 +211,15 @@ The --name flag controls the database name (defaults to
 				return fmt.Errorf("create database: %w", err)
 			}
 
-			if root.jsonOutput {
-				return writeJSON(os.Stdout, db)
-			}
-
-			fmt.Fprintf(os.Stdout, "Database %q created (id: %s)\n", db.Name, db.ID)
+			fmt.Fprintf(progress, "Database %q created (id: %s)\n", db.Name, db.ID)
 
 			// Poll until running
-			fmt.Fprint(os.Stdout, "Waiting for database to become available")
-			db, err = pollDbUntilRunning(c, db.ID, os.Stdout)
+			fmt.Fprint(progress, "Waiting for database to become available")
+			db, err = pollDbUntilRunning(c, db.ID, progress)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, " done.")
+			fmt.Fprintln(progress, " done.")
 
 			// Get connection string
 			connStr, err := c.GetDatabaseConnectionString(db.ID)
@@ -228,19 +229,22 @@ The --name flag controls the database name (defaults to
 
 			// Set env var on service
 			envKey := envKeyForType(dbType)
-			fmt.Fprintf(os.Stdout, "Setting %s on service %q...\n", envKey, serviceName)
+			fmt.Fprintf(progress, "Setting %s on service %q...\n", envKey, serviceName)
 			envVars := map[string]string{envKey: connStr}
 			if _, err := c.SetServiceEnv(serviceID, envVars); err != nil {
 				return fmt.Errorf("set env var %s: %w", envKey, err)
 			}
 
 			// Restart service
-			fmt.Fprintf(os.Stdout, "Restarting service %q...\n", serviceName)
+			fmt.Fprintf(progress, "Restarting service %q...\n", serviceName)
 			if _, err := c.RestartService(serviceID); err != nil {
 				return fmt.Errorf("restart service: %w", err)
 			}
 
-			fmt.Fprintf(os.Stdout, "Done. %s is ready. Connection host: %s\n",
+			if root.jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), db)
+			}
+			fmt.Fprintf(progress, "Done. %s is ready. Connection host: %s\n",
 				db.Name, maskConnString(connStr))
 			return nil
 		},
@@ -250,7 +254,7 @@ The --name flag controls the database name (defaults to
 	return cmd
 }
 
-// pollDbUntilRunning polls GetDatabase until status is "running" or an error occurs.
+// pollDbUntilRunning polls GetDatabase until status is "ready" or an error occurs.
 // It prints a dot per iteration to indicate progress.
 func pollDbUntilRunning(c *ahclient.Client, dbID string, progress io.Writer) (*ahclient.Database, error) {
 	for i := 0; i < 60; i++ {
@@ -259,7 +263,7 @@ func pollDbUntilRunning(c *ahclient.Client, dbID string, progress io.Writer) (*a
 			return nil, fmt.Errorf("poll database: %w", err)
 		}
 		switch db.Status {
-		case "running":
+		case "ready", "running":
 			return db, nil
 		case "error", "failed":
 			return nil, fmt.Errorf("database provisioning failed with status %q", db.Status)

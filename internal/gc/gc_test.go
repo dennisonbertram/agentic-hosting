@@ -290,6 +290,79 @@ func TestCollectOnce_FailsClosedWhenNetworkInspectFails(t *testing.T) {
 	assert.Empty(t, mock.RemoveNetworkCalls)
 }
 
+func TestCollectOnce_PreservesStoppedWorkloadIngressNetworks(t *testing.T) {
+	for _, tc := range []struct {
+		name, networkName string
+		seed              func(*testing.T, *sql.DB)
+	}{
+		{
+			name:        "service",
+			networkName: docker.ServiceIngressNetworkName("tenant-gc", "service-stopped"),
+			seed: func(t *testing.T, db *sql.DB) {
+				seedService(t, db, "service-stopped", "tenant-gc", "container-stopped")
+				_, err := db.Exec(`UPDATE services SET status = 'stopped' WHERE id = 'service-stopped'`)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:        "environment with preview",
+			networkName: docker.EnvironmentIngressNetworkName("tenant-gc", "env-stopped"),
+			seed: func(t *testing.T, db *sql.DB) {
+				seedService(t, db, "service-seed", "tenant-gc", "container-seed")
+				now := time.Now().Unix()
+				_, err := db.Exec(`INSERT INTO environments
+					(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+					VALUES ('env-stopped', 'tenant-gc', 'stopped', 'tmpl_default', 'stopped', 'env-container-stopped', 'ah-env-stopped', ?, ?)`, now, now)
+				require.NoError(t, err)
+				_, err = db.Exec(`INSERT INTO environment_previews
+					(id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+					VALUES ('preview-stopped', 'env-stopped', 'tenant-gc', 'web', 3000, 'env-stopped-web', ?, ?)`, now, now)
+				require.NoError(t, err)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDB := testutil.NewStateDB(t)
+			tc.seed(t, stateDB)
+			tenantNetwork := docker.TenantNetworkName("tenant-gc")
+			mock := &testutil.MockDockerClient{
+				NetworkListFn: func(context.Context) ([]docker.NetworkInfo, error) {
+					return []docker.NetworkInfo{
+						{ID: "tenant-stopped", Name: tenantNetwork},
+						{ID: "ingress-stopped", Name: tc.networkName},
+					}, nil
+				},
+				NetworkInspectFn: func(_ context.Context, networkID string) (docker.NetworkInfo, error) {
+					// Docker removes stopped containers' live endpoints but retains
+					// their network configuration for a later start.
+					name := tc.networkName
+					if networkID == "tenant-stopped" {
+						name = tenantNetwork
+					}
+					return docker.NetworkInfo{ID: networkID, Name: name, Containers: 1, ContainerNames: []string{"paas-traefik"}}, nil
+				},
+			}
+
+			require.NoError(t, New(stateDB, mock, time.Minute, t.TempDir()).collectOnce(context.Background()))
+			assert.NotContains(t, mock.RemoveNetworkCalls, "ingress-stopped",
+				"GC must retain ingress networks referenced by persisted stopped workloads")
+			assert.NotContains(t, mock.RemoveNetworkCalls, "tenant-stopped",
+				"GC must retain tenant bridges referenced by persisted stopped workloads")
+		})
+	}
+}
+
+func TestFindOrphanedNetworksFailsClosedWhenOwnershipQueryFails(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{}
+	collector := New(stateDB, mock, time.Minute, t.TempDir())
+	require.NoError(t, stateDB.Close())
+
+	networks, err := collector.findOrphanedNetworks(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, networks)
+}
+
 // ---------------------------------------------------------------------------
 // Regression tests — TestNetworkCleanup_Regression
 // ---------------------------------------------------------------------------

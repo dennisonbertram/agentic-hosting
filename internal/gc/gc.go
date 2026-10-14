@@ -433,6 +433,10 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 // networks contain only workloads; ingress networks contain Traefik plus one
 // workload while active.
 func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
+	ownedNetworks, err := g.persistedWorkloadNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
 	networks, err := g.docker.NetworkList(ctx)
 	if err != nil {
 		return nil, err
@@ -441,6 +445,9 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 	var orphaned []docker.NetworkInfo
 	for _, net := range networks {
 		if !strings.HasPrefix(net.Name, "ah-tenant-") && !strings.HasPrefix(net.Name, "ah-ingress-") {
+			continue
+		}
+		if _, owned := ownedNetworks[net.Name]; owned {
 			continue
 		}
 		// NetworkList may omit endpoint membership. Inspect every possible
@@ -457,6 +464,62 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 		}
 	}
 	return orphaned, nil
+}
+
+// persistedWorkloadNetworks returns Docker networks referenced by persisted
+// workloads. Stopped Docker containers have no live endpoint, but retain their
+// network IDs and cannot restart if GC removes those networks. Database errors
+// must fail closed because ownership is unknown.
+func (g *GC) persistedWorkloadNetworks(ctx context.Context) (map[string]struct{}, error) {
+	owned := make(map[string]struct{})
+	services, err := g.db.QueryContext(ctx, `SELECT tenant_id, id FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("query services for ingress ownership: %w", err)
+	}
+	for services.Next() {
+		var tenantID, serviceID string
+		if err := services.Scan(&tenantID, &serviceID); err != nil {
+			_ = services.Close()
+			return nil, fmt.Errorf("scan service ingress owner: %w", err)
+		}
+		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
+		owned[docker.ServiceIngressNetworkName(tenantID, serviceID)] = struct{}{}
+	}
+	if err := services.Err(); err != nil {
+		_ = services.Close()
+		return nil, fmt.Errorf("read service ingress owners: %w", err)
+	}
+	if err := services.Close(); err != nil {
+		return nil, fmt.Errorf("close service ingress owners: %w", err)
+	}
+
+	environments, err := g.db.QueryContext(ctx, `
+		SELECT e.tenant_id, e.id,
+			EXISTS (SELECT 1 FROM environment_previews p WHERE p.environment_id = e.id AND p.tenant_id = e.tenant_id)
+		FROM environments e`)
+	if err != nil {
+		return nil, fmt.Errorf("query environment ingress ownership: %w", err)
+	}
+	for environments.Next() {
+		var tenantID, environmentID string
+		var hasPreview bool
+		if err := environments.Scan(&tenantID, &environmentID, &hasPreview); err != nil {
+			_ = environments.Close()
+			return nil, fmt.Errorf("scan environment ingress owner: %w", err)
+		}
+		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
+		if hasPreview {
+			owned[docker.EnvironmentIngressNetworkName(tenantID, environmentID)] = struct{}{}
+		}
+	}
+	if err := environments.Err(); err != nil {
+		_ = environments.Close()
+		return nil, fmt.Errorf("read environment ingress owners: %w", err)
+	}
+	if err := environments.Close(); err != nil {
+		return nil, fmt.Errorf("close environment ingress owners: %w", err)
+	}
+	return owned, nil
 }
 
 func onlyTraefik(containerNames []string) bool {

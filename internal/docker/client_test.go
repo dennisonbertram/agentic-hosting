@@ -5,7 +5,36 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/go-connections/nat"
 )
+
+func TestConfiguredContainerPortUsesPORTThenUniqueExposedTCPPort(t *testing.T) {
+	cfg := &container.Config{
+		Env: []string{"TOKEN=must-not-be-returned", "PORT=3000"},
+		ExposedPorts: nat.PortSet{
+			nat.Port("80/tcp"):   struct{}{},
+			nat.Port("3000/tcp"): struct{}{},
+		},
+	}
+	if got := configuredContainerPort(cfg); got != 3000 {
+		t.Fatalf("configuredContainerPort with PORT = %d, want 3000", got)
+	}
+
+	unique := &container.Config{ExposedPorts: nat.PortSet{nat.Port("8080/tcp"): struct{}{}}}
+	if got := configuredContainerPort(unique); got != 8080 {
+		t.Fatalf("configuredContainerPort with one exposed TCP port = %d, want 8080", got)
+	}
+
+	ambiguous := &container.Config{ExposedPorts: nat.PortSet{
+		nat.Port("8080/tcp"): struct{}{},
+		nat.Port("9090/tcp"): struct{}{},
+	}}
+	if got := configuredContainerPort(ambiguous); got != 0 {
+		t.Fatalf("configuredContainerPort with ambiguous exposed ports = %d, want 0", got)
+	}
+}
 
 func TestBuildServiceContainerConfig_DoesNotInjectHealthcheck(t *testing.T) {
 	cfg := buildServiceContainerConfig(

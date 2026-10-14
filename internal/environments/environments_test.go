@@ -933,6 +933,35 @@ func TestStartCannotResurrectEnvironmentAfterTenantSuspension(t *testing.T) {
 	assert.Equal(t, "stopped", recovered.Status)
 }
 
+func TestStopAllForTenantKeepsNetworksReferencedByStoppedEnvironment(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO environments
+		(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+		VALUES ('env-suspend-net', ?, 'suspend-net', 'tmpl_default', 'running', 'env-container', 'ah-env-suspend-net', ?, ?)`, testTenantID, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO environment_previews
+		(id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+		VALUES ('preview-suspend-net', 'env-suspend-net', ?, 'web', 3000, 'env-suspend-net-web', ?, ?)`, testTenantID, now, now)
+	require.NoError(t, err)
+	tenantNetwork := docker.TenantNetworkName(testTenantID)
+	previewNetwork := docker.EnvironmentIngressNetworkName(testTenantID, "env-suspend-net")
+	mock.NetworkListFn = func(context.Context) ([]docker.NetworkInfo, error) {
+		return []docker.NetworkInfo{
+			{ID: "tenant-net", Name: tenantNetwork},
+			{ID: "preview-net", Name: previewNetwork},
+		}, nil
+	}
+
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+
+	assert.Contains(t, mock.StopContainerCalls, "env-container")
+	assert.Empty(t, mock.RemoveNetworkCalls, "suspension must retain Docker networks referenced by stopped environment containers")
+	var status string
+	require.NoError(t, stateDB.QueryRow(`SELECT status FROM environments WHERE id = 'env-suspend-net'`).Scan(&status))
+	assert.Equal(t, "stopped", status)
+}
+
 // insertWarmPoolEntry inserts a ready warm pool entry into the given DB.
 func insertWarmPoolEntry(t *testing.T, db *sql.DB, id, templateID, containerID, volumeName string) {
 	t.Helper()

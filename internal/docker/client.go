@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,11 +104,12 @@ func (c *DockerClient) Close() error {
 
 // ContainerInfo holds inspected container state.
 type ContainerInfo struct {
-	CreatedAt    time.Time
-	Status       string
-	StartedAt    string
-	ExitCode     int
-	HealthStatus string // "", "starting", "healthy", "unhealthy", "none"
+	CreatedAt     time.Time
+	Status        string
+	StartedAt     string
+	ExitCode      int
+	HealthStatus  string // "", "starting", "healthy", "unhealthy", "none"
+	EffectivePort int
 }
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
@@ -392,8 +394,11 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 	labels["ah.service"] = serviceID
 
 	return &container.Config{
-		Image:  img,
-		Env:    env,
+		Image: img,
+		Env:   env,
+		ExposedPorts: nat.PortSet{
+			nat.Port(fmt.Sprintf("%d/tcp", port)): struct{}{},
+		},
 		Labels: labels,
 	}
 }
@@ -460,12 +465,50 @@ func (c *DockerClient) InspectContainer(ctx context.Context, containerID string)
 		healthStatus = info.State.Health.Status
 	}
 	return &ContainerInfo{
-		CreatedAt:    created,
-		Status:       strings.ToLower(info.State.Status),
-		StartedAt:    info.State.StartedAt,
-		ExitCode:     info.State.ExitCode,
-		HealthStatus: healthStatus,
+		CreatedAt:     created,
+		Status:        strings.ToLower(info.State.Status),
+		StartedAt:     info.State.StartedAt,
+		ExitCode:      info.State.ExitCode,
+		HealthStatus:  healthStatus,
+		EffectivePort: configuredContainerPort(info.Config),
 	}, nil
+}
+
+// configuredContainerPort extracts only the numeric routing port from an
+// inspected service container. PORT in the container config is authoritative;
+// otherwise use a single exposed TCP port when unambiguous.
+func configuredContainerPort(cfg *container.Config) int {
+	if cfg == nil {
+		return 0
+	}
+	port := 0
+	for _, value := range cfg.Env {
+		key, raw, ok := strings.Cut(value, "=")
+		if key != "PORT" || !ok {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed >= 1 && parsed <= 65535 {
+			port = parsed
+		}
+	}
+	if port != 0 {
+		return port
+	}
+	for exposed := range cfg.ExposedPorts {
+		if exposed.Proto() != "tcp" {
+			continue
+		}
+		parsed, err := strconv.Atoi(exposed.Port())
+		if err != nil || parsed < 1 || parsed > 65535 {
+			continue
+		}
+		if port != 0 && port != parsed {
+			return 0
+		}
+		port = parsed
+	}
+	return port
 }
 
 // PullImage pulls an image with a 5-minute timeout.

@@ -37,13 +37,10 @@ func (m *Manager) StopAllForTenant(_ context.Context, tenantID string) {
 
 	for _, entry := range entries {
 		m.cleanupPreviews(ctx, entry.id)
-		if hasPreviews, previewErr := m.hasPreviews(ctx, tenantID, entry.id); previewErr != nil {
-			log.Printf("environments: check previews for ingress cleanup on %s: %v", entry.id, previewErr)
-		} else if hasPreviews {
-			if err := m.removePreviewIngressNetwork(ctx, tenantID, entry.id, entry.containerID); err != nil {
-				log.Printf("environments: remove preview ingress network for suspended environment %s: %v", entry.id, err)
-			}
-		}
+		// Keep tenant and preview ingress networks while the stopped container
+		// still references them. Docker removes the stopped endpoint, but start
+		// cannot recover if these network IDs are deleted; GC reclaims them after
+		// the environment record and preview ownership are removed.
 		if entry.status != "running" && entry.status != "creating" {
 			continue
 		}

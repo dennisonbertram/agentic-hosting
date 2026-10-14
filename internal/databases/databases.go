@@ -7,6 +7,7 @@ import (
 	cryptoRand "crypto/rand"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"regexp"
@@ -149,6 +150,21 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	// Check disk space before provisioning
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
 		return nil, fmt.Errorf("disk check: %w", err)
+	}
+
+	// Docker's ContainerCreate does not fetch a missing image. Ensure the
+	// database image exists before quota checks and before inserting a
+	// provisioning record or creating a volume. Pulling before the quota
+	// transaction avoids holding or extending the check-to-insert window.
+	image := databaseImage(req.Type)
+	// Like docker.pullOrUseLocal, tolerate a failed pull (registry down, rate
+	// limited) when the image is already in the local store.
+	// RunDatabase pulls again; that second pull is not avoided here.
+	if err := m.docker.PullImage(ctx, image); err != nil {
+		if ok, _ := m.docker.ImageExists(ctx, image); !ok {
+			return nil, fmt.Errorf("pull database image: %w", err)
+		}
+		log.Printf("WARNING: pull of %s failed (%v); using local image", image, err)
 	}
 
 	id, err := generateID()
@@ -313,6 +329,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
+}
+
+func databaseImage(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "postgres:16-alpine"
+	case "redis":
+		return "redis:7-alpine"
+	default:
+		return ""
+	}
 }
 
 // Get returns a database by ID, scoped to tenant. Connection string NOT included.
@@ -762,10 +789,9 @@ func postgresReady(addr string) bool {
 	return b == 'R' || b == 'E' || b == 'N'
 }
 
-// waitForRedis probes Redis at the protocol level. It sends a RESP PING
-// command and checks that the server responds with +PONG. A container that
-// accepts TCP but has not finished loading its data set or configuration will
-// not respond to PING yet.
+// waitForRedis probes Redis with the configured password and then checks for
+// a +PONG response. A container that accepts TCP but has not finished loading
+// its data set or configuration will not be considered ready.
 func (m *Manager) waitForRedis(port int, password string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
@@ -778,34 +804,37 @@ func (m *Manager) waitForRedis(port int, password string, timeout time.Duration)
 	return false
 }
 
-// redisReady returns true when the Redis server at addr answers PING with
-// +PONG. When password is set, AUTH is sent first because the server runs
-// with --requirepass and would otherwise answer -NOAUTH.
+// redisReady returns true when the Redis server at addr accepts AUTH (when a
+// password is configured) and responds to PING. Each probe has a fixed network
+// deadline, and response lines are bounded to avoid hanging on a bad endpoint.
 func redisReady(addr, password string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	cmd := "*1\r\n$4\r\nPING\r\n"
-	if password != "" {
-		cmd = fmt.Sprintf("*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(password), password) + cmd
-	}
-	if _, err := conn.Write([]byte(cmd)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return false
 	}
 
-	r := bufio.NewReader(conn)
+	reader := bufio.NewReaderSize(conn, 256)
 	if password != "" {
-		if line, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(line, "+OK") {
+		if _, err := fmt.Fprintf(conn, "*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(password), password); err != nil {
+			return false
+		}
+		if !redisSimpleReply(reader, "+OK\r\n") {
 			return false
 		}
 	}
-	line, err := r.ReadString('\n')
-	return err == nil && strings.HasPrefix(line, "+PONG")
+	if _, err := io.WriteString(conn, "*1\r\n$4\r\nPING\r\n"); err != nil {
+		return false
+	}
+	return redisSimpleReply(reader, "+PONG\r\n")
+}
+
+func redisSimpleReply(reader *bufio.Reader, want string) bool {
+	line, err := reader.ReadSlice('\n')
+	return err == nil && string(line) == want
 }
 
 func generateID() (string, error) {

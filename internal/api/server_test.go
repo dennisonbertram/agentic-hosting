@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/kanbans"
 	"github.com/dennisonbertram/agentic-hosting/internal/metering"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
@@ -129,15 +132,15 @@ func TestDatabaseCreate_UsesIdempotencyMiddleware(t *testing.T) {
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
 }
 
-func TestDatabaseCreate_LongRunningRouteHasNoTimeoutDeadline(t *testing.T) {
+func TestDatabaseCreateUsesBoundedProvisioningDeadline(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 	token := seedAuthenticatedTenant(t, stateDB, masterKey)
 
-	sawDeadline := false
+	var managerDeadline time.Time
 	dbMgr := &fakeDatabaseManager{
 		createFn: func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
-			_, sawDeadline = ctx.Deadline()
+			managerDeadline, _ = ctx.Deadline()
 			return &databases.Database{
 				ID:       "db-1",
 				TenantID: tenantID,
@@ -159,10 +162,50 @@ func TestDatabaseCreate_LongRunningRouteHasNoTimeoutDeadline(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
+	writer := &deadlineRecordingWriter{ResponseWriter: rr}
+	started := time.Now()
+	srv.ServeHTTP(writer, req)
 
 	require.Equal(t, http.StatusCreated, rr.Code)
-	assert.False(t, sawDeadline, "long-running database create route should not inherit the short request timeout")
+	require.False(t, managerDeadline.IsZero(), "database provisioning should have a bounded context")
+	assert.GreaterOrEqual(t, managerDeadline.Sub(started), databaseCreateTimeout-time.Second)
+	assert.LessOrEqual(t, managerDeadline.Sub(started), databaseCreateTimeout+time.Second)
+	assert.GreaterOrEqual(t, writer.deadline.Sub(started), databaseCreateTimeout)
+	assert.LessOrEqual(t, writer.deadline.Sub(started), databaseCreateTimeout+6*time.Second)
+}
+
+func TestDatabaseCreateResponseSurvivesShortServerWriteTimeout(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+	dbMgr := &fakeDatabaseManager{
+		createFn: func(ctx context.Context, tenantID string, req databases.CreateRequest) (*databases.Database, error) {
+			time.Sleep(60 * time.Millisecond)
+			return &databases.Database{ID: "db-1", TenantID: tenantID, Name: req.Name, Type: req.Type, Status: "ready"}, nil
+		},
+	}
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       masterKey,
+		DevMode:         true,
+		DatabaseManager: dbMgr,
+	})
+	ts := httptest.NewUnstartedServer(srv)
+	ts.Config.WriteTimeout = 20 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/databases", strings.NewReader(`{"name":"main-db","type":"postgres"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: time.Second}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Contains(t, string(body), `"status":"ready"`)
 }
 
 func TestServiceLogsRoute_IsRegisteredAndHasNoTimeoutDeadline(t *testing.T) {
@@ -241,6 +284,56 @@ func TestTenantDelete_CleansUpAllManagers(t *testing.T) {
 		"database manager StopAllForTenant should be called with the tenant ID on deletion")
 	assert.Equal(t, []string{"tenant-1"}, kanbanMgr.stopForTenantCalls,
 		"kanban manager StopForTenant should be called with the tenant ID on deletion")
+}
+
+func TestTenantDeleteStopsEnvironmentsAndDisablesPreviewRoutes(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	token := seedAuthenticatedTenant(t, stateDB, masterKey)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO environments
+		(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+		VALUES ('env-suspend', 'tenant-1', 'workspace', 'tmpl_default', 'running', 'env-container-suspend', 'ah-env-suspend', ?, ?)`, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO environment_previews
+		(id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+		VALUES ('preview-suspend', 'env-suspend', 'tenant-1', 'web', 3000, 'env-suspend-web', ?, ?)`, now, now)
+	require.NoError(t, err)
+	traefikDir := t.TempDir()
+	routePath := filepath.Join(traefikDir, "env-preview-preview-suspend.yml")
+	require.NoError(t, os.WriteFile(routePath, []byte("router: {}\n"), 0600))
+	mock := &testutil.MockDockerClient{}
+	envManager := environments.NewManager(stateDB, mock, "example.test", traefikDir)
+	srv := NewServer(ServerConfig{
+		Store: &db.Store{StateDB: stateDB}, MasterKey: masterKey, DevMode: true,
+		EnvironmentManager: envManager,
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/tenant", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code)
+	assert.Equal(t, []string{"env-container-suspend"}, mock.StopContainerCalls)
+	var status string
+	require.NoError(t, stateDB.QueryRow(`SELECT status FROM environments WHERE id = 'env-suspend'`).Scan(&status))
+	assert.Equal(t, "stopped", status, "suspension should preserve but stop the environment record")
+	_, err = os.Stat(routePath)
+	assert.True(t, os.IsNotExist(err), "suspension must disable the preview route")
+	var previewCount int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM environment_previews WHERE id = 'preview-suspend'`).Scan(&previewCount))
+	assert.Equal(t, 1, previewCount, "reactivation should retain the preview metadata")
+	_, err = stateDB.Exec(`UPDATE tenants SET status = 'active' WHERE id = 'tenant-1'`)
+	require.NoError(t, err)
+	require.NoError(t, envManager.Start(context.Background(), "tenant-1", "env-suspend"))
+	assert.Contains(t, mock.ConnectNetworkCalls,
+		[2]string{"ingress-" + docker.EnvironmentIngressNetworkName("tenant-1", "env-suspend"), "paas-traefik"},
+		"environment reactivation must reconnect Traefik to the preview ingress network")
+	_, err = os.Stat(routePath)
+	assert.NoError(t, err, "starting the environment after reactivation should restore its preview route")
+	route, err := os.ReadFile(routePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(route), docker.EnvironmentIngressAlias("tenant-1", "env-suspend"),
+		"restored routes must resolve through the dedicated ingress network alias")
 }
 
 // TestTenantDelete_CancelsActiveBuilds verifies that DELETE /v1/tenant cancels

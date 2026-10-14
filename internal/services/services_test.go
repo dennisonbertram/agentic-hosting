@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +238,34 @@ func TestDelete_Success(t *testing.T) {
 	assert.True(t, errors.Is(err, apierr.ErrNotFound))
 }
 
+func TestStartRestoresRouteUsingDeployedPORTOverride(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	routeDir := t.TempDir()
+	mgr := NewManager(stateDB, mock, masterKey, "", routeDir, nil)
+	svc, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{
+		Name: "port-override", Image: "nginx:latest", Port: 8000,
+	})
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`UPDATE services SET status = 'stopped', container_id = 'existing-container' WHERE id = ?`, svc.ID)
+	require.NoError(t, err)
+	require.NoError(t, mgr.SetEnv(context.Background(), "tenant-1", svc.ID, map[string]string{"PORT": "3000"}))
+	// The existing container was created with PORT=3000. A later env edit only
+	// changes stored config and must not change the route when that container starts.
+	require.NoError(t, mgr.SetEnv(context.Background(), "tenant-1", svc.ID, map[string]string{"PORT": "4000"}))
+	mock.InspectContainerFn = func(context.Context, string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running", EffectivePort: 3000}, nil
+	}
+
+	require.NoError(t, mgr.Start(context.Background(), "tenant-1", svc.ID))
+	route, err := os.ReadFile(filepath.Join(routeDir, svc.ID+".yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(route), `:3000"`, "start must restore the effective deployed port")
+	assert.NotContains(t, string(route), `:8000"`, "the configured fallback port must not replace PORT")
+}
+
 func TestValidateEnvVars(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -359,7 +388,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, "websecure")
 		assert.Contains(t, content, "redirectScheme")
 		assert.Contains(t, content, "scheme: https")
-		assert.Contains(t, content, "ah-tenant1-svc123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 		assert.Contains(t, content, "letsencrypt")
 	})
@@ -383,7 +412,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.NotContains(t, content, "websecure", "localhost mode should not use HTTPS entrypoint")
 		assert.NotContains(t, content, "redirectScheme", "localhost mode should not install HTTPS redirects")
 		assert.NotContains(t, content, "letsencrypt", "localhost mode should not use TLS")
-		assert.Contains(t, content, "ah-tenant1-svc123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 	})
 
@@ -426,7 +455,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		content := string(data)
 		assert.Contains(t, content, "Host(`svc-abc-123.localhost`)")
 		assert.Contains(t, content, "3000")
-		assert.Contains(t, content, "ah-tenant1-svc-abc-123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc-abc-123"))
 	})
 }
 
@@ -498,7 +527,7 @@ func TestCreateSetsDNSLabel(t *testing.T) {
 	})
 }
 
-func TestStopAllForTenant_DisconnectsAndRemovesTenantNetwork(t *testing.T) {
+func TestStopAllForTenantRemovesServiceIngressButKeepsTenantNetwork(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	seedTenant(t, stateDB)
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
@@ -515,6 +544,7 @@ func TestStopAllForTenant_DisconnectsAndRemovesTenantNetwork(t *testing.T) {
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
 				{ID: "net-t1", Name: "ah-tenant-tenant-1", Containers: 1},
+				{ID: "net-svc", Name: docker.ServiceIngressNetworkName("tenant-1", "svc-1"), Containers: 1},
 			}, nil
 		},
 	}
@@ -526,18 +556,8 @@ func TestStopAllForTenant_DisconnectsAndRemovesTenantNetwork(t *testing.T) {
 	assert.Contains(t, mock.StopContainerCalls, "ctr-abc", "container should be stopped")
 	assert.Contains(t, mock.RemoveContainerCalls, "ctr-abc", "container should be removed")
 
-	// Verify Traefik was disconnected from the tenant network
-	found := false
-	for _, call := range mock.NetworkDisconnectCalls {
-		if call[0] == "ah-tenant-tenant-1" && call[1] == "paas-traefik" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "Traefik should be disconnected from tenant network")
-
-	// Verify network was removed
-	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-tenant-1", "tenant network should be removed")
+	assert.Contains(t, mock.RemoveNetworkCalls, "net-svc", "removed service containers should release their ingress network")
+	assert.NotContains(t, mock.RemoveNetworkCalls, "net-t1", "tenant bridge remains available to stopped environments")
 }
 
 func seedTenant(t *testing.T, db *sql.DB) {

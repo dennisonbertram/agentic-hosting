@@ -26,9 +26,22 @@ func TestLoadConfig_MergesPerField(t *testing.T) {
 	assert.Equal(t, "filekey", cfg.Key)
 }
 
-func TestLoadConfig_CorruptFileWithEnvStillErrors(t *testing.T) {
+func TestLoadConfig_CompleteEnvWinsOverCorruptFile(t *testing.T) {
 	t.Setenv("AH_URL", "https://env.example.com")
 	t.Setenv("AH_KEY", "k")
+	p := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(p, []byte("{nope"), 0600))
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: p})
+	require.NoError(t, err)
+	assert.Equal(t, "https://env.example.com", cfg.URL)
+	assert.Equal(t, "k", cfg.Key)
+}
+
+// An incomplete env config needs the file for the other field, so a corrupt
+// file must still surface as an error.
+func TestLoadConfig_PartialEnvWithCorruptFileErrors(t *testing.T) {
+	t.Setenv("AH_URL", "https://env.example.com")
+	t.Setenv("AH_KEY", "")
 	p := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(p, []byte("{nope"), 0600))
 	_, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: p})

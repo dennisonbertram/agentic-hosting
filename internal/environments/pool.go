@@ -25,10 +25,11 @@ var ErrPoolEmpty = errors.New("warm pool: no container available")
 
 // PoolManager manages a pool of pre-warmed containers for fast environment creation.
 type PoolManager struct {
-	db     *sql.DB
-	docker docker.Client
-	config PoolConfig
-	mu     sync.Mutex // guards only the Acquire DB transaction; never held across Docker calls
+	db       *sql.DB
+	docker   docker.Client
+	config   PoolConfig
+	mu       sync.Mutex // guards only the Acquire DB transaction; never held across Docker calls
+	refillMu sync.Mutex // serializes refills so concurrent calls cannot overfill the pool
 }
 
 // NewPoolManager creates a new pool manager.
@@ -144,6 +145,9 @@ func (p *PoolManager) pruneStaleEntries(ctx context.Context) {
 }
 
 func (p *PoolManager) refill(ctx context.Context) error {
+	p.refillMu.Lock()
+	defer p.refillMu.Unlock()
+
 	// Remove rows that point to non-existent Docker containers before counting.
 	p.pruneStaleEntries(ctx)
 
@@ -201,37 +205,33 @@ func (p *PoolManager) refill(ctx context.Context) error {
 			poolEntryID := fmt.Sprintf("wp_%d", time.Now().UnixNano())
 			volumeName := fmt.Sprintf("ah-pool-%s", poolEntryID)
 
-			// Create volume.
-			if err := p.docker.CreateVolume(ctx, volumeName); err != nil {
-				log.Printf("warm-pool: create volume %s failed: %v", volumeName, err)
-				break
-			}
-
-			// Ensure pool network exists (shared, non-internal for pool containers).
-			poolNet := "ah-pool"
-			if _, err := p.docker.EnsureNetwork(ctx, poolNet); err != nil {
-				log.Printf("warm-pool: ensure pool network failed: %v", err)
-				_ = p.docker.RemoveVolume(ctx, volumeName)
-				break
-			}
-
-			containerID, err := p.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
-				TenantID:    "pool",
-				EnvID:       poolEntryID,
-				Image:       tmpl.Image,
-				MemoryMB:    tmpl.MemoryMB,
-				CPUMillis:   tmpl.CPUMillis,
-				VolumeName:  volumeName,
-				NetworkName: poolNet,
-				Labels: map[string]string{
-					"ah.managed":  "true",
-					"ah.type":     "warm-pool",
-					"ah.template": tmpl.ID,
-				},
-			})
-			if err != nil {
-				log.Printf("warm-pool: run container for %s failed: %v", tmpl.ID, err)
-				_ = p.docker.RemoveVolume(ctx, volumeName)
+			// Image pulls can be slow. Leave ready entries available while Docker
+			// creates a replacement container.
+			var containerID string
+			createErr := func() error {
+				if err := p.docker.CreateVolume(ctx, volumeName); err != nil {
+					return err
+				}
+				poolNet := "ah-pool"
+				if _, err := p.docker.EnsureNetwork(ctx, poolNet); err != nil {
+					_ = p.docker.RemoveVolume(ctx, volumeName)
+					return err
+				}
+				var err error
+				containerID, err = p.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
+					TenantID: "pool", EnvID: poolEntryID, Image: tmpl.Image,
+					MemoryMB: tmpl.MemoryMB, CPUMillis: tmpl.CPUMillis,
+					VolumeName: volumeName, NetworkName: poolNet,
+					Labels:   map[string]string{"ah.managed": "true", "ah.template": tmpl.ID},
+					WarmPool: true,
+				})
+				if err != nil {
+					_ = p.docker.RemoveVolume(ctx, volumeName)
+				}
+				return err
+			}()
+			if createErr != nil {
+				log.Printf("warm-pool: create container for %s failed: %v", tmpl.ID, createErr)
 				break
 			}
 
@@ -263,6 +263,17 @@ func (p *PoolManager) refill(ctx context.Context) error {
 // and volume name. The caller is responsible for renaming/reconnecting the container.
 // Returns ErrPoolEmpty if no container is available.
 func (p *PoolManager) Acquire(ctx context.Context, templateID string) (containerID, volumeName string, err error) {
+	return p.acquire(ctx, templateID, "", "")
+}
+
+// AcquireForEnvironment assigns ownership to the creating environment in the
+// same transaction that marks the pool row claimed. GC can therefore never see
+// a claimed container or volume without an owning database record.
+func (p *PoolManager) AcquireForEnvironment(ctx context.Context, templateID, tenantID, envID string) (containerID, volumeName string, err error) {
+	return p.acquire(ctx, templateID, tenantID, envID)
+}
+
+func (p *PoolManager) acquire(ctx context.Context, templateID, tenantID, envID string) (containerID, volumeName string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -286,14 +297,23 @@ func (p *PoolManager) Acquire(ctx context.Context, templateID string) (container
 		return "", "", fmt.Errorf("select ready container: %w", err)
 	}
 
-	// Mark as claimed.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE warm_pool SET status = 'claimed' WHERE id = ?`, id); err != nil {
+	if envID != "" {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE environments SET container_id = ?, volume_name = ?
+			 WHERE id = ? AND tenant_id = ? AND status = 'creating'`,
+			containerID, volumeName, envID, tenantID)
+		if err != nil {
+			return "", "", fmt.Errorf("assign environment ownership: %w", err)
+		}
+		if affected, _ := res.RowsAffected(); affected != 1 {
+			return "", "", fmt.Errorf("assign environment ownership: environment %s is not creating", envID)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE warm_pool SET status = 'claimed' WHERE id = ?`, id); err != nil {
 		return "", "", fmt.Errorf("claim container: %w", err)
 	}
-
 	if err := tx.Commit(); err != nil {
-		return "", "", fmt.Errorf("commit: %w", err)
+		return "", "", fmt.Errorf("commit claim: %w", err)
 	}
 
 	// The 'claimed' row is kept on purpose: the container still carries the

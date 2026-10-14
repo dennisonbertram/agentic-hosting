@@ -296,6 +296,48 @@ func TestStatus_EmptyLists_DoNotCrash(t *testing.T) {
 	assert.Equal(t, 0, exitCode, "empty service/database lists must not cause failure")
 }
 
+func TestStatus_ExitCode1ForDegradedSystemHealth(t *testing.T) {
+	health, services, databases := healthyState()
+	health.Status = "degraded"
+	srv := buildStatusServer(health, services, databases)
+	defer srv.Close()
+
+	code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+}
+
+func TestStatus_ExitCode1ForMissingIsolationOrDatabaseFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ahclient.DetailedHealthResponse, []ahclient.Database)
+	}{
+		{name: "docker unavailable", mutate: func(h *ahclient.DetailedHealthResponse, _ []ahclient.Database) { h.Docker.Available = false }},
+		{name: "gvisor unavailable", mutate: func(h *ahclient.DetailedHealthResponse, _ []ahclient.Database) { h.GVisor.Available = false }},
+		{name: "database failed", mutate: func(_ *ahclient.DetailedHealthResponse, dbs []ahclient.Database) { dbs[0].Status = "failed" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health, services, databases := healthyState()
+			tc.mutate(&health, databases)
+			srv := buildStatusServer(health, services, databases)
+			defer srv.Close()
+			code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+		})
+	}
+}
+
+func TestStatus_ExitCode1ForDockerDiskCritical(t *testing.T) {
+	health, services, databases := healthyState()
+	health.DockerDisk.UsedPercent = 91
+	srv := buildStatusServer(health, services, databases)
+	defer srv.Close()
+	code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+}
+
 // ---- helpers ----
 
 // containsAny returns true if s contains any of the given substrings.

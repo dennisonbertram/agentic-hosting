@@ -265,7 +265,7 @@ func pollDbUntilRunning(c *ahclient.Client, dbID string, progress io.Writer) (*a
 			return nil, fmt.Errorf("poll database: %w", err)
 		}
 		switch db.Status {
-		case status.DatabaseReady:
+		case status.DatabaseReady, "running":
 			return db, nil
 		case "error", status.DatabaseFailed:
 			return nil, fmt.Errorf("database provisioning failed with status %q", db.Status)

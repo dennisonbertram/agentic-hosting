@@ -4,6 +4,7 @@ package gc
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -152,13 +153,13 @@ func (g *GC) collectOnce(ctx context.Context) error {
 		removed += n
 	}
 
-	// 5. Orphaned tenant networks — disconnect Traefik and remove empty ah-tenant-* networks.
+	// 5. Orphaned tenant and per-workload ingress networks.
 	orphanedNets, netErr := g.findOrphanedNetworks(ctx)
 	if netErr != nil {
 		log.Printf("gc: orphaned network check failed: %v", netErr)
 	} else {
 		for _, net := range orphanedNets {
-			log.Printf("gc: removing orphaned tenant network %s", net.Name)
+			log.Printf("gc: removing orphaned network %s", net.Name)
 			// Disconnect Traefik first (by container name); idempotent if not connected.
 			if disconnErr := g.docker.NetworkDisconnect(ctx, net.Name, "paas-traefik"); disconnErr != nil {
 				log.Printf("gc: failed to disconnect Traefik from network %s: %v", net.Name, disconnErr)
@@ -341,7 +342,8 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 
 			var count int
 			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?`, name).Scan(&count)
+				`SELECT (SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?) +
+				        (SELECT COUNT(*) FROM environments WHERE volume_name = ?)`, name, name).Scan(&count)
 			if err != nil {
 				log.Printf("gc: DB error checking pool volume %s, skipping: %v", name, err)
 				continue
@@ -361,10 +363,15 @@ const minNetworkAge = 15 * time.Minute
 // minImageAge protects images from a build or snapshot that is not yet recorded in the DB.
 const minImageAge = time.Hour
 
-// findOrphanedNetworks lists ah-tenant-* networks older than minNetworkAge that
-// have no container attached other than Traefik, counting stopped containers.
-// A running-count above 1 is a cheap early exit; the container list is authoritative.
+// findOrphanedNetworks lists tenant and per-workload ingress networks with no
+// workload endpoint, older than minNetworkAge and not owned by a persisted
+// workload. A single Traefik endpoint is also orphaned. Tenant networks contain
+// only workloads; ingress networks contain Traefik plus one workload while active.
 func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
+	ownedNetworks, err := g.persistedWorkloadNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
 	networks, err := g.docker.NetworkList(ctx)
 	if err != nil {
 		return nil, err
@@ -372,25 +379,108 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 
 	var orphaned []docker.NetworkInfo
 	for _, net := range networks {
-		if !strings.HasPrefix(net.Name, "ah-tenant-") || net.Containers > 1 || time.Since(net.Created) < minNetworkAge {
+		if !strings.HasPrefix(net.Name, "ah-tenant-") && !strings.HasPrefix(net.Name, "ah-ingress-") {
 			continue
 		}
-		names, err := g.docker.ListNetworkContainers(ctx, net.Name)
+		if _, owned := ownedNetworks[net.Name]; owned {
+			continue
+		}
+		if time.Since(net.Created) < minNetworkAge {
+			continue
+		}
+		// NetworkList may omit endpoint membership. Inspect every possible
+		// orphan before removal; on inspection failure, abort this cleanup pass.
+		if net.Containers > 1 {
+			continue
+		}
+		inspected, err := g.docker.NetworkInspect(ctx, net.ID)
 		if err != nil {
-			log.Printf("gc: cannot list containers on network %s, skipping: %v", net.Name, err)
-			continue
+			return nil, fmt.Errorf("inspect candidate network %s: %w", net.Name, err)
 		}
-		inUse := false
-		for _, n := range names {
-			if n != "paas-traefik" {
-				inUse = true
+		if inspected.Containers == 0 || (inspected.Containers == 1 && onlyTraefik(inspected.ContainerNames)) {
+			// The container list includes stopped containers, which have no live
+			// endpoint; skip the network if any non-Traefik container still uses it.
+			names, err := g.docker.ListNetworkContainers(ctx, net.Name)
+			if err != nil {
+				log.Printf("gc: cannot list containers on network %s, skipping: %v", net.Name, err)
+				continue
 			}
-		}
-		if !inUse {
-			orphaned = append(orphaned, net)
+			inUse := false
+			for _, n := range names {
+				if strings.TrimPrefix(n, "/") != "paas-traefik" {
+					inUse = true
+				}
+			}
+			if !inUse {
+				inspected.Created = net.Created
+				orphaned = append(orphaned, inspected)
+			}
 		}
 	}
 	return orphaned, nil
+}
+
+// persistedWorkloadNetworks returns Docker networks referenced by persisted
+// workloads. Stopped Docker containers have no live endpoint, but retain their
+// network IDs and cannot restart if GC removes those networks. Database errors
+// must fail closed because ownership is unknown.
+func (g *GC) persistedWorkloadNetworks(ctx context.Context) (map[string]struct{}, error) {
+	owned := make(map[string]struct{})
+	services, err := g.db.QueryContext(ctx, `SELECT tenant_id, id FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("query services for ingress ownership: %w", err)
+	}
+	for services.Next() {
+		var tenantID, serviceID string
+		if err := services.Scan(&tenantID, &serviceID); err != nil {
+			_ = services.Close()
+			return nil, fmt.Errorf("scan service ingress owner: %w", err)
+		}
+		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
+		owned[docker.ServiceIngressNetworkName(tenantID, serviceID)] = struct{}{}
+	}
+	if err := services.Err(); err != nil {
+		_ = services.Close()
+		return nil, fmt.Errorf("read service ingress owners: %w", err)
+	}
+	if err := services.Close(); err != nil {
+		return nil, fmt.Errorf("close service ingress owners: %w", err)
+	}
+
+	environments, err := g.db.QueryContext(ctx, `
+		SELECT e.tenant_id, e.id,
+			EXISTS (SELECT 1 FROM environment_previews p WHERE p.environment_id = e.id AND p.tenant_id = e.tenant_id)
+		FROM environments e`)
+	if err != nil {
+		return nil, fmt.Errorf("query environment ingress ownership: %w", err)
+	}
+	for environments.Next() {
+		var tenantID, environmentID string
+		var hasPreview bool
+		if err := environments.Scan(&tenantID, &environmentID, &hasPreview); err != nil {
+			_ = environments.Close()
+			return nil, fmt.Errorf("scan environment ingress owner: %w", err)
+		}
+		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
+		if hasPreview {
+			owned[docker.EnvironmentIngressNetworkName(tenantID, environmentID)] = struct{}{}
+		}
+	}
+	if err := environments.Err(); err != nil {
+		_ = environments.Close()
+		return nil, fmt.Errorf("read environment ingress owners: %w", err)
+	}
+	if err := environments.Close(); err != nil {
+		return nil, fmt.Errorf("close environment ingress owners: %w", err)
+	}
+	return owned, nil
+}
+
+func onlyTraefik(containerNames []string) bool {
+	if len(containerNames) != 1 {
+		return false
+	}
+	return strings.TrimPrefix(containerNames[0], "/") == "paas-traefik"
 }
 
 // removeUnusedBuiltImages removes tenant build and snapshot images that no

@@ -210,7 +210,7 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
 		return nil
 	}
 
-	containerName := fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
+	containerName := docker.ServiceIngressAlias(tenantID, serviceID)
 	portStr := strconv.Itoa(port)
 
 	var content string
@@ -301,10 +301,10 @@ type Manager struct {
 	docker           docker.Client
 	masterKey        []byte
 	baseDomain       string
-	traefikConfigDir string              // Traefik file provider directory; empty disables file-based routing
-	deploySem        chan struct{}        // bounded deploy concurrency
-	deployQueue      chan struct{}        // bounded queue for waiting deploys
-	deployStore      *deployments.Store   // deployment history tracking (nil-safe: failures are logged, not propagated)
+	traefikConfigDir string             // Traefik file provider directory; empty disables file-based routing
+	deploySem        chan struct{}      // bounded deploy concurrency
+	deployQueue      chan struct{}      // bounded queue for waiting deploys
+	deployStore      *deployments.Store // deployment history tracking (nil-safe: failures are logged, not propagated)
 
 	// svcLocks is a 256-slot striped mutex array that serialises per-service destructive
 	// lifecycle operations (Deploy, Restart, ResetCircuitBreaker). Using a fixed-size array
@@ -877,6 +877,35 @@ func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
 		}
 		return fmt.Errorf("start container: %w", err)
 	}
+	containerInfo, err := m.docker.InspectContainer(ctx, svc.ContainerID)
+	if err != nil {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		return fmt.Errorf("inspect started container: %w", err)
+	}
+	port := containerInfo.EffectivePort
+	if port < 1 || port > 65535 {
+		envVars, envErr := m.getEnvVars(ctx, serviceID)
+		if envErr != nil {
+			_ = m.docker.StopContainer(ctx, svc.ContainerID)
+			return fmt.Errorf("load env vars for route restore: %w", envErr)
+		}
+		port = resolvePort(svc.Port, envVars)
+	}
+	ingressID, err := m.docker.EnsureIngressNetwork(ctx, docker.ServiceIngressNetworkName(tenantID, serviceID))
+	if err == nil {
+		err = m.docker.ConnectNetwork(ctx, ingressID, "paas-traefik")
+	}
+	if err == nil {
+		err = m.docker.ConnectNetworkAlias(ctx, ingressID, svc.ContainerID, docker.ServiceIngressAlias(tenantID, serviceID))
+	}
+	if err != nil {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		return fmt.Errorf("restore service ingress network: %w", err)
+	}
+	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		return fmt.Errorf("restore service route: %w", err)
+	}
 	m.updateStatus(ctx, serviceID, "running")
 	now := time.Now().Unix()
 	m.recordDeployment(ctx, &deployments.Deployment{
@@ -1171,6 +1200,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 	if err := m.deleteTraefikRoute(serviceID); err != nil {
 		log.Printf("WARNING: failed to delete traefik route for service %s: %v", serviceID, err)
 	}
+	if err := m.cleanupServiceIngressNetwork(ctx, tenantID, serviceID, svc.ContainerID); err != nil {
+		log.Printf("WARNING: failed to clean ingress network for service %s: %v", serviceID, err)
+	}
 
 	// snapshots.service_id has no ON DELETE action, so snapshots must go first.
 	// Untag their images best-effort; the rows and the service go in one transaction.
@@ -1274,6 +1306,9 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 					log.Printf("WARNING: failed to clear container_id for service %s: %v", svcID, dbErr)
 					m.updateStatus(ctx, svcID, "stopped")
 				}
+				if err := m.cleanupServiceIngressNetwork(ctx, tenantID, svcID, containerID.String); err != nil {
+					log.Printf("services: clean ingress network after suspending service %s: %v", svcID, err)
+				}
 			} else {
 				m.updateStatusWithError(ctx, svcID, "failed", "container cleanup failed during tenant suspension")
 			}
@@ -1282,48 +1317,38 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 		}
 	}
 
-	// After all containers are stopped, disconnect Traefik from and remove
-	// the tenant's network so it does not accumulate as a dangling endpoint.
-	tenantNet := docker.TenantNetworkName(tenantID)
-	m.cleanupTenantNetwork(ctx, tenantNet)
+	// Keep the shared tenant bridge: stopped environments may still reference
+	// its network ID. GC removes it once no persisted workload owns it.
 }
 
-// cleanupTenantNetwork disconnects Traefik from the tenant network and removes it.
-// Errors are logged but do not propagate — this is best-effort cleanup.
-func (m *Manager) cleanupTenantNetwork(ctx context.Context, tenantNet string) {
-	// Find the Traefik container to disconnect it from the tenant network.
-	// We search by label-less container list; the network may still list Traefik
-	// as a connected endpoint even after the tenant containers are removed.
+func (m *Manager) cleanupServiceIngressNetwork(ctx context.Context, tenantID, serviceID, containerID string) error {
+	name := docker.ServiceIngressNetworkName(tenantID, serviceID)
 	networks, err := m.docker.NetworkList(ctx)
 	if err != nil {
-		log.Printf("services: failed to list networks for cleanup of %s: %v", tenantNet, err)
-		return
+		return fmt.Errorf("list networks: %w", err)
 	}
-
-	var netID string
-	for _, n := range networks {
-		if n.Name == tenantNet {
-			netID = n.ID
+	var networkID string
+	for _, network := range networks {
+		if network.Name == name {
+			networkID = network.ID
 			break
 		}
 	}
-	if netID == "" {
-		// Network doesn't exist — nothing to clean up.
-		return
+	if networkID == "" {
+		return nil
 	}
-
-	// Disconnect Traefik (by name). Use the deterministic container name "paas-traefik".
-	// NetworkDisconnect is idempotent — ignores "not connected" errors.
-	if disconnErr := m.docker.NetworkDisconnect(ctx, tenantNet, "paas-traefik"); disconnErr != nil {
-		log.Printf("services: failed to disconnect Traefik from network %s: %v", tenantNet, disconnErr)
+	for _, endpoint := range []string{containerID, "paas-traefik"} {
+		if endpoint == "" {
+			continue
+		}
+		if err := m.docker.NetworkDisconnect(ctx, networkID, endpoint); err != nil && !isNotFoundError(err) {
+			return fmt.Errorf("disconnect %s from ingress network: %w", endpoint, err)
+		}
 	}
-
-	// Now remove the network. This will succeed only if no containers remain connected.
-	if rmErr := m.docker.RemoveNetwork(ctx, tenantNet); rmErr != nil {
-		log.Printf("services: failed to remove tenant network %s: %v (GC will retry)", tenantNet, rmErr)
-	} else {
-		log.Printf("services: removed tenant network %s", tenantNet)
+	if err := m.docker.RemoveNetwork(ctx, networkID); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("remove ingress network: %w", err)
 	}
+	return nil
 }
 
 // Logs returns a reader for the service container logs.

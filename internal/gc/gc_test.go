@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,11 +165,11 @@ func TestCollectOnce_PrunesDanglingImages(t *testing.T) {
 
 // mockSnapshotCleaner implements SnapshotCleaner for testing.
 type mockSnapshotCleaner struct {
-	called          bool
-	maxPerService   int
-	maxAge          time.Duration
-	returnRemoved   int
-	returnErr       error
+	called        bool
+	maxPerService int
+	maxAge        time.Duration
+	returnRemoved int
+	returnErr     error
 }
 
 func (m *mockSnapshotCleaner) CleanExpired(ctx context.Context, maxPerService int, maxAge time.Duration) (int, error) {
@@ -214,9 +215,10 @@ func TestCollectOnce_RemovesOrphanedNetworks(t *testing.T) {
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
 				{ID: "net-1", Name: "ah-tenant-orphan1", Containers: 0},
-				{ID: "net-2", Name: "ah-tenant-orphan2", Containers: 1}, // only Traefik connected
-				{ID: "net-3", Name: "ah-tenant-active", Containers: 2},  // tenant + Traefik
-				{ID: "net-4", Name: "bridge", Containers: 5},            // not a tenant network
+				{ID: "net-2", Name: "ah-tenant-orphan2", Containers: 1, ContainerNames: []string{"paas-traefik"}},             // only Traefik connected
+				{ID: "net-3", Name: "ah-tenant-active", Containers: 2},                                                        // tenant + Traefik
+				{ID: "net-4", Name: "ah-ingress-tenant-service-old", Containers: 1, ContainerNames: []string{"paas-traefik"}}, // orphan ingress net
+				{ID: "net-5", Name: "bridge", Containers: 5},                                                                  // not a tenant network
 			}, nil
 		},
 	}
@@ -226,10 +228,11 @@ func TestCollectOnce_RemovesOrphanedNetworks(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should disconnect Traefik from orphaned networks
-	assert.Len(t, mock.NetworkDisconnectCalls, 2, "should disconnect Traefik from 2 orphaned networks")
+	assert.Len(t, mock.NetworkDisconnectCalls, 3, "should disconnect Traefik from orphaned tenant and ingress networks")
 	// Should remove orphaned networks
 	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan1")
 	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan2")
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-ingress-tenant-service-old")
 	// Should NOT remove active or non-tenant networks
 	assert.NotContains(t, mock.RemoveNetworkCalls, "ah-tenant-active")
 	assert.NotContains(t, mock.RemoveNetworkCalls, "bridge")
@@ -251,6 +254,113 @@ func TestCollectOnce_SkipsNetworksWithActiveContainers(t *testing.T) {
 
 	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect from busy networks")
 	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove busy networks")
+}
+
+func TestCollectOnce_InspectsMembershipBeforeRemovingListedEmptyNetwork(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			// Docker Engine's list response can omit the Containers map.
+			return []docker.NetworkInfo{{ID: "net-live", Name: "ah-ingress-tenant-service-live", Containers: 0}}, nil
+		},
+		NetworkInspectFn: func(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+			return docker.NetworkInfo{ID: networkID, Name: "ah-ingress-tenant-service-live", Containers: 2, ContainerNames: []string{"paas-traefik", "service"}}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	require.NoError(t, g.collectOnce(context.Background()))
+	assert.Empty(t, mock.RemoveNetworkCalls, "inspect membership must preserve an active ingress network")
+	assert.Equal(t, []string{"net-live"}, mock.NetworkInspectCalls)
+}
+
+func TestCollectOnce_FailsClosedWhenNetworkInspectFails(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{{ID: "net-unknown", Name: "ah-ingress-tenant-service-unknown"}}, nil
+		},
+		NetworkInspectFn: func(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+			return docker.NetworkInfo{}, fmt.Errorf("inspect unavailable")
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	require.NoError(t, g.collectOnce(context.Background())) // GC logs and skips cleanup on inspection error.
+	assert.Empty(t, mock.RemoveNetworkCalls)
+}
+
+func TestCollectOnce_PreservesStoppedWorkloadIngressNetworks(t *testing.T) {
+	for _, tc := range []struct {
+		name, networkName string
+		seed              func(*testing.T, *sql.DB)
+	}{
+		{
+			name:        "service",
+			networkName: docker.ServiceIngressNetworkName("tenant-gc", "service-stopped"),
+			seed: func(t *testing.T, db *sql.DB) {
+				seedService(t, db, "service-stopped", "tenant-gc", "container-stopped")
+				_, err := db.Exec(`UPDATE services SET status = 'stopped' WHERE id = 'service-stopped'`)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:        "environment with preview",
+			networkName: docker.EnvironmentIngressNetworkName("tenant-gc", "env-stopped"),
+			seed: func(t *testing.T, db *sql.DB) {
+				seedService(t, db, "service-seed", "tenant-gc", "container-seed")
+				now := time.Now().Unix()
+				_, err := db.Exec(`INSERT INTO environments
+					(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+					VALUES ('env-stopped', 'tenant-gc', 'stopped', 'tmpl_default', 'stopped', 'env-container-stopped', 'ah-env-stopped', ?, ?)`, now, now)
+				require.NoError(t, err)
+				_, err = db.Exec(`INSERT INTO environment_previews
+					(id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+					VALUES ('preview-stopped', 'env-stopped', 'tenant-gc', 'web', 3000, 'env-stopped-web', ?, ?)`, now, now)
+				require.NoError(t, err)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDB := testutil.NewStateDB(t)
+			tc.seed(t, stateDB)
+			tenantNetwork := docker.TenantNetworkName("tenant-gc")
+			mock := &testutil.MockDockerClient{
+				NetworkListFn: func(context.Context) ([]docker.NetworkInfo, error) {
+					return []docker.NetworkInfo{
+						{ID: "tenant-stopped", Name: tenantNetwork},
+						{ID: "ingress-stopped", Name: tc.networkName},
+					}, nil
+				},
+				NetworkInspectFn: func(_ context.Context, networkID string) (docker.NetworkInfo, error) {
+					// Docker removes stopped containers' live endpoints but retains
+					// their network configuration for a later start.
+					name := tc.networkName
+					if networkID == "tenant-stopped" {
+						name = tenantNetwork
+					}
+					return docker.NetworkInfo{ID: networkID, Name: name, Containers: 1, ContainerNames: []string{"paas-traefik"}}, nil
+				},
+			}
+
+			require.NoError(t, New(stateDB, mock, time.Minute, t.TempDir()).collectOnce(context.Background()))
+			assert.NotContains(t, mock.RemoveNetworkCalls, "ingress-stopped",
+				"GC must retain ingress networks referenced by persisted stopped workloads")
+			assert.NotContains(t, mock.RemoveNetworkCalls, "tenant-stopped",
+				"GC must retain tenant bridges referenced by persisted stopped workloads")
+		})
+	}
+}
+
+func TestFindOrphanedNetworksFailsClosedWhenOwnershipQueryFails(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{}
+	collector := New(stateDB, mock, time.Minute, t.TempDir())
+	require.NoError(t, stateDB.Close())
+
+	networks, err := collector.findOrphanedNetworks(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, networks)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +401,7 @@ func TestNetworkCleanup_Regression_OrphanedTenantNetworksRemoved(t *testing.T) {
 				// 0 containers — clearly orphaned
 				{ID: "net-empty", Name: "ah-tenant-dead1", Containers: 0},
 				// 1 container — only Traefik remains
-				{ID: "net-traefik-only", Name: "ah-tenant-dead2", Containers: 1},
+				{ID: "net-traefik-only", Name: "ah-tenant-dead2", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 			}, nil
 		},
 	}
@@ -323,7 +433,7 @@ func TestNetworkCleanup_Regression_DisconnectBeforeRemove(t *testing.T) {
 	mock := &testutil.MockDockerClient{
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
-				{ID: "net-1", Name: "ah-tenant-cleanup1", Containers: 1},
+				{ID: "net-1", Name: "ah-tenant-cleanup1", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 			}, nil
 		},
 		NetworkDisconnectFn: func(ctx context.Context, networkID, containerID string) error {
@@ -353,7 +463,7 @@ func TestNetworkCleanup_Regression_DisconnectErrorContinues(t *testing.T) {
 	mock := &testutil.MockDockerClient{
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
-				{ID: "net-fail", Name: "ah-tenant-fail", Containers: 1},
+				{ID: "net-fail", Name: "ah-tenant-fail", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 				{ID: "net-ok", Name: "ah-tenant-ok", Containers: 0},
 			}, nil
 		},
@@ -433,6 +543,89 @@ func TestCollectOnce_PreservesPoolVolumeInDB(t *testing.T) {
 
 	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-referenced-vol",
 		"pool volume with a matching warm_pool row must NOT be removed by GC")
+}
+
+func TestCollectOnce_PreservesPoolVolumeOwnedByEnvironment(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		VALUES ('tenant_gc', 'GC test', 'gc@test.invalid', 'active', ?, ?)`, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO environments
+		(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+		VALUES ('env_gc', 'tenant_gc', 'workspace', 'tmpl_default', 'running', 'pool-ctr-owned', 'ah-pool-reused', 1, 1)`)
+	require.NoError(t, err)
+	mock := &testutil.MockDockerClient{
+		ListContainersByLabelFn: func(ctx context.Context, label, value string) ([]string, error) {
+			if label == "ah.type" && value == "warm-pool" {
+				return []string{"pool-ctr-owned"}, nil
+			}
+			return nil, nil
+		},
+		InspectContainerFn: func(context.Context, string) (*docker.ContainerInfo, error) {
+			return &docker.ContainerInfo{Status: "running", CreatedAt: time.Now().Add(-time.Hour)}, nil
+		},
+		ListVolumesFn: func(ctx context.Context, prefix string) ([]string, error) {
+			if prefix == "ah-pool-" {
+				return []string{"ah-pool-reused"}, nil
+			}
+			return nil, nil
+		},
+	}
+	require.NoError(t, New(stateDB, mock, 5*time.Minute, t.TempDir()).collectOnce(context.Background()))
+	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-reused",
+		"GC must preserve a pool volume after ownership transfers to an environment")
+	assert.NotContains(t, mock.RemoveContainerCalls, "pool-ctr-owned",
+		"GC must preserve a pool-labeled container after ownership transfers to an environment")
+}
+
+func TestCollectOnce_DuringPoolClaimSeesEnvironmentOwnership(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		VALUES ('tenant_gc', 'GC test', 'gc@test.invalid', 'active', ?, ?)`, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas
+		(tenant_id, max_services, max_databases, max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit, max_environments)
+		VALUES ('tenant_gc', 5, 3, 2048, 2.0, 20, 100, 2)`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		VALUES ('wp_race', 'tmpl_default', 'pool-container-race', 'ah-pool-race', 'ready', 1)`)
+	require.NoError(t, err)
+	mock := &testutil.MockDockerClient{}
+	manager := environments.NewManager(stateDB, mock, "", "")
+	manager.SetPool(environments.NewPoolManager(stateDB, mock, environments.PoolConfig{PoolSize: 1, MaxTotal: 1}))
+	collector := New(stateDB, mock, time.Minute, t.TempDir())
+	var collectErr error
+	mock.ListContainersByLabelFn = func(_ context.Context, label, value string) ([]string, error) {
+		if label == "ah.type" && value == "warm-pool" {
+			return []string{"pool-container-race"}, nil
+		}
+		return nil, nil
+	}
+	mock.InspectContainerFn = func(context.Context, string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running", CreatedAt: time.Unix(1, 0)}, nil
+	}
+	mock.ListVolumesFn = func(_ context.Context, prefix string) ([]string, error) {
+		if prefix == "ah-pool-" {
+			return []string{"ah-pool-race"}, nil
+		}
+		return nil, nil
+	}
+	mock.NetworkDisconnectFn = func(ctx context.Context, _, _ string) error {
+		collectErr = collector.collectOnce(ctx)
+		return nil
+	}
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		return "cold-unused", nil
+	}
+	_, err = manager.Create(context.Background(), "tenant_gc", environments.CreateRequest{Name: "gc-race", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, collectErr)
+	assert.NotContains(t, mock.RemoveContainerCalls, "pool-container-race",
+		"GC running during warm-pool transfer must see environment ownership")
+	assert.NotContains(t, mock.RemoveVolumeSafeCalls, "ah-pool-race",
+		"GC running during warm-pool transfer must see environment volume ownership")
 }
 
 // TestCollectOnce_RemovesOrphanedPoolContainers verifies that warm-pool

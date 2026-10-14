@@ -1,13 +1,14 @@
 [Unit]
 Description=agentic-hosting daemon
-After=docker.service
+After=docker.service ah-build-broker.service
+Wants=ah-build-broker.service
 Requires=docker.service
 
 [Service]
 Type=simple
 User=ah
 Group=ah
-SupplementaryGroups=docker
+SupplementaryGroups=docker ah-build
 EnvironmentFile=-/etc/default/ah
 ExecStart=/usr/local/bin/ah serve \
   --port 8080 \
@@ -21,6 +22,7 @@ StandardError=journal
 SyslogIdentifier=ah
 
 StateDirectory=ah
+StateDirectoryMode=0750
 
 # Security hardening
 UMask=0077
@@ -36,7 +38,7 @@ LockPersonality=yes
 PrivateDevices=yes
 RestrictNamespaces=yes
 ProtectKernelLogs=yes
-ReadWritePaths=/var/lib/ah /etc/traefik/dynamic /run/docker.sock /var/run/docker.sock
+ReadWritePaths=/var/lib/ah /var/lib/ah-builds /etc/traefik/dynamic /run/docker.sock /var/run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

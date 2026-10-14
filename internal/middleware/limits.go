@@ -79,11 +79,27 @@ func IdleWriteDeadline(d time.Duration) func(http.Handler) http.Handler {
 
 type idleWriter struct {
 	http.ResponseWriter
-	rc *http.ResponseController
-	d  time.Duration
+	rc    *http.ResponseController
+	d     time.Duration
+	floor time.Time
 }
 
-func (w *idleWriter) extend() { _ = w.rc.SetWriteDeadline(time.Now().Add(w.d)) }
+// extend gives each write a fresh idle deadline, but never an earlier one than a
+// handler explicitly requested (e.g. exec and database create set a deadline
+// covering their bounded runtime plus the response).
+func (w *idleWriter) extend() {
+	deadline := time.Now().Add(w.d)
+	if deadline.Before(w.floor) {
+		deadline = w.floor
+	}
+	_ = w.rc.SetWriteDeadline(deadline)
+}
+
+// SetWriteDeadline records a handler's explicit deadline as the floor for later extensions.
+func (w *idleWriter) SetWriteDeadline(t time.Time) error {
+	w.floor = t
+	return w.rc.SetWriteDeadline(t)
+}
 
 func (w *idleWriter) WriteHeader(code int) { w.extend(); w.ResponseWriter.WriteHeader(code) }
 

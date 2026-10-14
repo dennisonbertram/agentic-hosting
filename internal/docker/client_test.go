@@ -6,7 +6,36 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/go-connections/nat"
 )
+
+func TestConfiguredContainerPortUsesPORTThenUniqueExposedTCPPort(t *testing.T) {
+	cfg := &container.Config{
+		Env: []string{"TOKEN=must-not-be-returned", "PORT=3000"},
+		ExposedPorts: nat.PortSet{
+			nat.Port("80/tcp"):   struct{}{},
+			nat.Port("3000/tcp"): struct{}{},
+		},
+	}
+	if got := configuredContainerPort(cfg); got != 3000 {
+		t.Fatalf("configuredContainerPort with PORT = %d, want 3000", got)
+	}
+
+	unique := &container.Config{ExposedPorts: nat.PortSet{nat.Port("8080/tcp"): struct{}{}}}
+	if got := configuredContainerPort(unique); got != 8080 {
+		t.Fatalf("configuredContainerPort with one exposed TCP port = %d, want 8080", got)
+	}
+
+	ambiguous := &container.Config{ExposedPorts: nat.PortSet{
+		nat.Port("8080/tcp"): struct{}{},
+		nat.Port("9090/tcp"): struct{}{},
+	}}
+	if got := configuredContainerPort(ambiguous); got != 0 {
+		t.Fatalf("configuredContainerPort with ambiguous exposed ports = %d, want 0", got)
+	}
+}
 
 func TestBuildServiceContainerConfig_DoesNotInjectHealthcheck(t *testing.T) {
 	cfg := buildServiceContainerConfig(
@@ -133,6 +162,22 @@ func TestContainerName(t *testing.T) {
 	}
 }
 
+func TestEnvironmentContainerLabelsKeepLifecycleTypeReserved(t *testing.T) {
+	base := RunEnvironmentConfig{
+		TenantID: "tenant-1", EnvID: "env-1",
+		Labels: map[string]string{"ah.type": "attacker-value", "ah.tenant": "attacker-tenant"},
+	}
+	labels := environmentContainerLabels(base)
+	if labels["ah.type"] != "environment" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("environment labels did not preserve reserved identity: %#v", labels)
+	}
+	base.WarmPool = true
+	labels = environmentContainerLabels(base)
+	if labels["ah.type"] != "warm-pool" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("warm-pool lifecycle was not explicitly applied: %#v", labels)
+	}
+}
+
 func TestTenantNetworkName(t *testing.T) {
 	tests := []struct {
 		tenantID string
@@ -147,6 +192,54 @@ func TestTenantNetworkName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("TenantNetworkName(%q) = %q, want %q", tc.tenantID, got, tc.want)
 		}
+	}
+}
+
+func TestPerWorkloadIngressNetworkNames(t *testing.T) {
+	tenantID := "tenant-1"
+	serviceID := "svc-1"
+	environmentID := "env-1"
+	if got, want := ServiceIngressNetworkName(tenantID, serviceID), "ah-ingress-tenant-1-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressNetworkName(tenantID, environmentID), "ah-ingress-tenant-1-environment-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := TenantIngressNetworkPrefix(tenantID), "ah-ingress-tenant-1-"; got != want {
+		t.Fatalf("TenantIngressNetworkPrefix() = %q, want %q", got, want)
+	}
+	if got, want := ServiceIngressAlias(tenantID, serviceID), "ah-route-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressAlias() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressAlias(tenantID, environmentID), "ah-route-env-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressAlias() = %q, want %q", got, want)
+	}
+}
+
+func TestPerWorkloadIngressAliasesFitDockerDNSLabelLimit(t *testing.T) {
+	fullID := "0123456789abcdef0123456789abcdef"
+	serviceAlias := ServiceIngressAlias("tenant-with-a-long-id", fullID)
+	environmentAlias := EnvironmentIngressAlias("tenant-with-a-long-id", fullID)
+	if len(serviceAlias) > 63 || len(environmentAlias) > 63 {
+		t.Fatalf("aliases exceed Docker DNS-label limit: service=%q (%d), environment=%q (%d)",
+			serviceAlias, len(serviceAlias), environmentAlias, len(environmentAlias))
+	}
+	if serviceAlias == environmentAlias {
+		t.Fatalf("service and environment aliases must have distinct prefixes: %q", serviceAlias)
+	}
+	if serviceAlias != ServiceIngressAlias("different-tenant", fullID) {
+		t.Fatal("globally unique workload IDs should produce tenant-independent aliases")
+	}
+}
+
+func TestBridgeNetworkCreateOptionsKeepTenantIsolationAndAllowIngressPair(t *testing.T) {
+	tenant := bridgeNetworkCreateOptions(false)
+	if !tenant.Internal || tenant.Driver != "bridge" || tenant.Options["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Fatalf("tenant/pool network options weakened isolation: %#v", tenant)
+	}
+	ingress := bridgeNetworkCreateOptions(true)
+	if !ingress.Internal || ingress.Driver != "bridge" || ingress.Options["com.docker.network.bridge.enable_icc"] != "true" {
+		t.Fatalf("ingress pair network options do not allow internal proxy traffic: %#v", ingress)
 	}
 }
 

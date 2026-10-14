@@ -432,6 +432,12 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		s.buildManager.CancelAllForTenant(cleanupCtx, tenantID)
 	}
 
+	// Stop environments before service cleanup removes tenant networks. Keep
+	// their workspace and preview records so they can be started after reactivation.
+	if s.envManager != nil {
+		s.envManager.StopAllForTenant(r.Context(), tenantID)
+	}
+
 	// Stop and remove all running containers for this tenant
 	if s.svcManager != nil {
 		s.svcManager.StopAllForTenant(cleanupCtx, tenantID)

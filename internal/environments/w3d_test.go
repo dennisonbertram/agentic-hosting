@@ -81,7 +81,7 @@ func TestExec_TimeoutSetsTimedOut(t *testing.T) {
 	assert.Equal(t, []string{"sleep", "infinity"}, gotCmd[len(gotCmd)-2:])
 }
 
-func TestStopAllForTenant_StopsEnvsAndRemovesPreviews(t *testing.T) {
+func TestStopAllForTenant_StopsEnvsDisablesPreviewRoutesKeepsRows(t *testing.T) {
 	dir := t.TempDir()
 	mgr, mock := newTestManagerWithTraefik(t, 5, "example.com", dir)
 	mock.RunEnvironmentFn = func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
@@ -101,10 +101,10 @@ func TestStopAllForTenant_StopsEnvsAndRemovesPreviews(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", got.Status)
 	files, _ := os.ReadDir(dir)
-	assert.Len(t, files, 0)
+	assert.Len(t, files, 0, "preview Traefik routes must be removed")
 	ps, err := mgr.ListPreviews(context.Background(), testTenantID, env.ID)
 	require.NoError(t, err)
-	assert.Len(t, ps, 0)
+	assert.Len(t, ps, 1, "preview rows are kept for restore on reactivation")
 }
 
 func TestCreatePreview_CapAndLabelLength(t *testing.T) {
@@ -182,17 +182,19 @@ func TestPoolRefill_KeepsRowOnTransientInspectError(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
-// Pool containers keep ah.type=warm-pool so GC's warm-pool check matches.
+// Pool containers are created with the explicit WarmPool lifecycle, which
+// labels them ah.type=warm-pool so GC's warm-pool check matches.
 func TestPoolRefill_KeepsWarmPoolLabelType(t *testing.T) {
 	db := testutil.NewStateDB(t)
 	mock := &testutil.MockDockerClient{}
 	pool := NewPoolManager(db, mock, PoolConfig{Enabled: true, PoolSize: 1, MaxTotal: 1})
-	var labels map[string]string
+	var got *docker.RunEnvironmentConfig
 	mock.RunEnvironmentFn = func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
-		labels = cfg.Labels
+		got = &cfg
 		return "c1", nil
 	}
 	require.NoError(t, pool.refill(context.Background()))
-	require.NotNil(t, labels)
-	assert.Equal(t, "warm-pool", labels["ah.type"])
+	require.NotNil(t, got)
+	assert.True(t, got.WarmPool)
+	// docker.environmentContainerLabels maps WarmPool to ah.type=warm-pool (see docker tests).
 }

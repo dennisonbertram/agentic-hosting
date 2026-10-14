@@ -3,7 +3,9 @@ package environments
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -483,7 +485,7 @@ func TestSyncWorkspace_InvalidURL(t *testing.T) {
 
 func TestCreatePreview_Success(t *testing.T) {
 	dir := t.TempDir()
-	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+	mgr, mock := newTestManagerWithTraefik(t, 5, "example.com", dir)
 
 	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
 	require.NoError(t, err)
@@ -499,6 +501,17 @@ func TestCreatePreview_Success(t *testing.T) {
 	assert.Contains(t, preview.DNSLabel, "env-")
 	assert.Contains(t, preview.DNSLabel, "-api")
 	assert.Contains(t, preview.URL, "example.com")
+	ingressNetwork := "ingress-" + docker.EnvironmentIngressNetworkName(testTenantID, env.ID)
+	assert.Contains(t, mock.ConnectNetworkCalls,
+		[2]string{ingressNetwork, "paas-traefik"},
+		"preview creation must attach Traefik to the environment's dedicated ingress network")
+	assert.Contains(t, mock.ConnectNetworkAliasCalls,
+		[3]string{ingressNetwork, env.ContainerID, docker.EnvironmentIngressAlias(testTenantID, env.ID)},
+		"preview creation must attach the environment to its dedicated ingress network")
+	route, err := os.ReadFile(filepath.Join(dir, "env-preview-"+preview.ID+".yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(route), docker.EnvironmentIngressAlias(testTenantID, env.ID),
+		"preview routes must use the ingress-only DNS alias")
 
 	// Verify Traefik route file was written
 	files, _ := os.ReadDir(dir)
@@ -786,6 +799,22 @@ func TestCreate_UsesPoolWhenAvailable(t *testing.T) {
 	// The environment's container ID should be the pool container.
 	assert.Equal(t, "pool-container-abc", env.ContainerID,
 		"environment should use the pool container ID")
+	assert.Equal(t, [][2]string{{"pool-container-abc", "ah-env-" + testTenantID + "-" + env.ID}}, mock.RenameContainerArgs,
+		"a claimed pool container must be renamed to the environment name used by preview routing")
+}
+
+func TestCreateCleansUpWarmContainerWhenNetworkTransferFails(t *testing.T) {
+	mgr, mock, _, sharedDB := newTestManagerWithPool(t, 5)
+	insertWarmPoolEntry(t, sharedDB, "wp_fail", "tmpl_default", "pool-fails", "ah-pool-wp_fail")
+	mock.NetworkDisconnectFn = func(context.Context, string, string) error { return fmt.Errorf("disconnect failed") }
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		return "cold-fallback", nil
+	}
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "fallback-env", TemplateID: "default"})
+	require.NoError(t, err)
+	assert.Equal(t, "cold-fallback", env.ContainerID)
+	assert.Contains(t, mock.RemoveContainerCalls, "pool-fails", "failed transfer must not orphan the claimed pool container")
+	assert.Contains(t, mock.RemoveVolumeCalls, "ah-pool-wp_fail", "failed transfer must clean the unclaimed pool volume")
 }
 
 // TestCreate_FallsBackToColdStartWhenPoolEmpty verifies that when the pool
@@ -810,6 +839,128 @@ func TestCreate_FallsBackToColdStartWhenPoolEmpty(t *testing.T) {
 	assert.Equal(t, 1, mock.RunEnvironmentCalls,
 		"RunEnvironment must be called when pool is empty (cold start)")
 	assert.Equal(t, "cold-container-xyz", env.ContainerID)
+}
+
+func TestStartRecreatesMissingContainerWithExistingWorkspaceVolume(t *testing.T) {
+	mgr, mock, _, _ := newTestManagerWithPool(t, 5)
+	var runs int
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		runs++
+		if runs == 1 {
+			return "original-container", nil
+		}
+		return "replacement-container", nil
+	}
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "recover-env", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	mock.StartContainerFn = func(context.Context, string) error { return fmt.Errorf("No such container: original-container") }
+	mock.ListVolumesFn = func(_ context.Context, prefix string) ([]string, error) { return []string{prefix}, nil }
+	require.NoError(t, mgr.Start(context.Background(), testTenantID, env.ID))
+	recovered, err := mgr.Get(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "replacement-container", recovered.ContainerID)
+	assert.Equal(t, env.VolumeName, recovered.VolumeName, "recovery must preserve existing workspace contents")
+}
+
+func TestStartDoesNotRecreateMissingWorkspaceVolume(t *testing.T) {
+	mgr, mock, _, _ := newTestManagerWithPool(t, 5)
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) { return "original-container", nil }
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "missing-volume", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	runsBeforeStart := mock.RunEnvironmentCalls
+	mock.StartContainerFn = func(context.Context, string) error { return fmt.Errorf("No such container: original-container") }
+	mock.ListVolumesFn = func(context.Context, string) ([]string, error) { return nil, nil }
+	err = mgr.Start(context.Background(), testTenantID, env.ID)
+	require.ErrorContains(t, err, "workspace volume")
+	assert.Equal(t, runsBeforeStart, mock.RunEnvironmentCalls,
+		"Start must not create a fresh empty volume when the workspace volume is missing")
+}
+
+func TestCreateCannotResurrectEnvironmentAfterTenantSuspension(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+		close(entered)
+		<-release
+		return "late-container", nil
+	}
+	type createResult struct {
+		env *Environment
+		err error
+	}
+	resultCh := make(chan createResult, 1)
+	go func() {
+		env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "suspend-race", TemplateID: "default"})
+		resultCh <- createResult{env: env, err: err}
+	}()
+	<-entered
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+	close(release)
+	result := <-resultCh
+	require.Error(t, result.err, "creation must fail after suspension wins the status race")
+	assert.Contains(t, mock.RemoveContainerCalls, "late-container", "the late container must be cleaned up")
+	var count int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND name = 'suspend-race'`, testTenantID).Scan(&count))
+	assert.Equal(t, 0, count, "a failed in-flight creation must not leave a stopped row with deleted storage")
+}
+
+func TestStartCannotResurrectEnvironmentAfterTenantSuspension(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	mock.RunEnvironmentFn = func(context.Context, docker.RunEnvironmentConfig) (string, error) { return "existing-container", nil }
+	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "start-suspend-race", TemplateID: "default"})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Stop(context.Background(), testTenantID, env.ID))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mock.StartContainerFn = func(context.Context, string) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- mgr.Start(context.Background(), testTenantID, env.ID) }()
+	<-entered
+	_, err = stateDB.Exec(`UPDATE tenants SET status = 'suspended' WHERE id = ?`, testTenantID)
+	require.NoError(t, err)
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+	close(release)
+	require.Error(t, <-startResult, "start must fail after tenant suspension wins the status race")
+	assert.Contains(t, mock.StopContainerCalls, "existing-container", "the container started after suspension must be stopped")
+	recovered, err := mgr.Get(context.Background(), testTenantID, env.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", recovered.Status)
+}
+
+func TestStopAllForTenantKeepsNetworksReferencedByStoppedEnvironment(t *testing.T) {
+	mgr, mock, _, stateDB := newTestManagerWithPool(t, 5)
+	now := time.Now().Unix()
+	_, err := stateDB.Exec(`INSERT INTO environments
+		(id, tenant_id, name, template_id, status, container_id, volume_name, created_at, updated_at)
+		VALUES ('env-suspend-net', ?, 'suspend-net', 'tmpl_default', 'running', 'env-container', 'ah-env-suspend-net', ?, ?)`, testTenantID, now, now)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO environment_previews
+		(id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
+		VALUES ('preview-suspend-net', 'env-suspend-net', ?, 'web', 3000, 'env-suspend-net-web', ?, ?)`, testTenantID, now, now)
+	require.NoError(t, err)
+	tenantNetwork := docker.TenantNetworkName(testTenantID)
+	previewNetwork := docker.EnvironmentIngressNetworkName(testTenantID, "env-suspend-net")
+	mock.NetworkListFn = func(context.Context) ([]docker.NetworkInfo, error) {
+		return []docker.NetworkInfo{
+			{ID: "tenant-net", Name: tenantNetwork},
+			{ID: "preview-net", Name: previewNetwork},
+		}, nil
+	}
+
+	mgr.StopAllForTenant(context.Background(), testTenantID)
+
+	assert.Contains(t, mock.StopContainerCalls, "env-container")
+	assert.Empty(t, mock.RemoveNetworkCalls, "suspension must retain Docker networks referenced by stopped environment containers")
+	var status string
+	require.NoError(t, stateDB.QueryRow(`SELECT status FROM environments WHERE id = 'env-suspend-net'`).Scan(&status))
+	assert.Equal(t, "stopped", status)
 }
 
 // insertWarmPoolEntry inserts a ready warm pool entry into the given DB.

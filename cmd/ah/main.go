@@ -47,6 +47,12 @@ func main() {
 		case "rotate-key":
 			runRotateKey(os.Args[2:])
 			return
+		case "build-broker":
+			runBuildBroker()
+			return
+		case "build-worker":
+			runBuildWorker(os.Args[2:], cfg)
+			return
 		case "serve":
 			// Remove "serve" from args so flag.Parse works
 			os.Args = append(os.Args[:1], os.Args[2:]...)

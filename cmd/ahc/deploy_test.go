@@ -215,6 +215,35 @@ func TestRunDeployGit_CreatesBuildAndStreamsLogs(t *testing.T) {
 	assert.Contains(t, out.String(), "https://my-app.example.com", "output must contain the service URL")
 }
 
+func TestRunDeployGit_FailedBuildDoesNotTrustOldRunningService(t *testing.T) {
+	servicePolls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/services":
+			json.NewEncoder(w).Encode(ahclient.Service{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-app", Status: "running"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/builds"):
+			json.NewEncoder(w).Encode(ahclient.StartBuildResponse{BuildID: "build-002", Status: "queued"})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/logs"):
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("build failed\n"))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/builds/"):
+			json.NewEncoder(w).Encode(ahclient.Build{ID: "build-002", Status: "failed"})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/services/"):
+			servicePolls++
+			json.NewEncoder(w).Encode(ahclient.Service{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-app", Status: "running"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	err := runDeployGit(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, "https://github.com/org/repo", "my-app", 3000)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed")
+	assert.Zero(t, servicePolls, "a failed build must not be reported as successful from an old running service")
+}
+
 // ---- BT-006: Deploy command help text contains examples ----
 
 func TestDeployCmd_HelpText_ContainsExamples(t *testing.T) {

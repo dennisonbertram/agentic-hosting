@@ -1,12 +1,26 @@
 # Security Spike: Tenant-to-Traefik Reachability
 
-**Issue**: [#50](https://github.com/dennisonbertram/agentic-hosting/issues/50)
-**Date**: 2026-03-20
-**Status**: Confirmed reachable; mitigation documented
+## Current behavior (verified 2026-10-14)
+
+Routed services and preview environments use separate internal ingress bridges. Each bridge contains only `paas-traefik` and its one workload. Tenant workloads remain on the tenant bridge with `Internal=true` and `enable_icc=false`; no other workload shares the ingress bridge. Route files use an alias scoped to that ingress bridge, avoiding ambiguous DNS responses from the tenant network.
+
+Live validation after commit `20d30b1` confirmed a service route returned HTTP 200 with verified TLS, and the Git-built service ran under runsc. The smoke also tested private workload addresses from an environment and a Node service; both workloads were blocked from reaching those addresses. The log records two private-IP probes as blocked and separately confirms the public service route remained reachable. Evidence is in `/tmp/ah-core-live-smoke-20261014.log`; secret fields and response bodies are omitted.
+
+The per-workload ingress bridge enables proxy-to-workload traffic while preserving direct private-IP isolation between workloads. It does not make Traefik private: a workload can reach its own proxy ingress and send a Host header for another configured public route. That request is equivalent to calling the public hostname and remains subject to the target application’s own authentication and authorization. The live smoke did not attempt cross-route Host-header access or prove target application authorization. Do not treat Host-header routing as tenant authorization or publish private ports as public routes.
+
+The 2026-03-20 reproduction and mitigation notes below are retained as historical evidence for the earlier shared-tenant-network design. Their topology and conclusions do not describe the current network layout. In particular, do not apply the old blanket DOCKER-USER rules as a current fix; they may block legitimate proxy traffic. The former server at `65.21.67.254` is retired and untrusted; do not connect to it. The old topology is not deployed on the current host.
 
 ---
 
-## 1. Current Network Topology
+## Historical reproduction (2026-03-20)
+
+**Issue**: [#50](https://github.com/dennisonbertram/agentic-hosting/issues/50)
+**Date**: 2026-03-20
+**Status**: Confirmed reachable under the former shared tenant-network design
+
+---
+
+## 1. Former Network Topology
 
 ```
                           Internet
@@ -71,7 +85,7 @@ every tenant container on that bridge. Two concerns:
 ### Prerequisites
 
 - A running agentic-hosting instance with at least one deployed service.
-- SSH access to the server: `ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254`
+- A disposable lab running the vulnerable commit/topology described here. Do not run this historical reproduction against the current production host.
 
 ### Steps
 
@@ -175,7 +189,7 @@ can reach any of these because it shares a bridge with each of them.
 
 ---
 
-## 6. Recommended Short-Term Mitigation: iptables DOCKER-USER Rules
+## 6. Historical Short-Term Mitigation Proposal: iptables DOCKER-USER Rules
 
 The least invasive, operator-side control that requires no code changes, no
 per-tenant Traefik deployment, and no network architecture rewrite.

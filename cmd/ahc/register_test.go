@@ -125,6 +125,34 @@ func TestRegisterCallsServerAndReturnsAPIKey(t *testing.T) {
 	assert.Contains(t, out.String(), "tid-abc", "output should display the tenant ID")
 }
 
+func TestRegisterJSONSaveKeepsResolvedServerURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AH_URL", "")
+	t.Setenv("AH_KEY", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"tenant_id": "tid", "api_key": "key.secret"})
+	}))
+	defer srv.Close()
+
+	stdout := &bytes.Buffer{}
+	cmd := newRootCmd()
+	cmd.SetOut(stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--url", srv.URL, "--json", "register", "Alice", "alice@example.com", "--bootstrap-token", "bootstrap", "--save"})
+	require.NoError(t, cmd.Execute())
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result), "JSON output must be a single JSON object")
+
+	path, err := ahclient.DefaultConfigPath()
+	require.NoError(t, err)
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: path})
+	require.NoError(t, err)
+	assert.Equal(t, srv.URL, cfg.URL, "saved URL must use the URL resolved by getClient")
+	assert.Equal(t, "key.secret", cfg.Key)
+}
+
 // TestRegisterPropagatesServerError verifies that a non-201 response from
 // the server is surfaced as an error to the caller.
 func TestRegisterPropagatesServerError(t *testing.T) {
@@ -192,6 +220,34 @@ func TestRecoverCallsServerWithEmail(t *testing.T) {
 	assert.Equal(t, "alice@example.com", capturedEmail)
 	assert.Equal(t, "test-token", capturedToken)
 	assert.Contains(t, out.String(), "keyid.recoveredkey", "output should display the recovered key")
+}
+
+func TestRecoverJSONSaveKeepsResolvedServerURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AH_URL", "")
+	t.Setenv("AH_KEY", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "id", "key": "key.recovered", "name": "recovered"})
+	}))
+	defer srv.Close()
+
+	stdout := &bytes.Buffer{}
+	cmd := newRootCmd()
+	cmd.SetOut(stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--url", srv.URL, "--json", "recover", "--email", "alice@example.com", "--bootstrap-token", "bootstrap", "--save"})
+	require.NoError(t, cmd.Execute())
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result), "JSON output must be a single JSON object")
+
+	path, err := ahclient.DefaultConfigPath()
+	require.NoError(t, err)
+	cfg, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: path})
+	require.NoError(t, err)
+	assert.Equal(t, srv.URL, cfg.URL, "saved URL must use the URL resolved by getClient")
+	assert.Equal(t, "key.recovered", cfg.Key)
 }
 
 // TestKeyListCallsServer verifies that the key list command calls

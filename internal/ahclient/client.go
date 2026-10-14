@@ -53,15 +53,9 @@ func (c *Client) doJSON(method, path string, body any, dest any, extraHeaders ma
 const longRequestTimeout = 330 * time.Second
 
 // ExecRequestTimeout returns the HTTP timeout for an exec request. The server
-// defaults to 60s and caps at 300s; add 30s of slack on top.
+// defaults to 60s and caps at 300s; a 5s response allowance is added.
 func ExecRequestTimeout(execSeconds int) time.Duration {
-	if execSeconds <= 0 {
-		execSeconds = 60
-	}
-	if execSeconds > 300 {
-		execSeconds = 300
-	}
-	return time.Duration(execSeconds)*time.Second + 30*time.Second
+	return environmentExecClientTimeout(execSeconds)
 }
 
 // doJSONLong is doJSON with a per-request timeout replacing the client default.
@@ -523,6 +517,8 @@ func (c *Client) CancelBuild(serviceID, buildID string) (*StatusResponse, error)
 
 // ---- Database endpoints ----
 
+const databaseCreateClientTimeout = 6*time.Minute + 5*time.Second
+
 // ListDatabases returns all databases for the current tenant.
 func (c *Client) ListDatabases() ([]Database, error) {
 	var resp []Database
@@ -543,8 +539,11 @@ func (c *Client) GetDatabase(dbID string) (*Database, error) {
 
 // CreateDatabase creates a new database.
 func (c *Client) CreateDatabase(req CreateDatabaseRequest) (*Database, error) {
+	// Database creation can include a cold image pull. Match the server's
+	// six-minute operation deadline plus its response-write allowance, while
+	// retaining this client's transport, jar, and redirect settings.
 	var resp Database
-	if err := c.doJSONLong(longRequestTimeout, http.MethodPost, "/v1/databases", req, &resp); err != nil {
+	if err := c.doJSONLong(databaseCreateClientTimeout, http.MethodPost, "/v1/databases", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -628,11 +627,25 @@ func (c *Client) EnvironmentExec(envID string, command []string, workDir string,
 	if timeoutSeconds > 0 {
 		body["timeout"] = timeoutSeconds
 	}
+	// Environment exec can run for up to five minutes. doJSONLong clones the
+	// configured client so its shorter default timeout does not cut off this
+	// endpoint, bounding the request to the server's execution cap plus a
+	// response allowance.
 	var resp ExecResult
-	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp); err != nil {
+	if err := c.doJSONLong(environmentExecClientTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func environmentExecClientTimeout(timeoutSeconds int) time.Duration {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+	if timeoutSeconds > 300 {
+		timeoutSeconds = 300
+	}
+	return time.Duration(timeoutSeconds)*time.Second + 5*time.Second
 }
 
 // ExtendEnvironmentLease extends the lease on an environment.

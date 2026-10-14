@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,9 +31,12 @@ import (
 // with Docker. DockerClient is the production implementation.
 type Client interface {
 	EnsureNetwork(ctx context.Context, name string) (string, error)
+	EnsureIngressNetwork(ctx context.Context, name string) (string, error)
 	ConnectNetwork(ctx context.Context, networkID, containerID string) error
+	ConnectNetworkAlias(ctx context.Context, networkID, containerID, alias string) error
 	NetworkDisconnect(ctx context.Context, networkID, containerID string) error
 	NetworkList(ctx context.Context) ([]NetworkInfo, error)
+	NetworkInspect(ctx context.Context, networkID string) (NetworkInfo, error)
 	RemoveNetwork(ctx context.Context, networkID string) error
 	RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
@@ -71,10 +76,11 @@ type Client interface {
 
 // NetworkInfo holds metadata about a Docker network.
 type NetworkInfo struct {
-	ID         string
-	Name       string
-	Containers int // number of containers connected to this network
-	Created    time.Time
+	ID             string
+	Name           string
+	Containers     int // number of containers connected to this network
+	ContainerNames []string
+	Created        time.Time
 }
 
 // ImageInfo describes a local image.
@@ -116,16 +122,28 @@ func (c *DockerClient) Close() error {
 
 // ContainerInfo holds inspected container state.
 type ContainerInfo struct {
-	CreatedAt    time.Time
-	Status       string
-	StartedAt    string
-	ExitCode     int
-	HealthStatus string // "", "starting", "healthy", "unhealthy", "none"
-	RestartCount int    // times Docker's restart policy has restarted this container
+	CreatedAt     time.Time
+	Status        string
+	StartedAt     string
+	ExitCode      int
+	HealthStatus  string // "", "starting", "healthy", "unhealthy", "none"
+	EffectivePort int
+	RestartCount  int // times Docker's restart policy has restarted this container
 }
 
 // EnsureNetwork creates a Docker network if it doesn't exist. Returns the network ID.
 func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, error) {
+	return c.ensureBridgeNetwork(ctx, name, false)
+}
+
+// EnsureIngressNetwork creates an internal bridge used only by Traefik and one
+// routed workload. ICC is enabled on this dedicated pair network so the proxy
+// can reach the workload; tenant and pool networks retain ICC=false.
+func (c *DockerClient) EnsureIngressNetwork(ctx context.Context, name string) (string, error) {
+	return c.ensureBridgeNetwork(ctx, name, true)
+}
+
+func (c *DockerClient) ensureBridgeNetwork(ctx context.Context, name string, allowIngress bool) (string, error) {
 	networks, err := c.cli.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list networks: %w", err)
@@ -135,17 +153,7 @@ func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, 
 			return n.ID, nil
 		}
 	}
-	// Internal bridge with ICC disabled:
-	// - Internal: no outbound internet access from containers
-	// - ICC disabled: containers on the same bridge cannot communicate with each other
-	// - Traefik is connected to this network for ingress routing
-	resp, err := c.cli.NetworkCreate(ctx, name, network.CreateOptions{
-		Driver:   "bridge",
-		Internal: true,
-		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": "false",
-		},
-	})
+	resp, err := c.cli.NetworkCreate(ctx, name, bridgeNetworkCreateOptions(allowIngress))
 	if err != nil {
 		// Handle race condition: another goroutine may have created it
 		if strings.Contains(err.Error(), "already exists") {
@@ -164,9 +172,38 @@ func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, 
 	return resp.ID, nil
 }
 
+func bridgeNetworkCreateOptions(allowIngress bool) network.CreateOptions {
+	icc := "false"
+	if allowIngress {
+		icc = "true"
+	}
+	return network.CreateOptions{
+		Driver:   "bridge",
+		Internal: true,
+		Options: map[string]string{
+			"com.docker.network.bridge.enable_icc": icc,
+		},
+	}
+}
+
 // ConnectNetwork connects a container to an additional network.
 func (c *DockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
-	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+	err := c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+	if err != nil && (strings.Contains(strings.ToLower(err.Error()), "already connected") || strings.Contains(strings.ToLower(err.Error()), "already exists")) {
+		return nil
+	}
+	return err
+}
+
+// ConnectNetworkAlias attaches a container with a network-scoped DNS alias.
+func (c *DockerClient) ConnectNetworkAlias(ctx context.Context, networkID, containerID, alias string) error {
+	err := c.cli.NetworkConnect(ctx, networkID, containerID, &network.EndpointSettings{
+		Aliases: []string{alias},
+	})
+	if err != nil && (strings.Contains(strings.ToLower(err.Error()), "already connected") || strings.Contains(strings.ToLower(err.Error()), "already exists")) {
+		return nil
+	}
+	return err
 }
 
 // NetworkDisconnect disconnects a container from a network.
@@ -188,13 +225,33 @@ func (c *DockerClient) NetworkList(ctx context.Context) ([]NetworkInfo, error) {
 	result := make([]NetworkInfo, 0, len(networks))
 	for _, n := range networks {
 		result = append(result, NetworkInfo{
-			ID:         n.ID,
-			Name:       n.Name,
-			Containers: len(n.Containers),
-			Created:    n.Created,
+			ID:             n.ID,
+			Name:           n.Name,
+			Containers:     len(n.Containers),
+			ContainerNames: networkContainerNames(n.Containers),
+			Created:        n.Created,
 		})
 	}
 	return result, nil
+}
+
+// NetworkInspect returns authoritative endpoint membership. Docker Engine's
+// network list response may omit Containers, so callers making ownership or
+// cleanup decisions must inspect the individual network.
+func (c *DockerClient) NetworkInspect(ctx context.Context, networkID string) (NetworkInfo, error) {
+	n, err := c.cli.NetworkInspect(ctx, networkID, network.InspectOptions{})
+	if err != nil {
+		return NetworkInfo{}, fmt.Errorf("inspect network %s: %w", networkID, err)
+	}
+	return NetworkInfo{ID: n.ID, Name: n.Name, Containers: len(n.Containers), ContainerNames: networkContainerNames(n.Containers)}, nil
+}
+
+func networkContainerNames(endpoints map[string]network.EndpointResource) []string {
+	names := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		names = append(names, endpoint.Name)
+	}
+	return names
 }
 
 // RemoveNetwork removes a Docker network by ID or name.
@@ -207,6 +264,40 @@ func TenantNetworkName(tenantID string) string {
 	return "ah-tenant-" + tenantID
 }
 
+// ServiceIngressNetworkName returns a network dedicated to one tenant service
+// and the platform proxy. Workloads do not share this network with each other.
+func ServiceIngressNetworkName(tenantID, serviceID string) string {
+	return "ah-ingress-" + tenantID + "-service-" + serviceID
+}
+
+// ServiceIngressAlias returns a name that resolves only on this service's
+// dedicated ingress network.
+func ServiceIngressAlias(tenantID, serviceID string) string {
+	// Service IDs are globally unique. Omitting the tenant ID keeps the name
+	// below Docker's 63-character DNS-label limit for full 32-character IDs.
+	return "ah-route-service-" + serviceID
+}
+
+// EnvironmentIngressNetworkName returns a network dedicated to one environment
+// with previews and the platform proxy.
+func EnvironmentIngressNetworkName(tenantID, environmentID string) string {
+	return "ah-ingress-" + tenantID + "-environment-" + environmentID
+}
+
+// EnvironmentIngressAlias returns a name that resolves only on this
+// environment's dedicated preview ingress network.
+func EnvironmentIngressAlias(tenantID, environmentID string) string {
+	// Environment IDs are globally unique. Keep this network-scoped alias
+	// within Docker's 63-character DNS-label limit for full 32-character IDs.
+	return "ah-route-env-" + environmentID
+}
+
+// TenantIngressNetworkPrefix returns the prefix for a tenant's per-workload
+// ingress networks, used during tenant cleanup.
+func TenantIngressNetworkPrefix(tenantID string) string {
+	return "ah-ingress-" + tenantID + "-"
+}
+
 // ResourceLimits holds per-container resource constraints from tenant quotas.
 type ResourceLimits struct {
 	MemoryMB int64
@@ -217,9 +308,8 @@ type ResourceLimits struct {
 //
 // Network isolation architecture:
 //   - Container is placed on a per-tenant internal Docker network (Internal=true, ICC=false).
-//   - Internal network blocks all outbound internet access from containers.
-//   - ICC=false prevents containers on the same tenant bridge from communicating.
-//   - Traefik is connected to each per-tenant network for ingress routing.
+//   - A separate internal network connects only this service and Traefik for ingress.
+//   - Other workloads are not attached to that service ingress network.
 //   - Cross-tenant isolation: each tenant has a separate bridge network.
 //   - Defense-in-depth: gVisor (runsc) runtime, CapDrop ALL, no-new-privileges,
 //     ReadonlyRootfs, PidsLimit, MemorySwap=Memory (no swap).
@@ -233,6 +323,14 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	tenantNet := TenantNetworkName(tenantID)
+	ingressNet := ServiceIngressNetworkName(tenantID, serviceID)
+	ingressID, err := c.EnsureIngressNetwork(ctx, ingressNet)
+	if err != nil {
+		return "", fmt.Errorf("ensure service ingress network: %w", err)
+	}
+	if err := c.ConnectNetwork(ctx, ingressID, "paas-traefik"); err != nil {
+		return "", fmt.Errorf("connect Traefik to service ingress network: %w", err)
+	}
 
 	// Apply resource limits from tenant quotas, with safe defaults
 	memoryBytes := int64(512 * 1024 * 1024) // default 512MB
@@ -284,22 +382,9 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 		return "", fmt.Errorf("create container: %w", err)
 	}
 
-	// Connect Traefik to the per-tenant network for ingress routing.
-	// This is idempotent — Docker ignores if already connected.
-	// Note: Traefik gains L2 adjacency with tenant containers, but this is
-	// standard for Docker+Traefik deployments. The primary isolation boundaries
-	// are: gVisor runtime (syscall interception), CapDrop ALL, no-new-privileges,
-	// internal network (no outbound), ICC disabled (no inter-container comms).
-	traefikID, findErr := c.findTraefikContainer(ctx)
-	if findErr != nil {
-		log.Printf("WARNING: Traefik container not found — service %s will not be routable: %v", serviceID, findErr)
-	} else if traefikID != "" {
-		if connErr := c.cli.NetworkConnect(ctx, tenantNet, traefikID, nil); connErr != nil {
-			// "already connected" is expected and safe to ignore
-			if !strings.Contains(connErr.Error(), "already") {
-				log.Printf("WARNING: failed to connect Traefik to network %s: %v", tenantNet, connErr)
-			}
-		}
+	if err := c.ConnectNetworkAlias(ctx, ingressID, resp.ID, ServiceIngressAlias(tenantID, serviceID)); err != nil {
+		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("connect service to ingress network: %w", err)
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
@@ -329,8 +414,11 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 	labels["ah.service"] = serviceID
 
 	return &container.Config{
-		Image:  img,
-		Env:    env,
+		Image: img,
+		Env:   env,
+		ExposedPorts: nat.PortSet{
+			nat.Port(fmt.Sprintf("%d/tcp", port)): struct{}{},
+		},
 		Labels: labels,
 	}
 }
@@ -404,13 +492,51 @@ func (c *DockerClient) InspectContainer(ctx context.Context, containerID string)
 		healthStatus = info.State.Health.Status
 	}
 	return &ContainerInfo{
-		CreatedAt:    created,
-		Status:       strings.ToLower(info.State.Status),
-		StartedAt:    info.State.StartedAt,
-		ExitCode:     info.State.ExitCode,
-		HealthStatus: healthStatus,
-		RestartCount: info.RestartCount,
+		CreatedAt:     created,
+		Status:        strings.ToLower(info.State.Status),
+		StartedAt:     info.State.StartedAt,
+		ExitCode:      info.State.ExitCode,
+		HealthStatus:  healthStatus,
+		EffectivePort: configuredContainerPort(info.Config),
+		RestartCount:  info.RestartCount,
 	}, nil
+}
+
+// configuredContainerPort extracts only the numeric routing port from an
+// inspected service container. PORT in the container config is authoritative;
+// otherwise use a single exposed TCP port when unambiguous.
+func configuredContainerPort(cfg *container.Config) int {
+	if cfg == nil {
+		return 0
+	}
+	port := 0
+	for _, value := range cfg.Env {
+		key, raw, ok := strings.Cut(value, "=")
+		if key != "PORT" || !ok {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed >= 1 && parsed <= 65535 {
+			port = parsed
+		}
+	}
+	if port != 0 {
+		return port
+	}
+	for exposed := range cfg.ExposedPorts {
+		if exposed.Proto() != "tcp" {
+			continue
+		}
+		parsed, err := strconv.Atoi(exposed.Port())
+		if err != nil || parsed < 1 || parsed > 65535 {
+			continue
+		}
+		if port != 0 && port != parsed {
+			return 0
+		}
+		port = parsed
+	}
+	return port
 }
 
 // PullImage pulls an image with a 5-minute timeout.
@@ -423,26 +549,48 @@ func (c *DockerClient) PullImage(ctx context.Context, img string) error {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 	defer reader.Close()
-	if err := drainPullStream(reader); err != nil {
-		return fmt.Errorf("pull image %s: %w", img, err)
+	if err := consumeImagePullResponse(ctx, reader); err != nil {
+		return fmt.Errorf("read image pull response: %w", err)
 	}
 	return nil
 }
 
-// drainPullStream reads Docker's JSON progress stream to the end and returns
-// the first error message in it, or the read error (including a timeout).
-func drainPullStream(r io.Reader) error {
-	dec := json.NewDecoder(r)
+type imagePullMessage struct {
+	Error       string `json:"error"`
+	ErrorDetail struct {
+		Message string `json:"message"`
+	} `json:"errorDetail"`
+}
+
+// consumeImagePullResponse reads the Docker Engine JSON message stream. The
+// daemon can report pull failures in an HTTP 200 response body, so transport
+// success alone does not mean the image is available. Error text is omitted
+// because daemon messages may include registry details.
+func consumeImagePullResponse(ctx context.Context, stream io.Reader) error {
+	decoder := json.NewDecoder(stream)
+	messages := 0
 	for {
-		var msg jsonmessage.JSONMessage
-		if err := dec.Decode(&msg); err != nil {
-			if err == io.EOF {
-				return nil
-			}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if msg.Error != nil {
-			return msg.Error
+		var message imagePullMessage
+		err := decoder.Decode(&message)
+		if err == io.EOF {
+			if messages == 0 {
+				return fmt.Errorf("empty image pull response")
+			}
+			return nil
+		}
+		if err != nil {
+			var syntaxErr *json.SyntaxError
+			if errors.As(err, &syntaxErr) {
+				return fmt.Errorf("invalid image pull response")
+			}
+			return fmt.Errorf("read image pull stream: %w", err)
+		}
+		messages++
+		if message.Error != "" || message.ErrorDetail.Message != "" {
+			return fmt.Errorf("Docker daemon reported an image pull error")
 		}
 	}
 }
@@ -879,23 +1027,7 @@ type RunEnvironmentConfig struct {
 	NetworkName string
 	Labels      map[string]string
 	EgressAllow bool
-}
-
-// environmentLabels builds container labels; ah.* keys are set last and cannot be overridden.
-func environmentLabels(cfg RunEnvironmentConfig) map[string]string {
-	labels := make(map[string]string, len(cfg.Labels)+4)
-	for k, v := range cfg.Labels {
-		labels[k] = v
-	}
-	labels["ah.tenant"] = cfg.TenantID
-	labels["ah.environment"] = cfg.EnvID
-	// Docker labels are immutable, so warm-pool containers keep ah.type=warm-pool
-	// until claimed; GC and ownership lookups for claimed ones go through the DB.
-	if labels["ah.type"] != "warm-pool" {
-		labels["ah.type"] = "environment"
-	}
-	labels["traefik.enable"] = "false"
-	return labels
+	WarmPool    bool // explicit lifecycle marker for containers created for the warm pool
 }
 
 // RunEnvironment creates and starts an environment container with gVisor runtime.
@@ -912,7 +1044,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	labels := environmentLabels(cfg)
+	labels := environmentContainerLabels(cfg)
 
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
@@ -968,6 +1100,28 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	}
 
 	return resp.ID, nil
+}
+
+// environmentContainerLabels builds container labels; the ah.* keys are set
+// last and cannot be overridden by cfg.Labels. Docker labels are immutable, so
+// warm-pool containers keep ah.type=warm-pool until claimed; GC and ownership
+// lookups for claimed ones go through the DB. The warm-pool type comes from
+// cfg.WarmPool; a literal ah.type=warm-pool in cfg.Labels is also accepted for
+// internal callers, but any other ah.type value is replaced.
+func environmentContainerLabels(cfg RunEnvironmentConfig) map[string]string {
+	labels := make(map[string]string, len(cfg.Labels)+4)
+	for k, v := range cfg.Labels {
+		labels[k] = v
+	}
+	labels["ah.tenant"] = cfg.TenantID
+	labels["ah.environment"] = cfg.EnvID
+	if cfg.WarmPool || cfg.Labels["ah.type"] == "warm-pool" {
+		labels["ah.type"] = "warm-pool"
+	} else {
+		labels["ah.type"] = "environment"
+	}
+	labels["traefik.enable"] = "false"
+	return labels
 }
 
 // RenameContainer renames a container.
@@ -1060,4 +1214,24 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	}
 	w.buf.Write(p)
 	return len(p), nil
+}
+
+// drainPullStream reads Docker's JSON progress stream to the end and returns
+// the first error message in it, or the read error (including a timeout).
+// PullImage uses consumeImagePullResponse, which omits daemon error text;
+// this variant keeps it for callers and tests that want the daemon message.
+func drainPullStream(r io.Reader) error {
+	dec := json.NewDecoder(r)
+	for {
+		var msg jsonmessage.JSONMessage
+		if err := dec.Decode(&msg); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if msg.Error != nil {
+			return msg.Error
+		}
+	}
 }

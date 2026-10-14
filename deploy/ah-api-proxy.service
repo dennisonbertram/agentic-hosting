@@ -1,0 +1,31 @@
+[Unit]
+Description=Restricted host relay from Traefik to the loopback ah API
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ah-proxy
+Group=ah-proxy
+EnvironmentFile=/etc/default/ah-api-proxy
+ExecStart=/usr/bin/socat TCP4-LISTEN:${AH_PROXY_PORT},bind=${AH_PROXY_BIND},reuseaddr,fork,range=${AH_TRAEFIK_IP}/32 TCP4:127.0.0.1:8080
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -52,8 +52,15 @@ type statusReport struct {
 
 // isUnhealthyService reports whether a service has failed, crashed, or tripped
 // its circuit breaker (a separate flag; the server never sets a circuit status).
+// "error" and "circuit_open" are also treated as unhealthy for servers or
+// older records that report them as a status.
 func isUnhealthyService(svc ahclient.Service) bool {
-	return svc.CircuitOpen || svc.Status == status.ServiceFailed || svc.Status == status.ServiceCrashed
+	return svc.CircuitOpen || svc.Status == status.ServiceFailed || svc.Status == status.ServiceCrashed ||
+		svc.Status == status.ServiceError || svc.Status == "circuit_open"
+}
+
+func isUnhealthyDatabaseStatus(s string) bool {
+	return s == status.DatabaseFailed || s == "error"
 }
 
 // runStatusCmd is the testable core of the status command.
@@ -80,8 +87,17 @@ func runStatusCmd(c *ahclient.Client, w io.Writer, jsonOutput bool) (int, error)
 		health.Disk.UsedPercent > 90.0 || health.DockerDisk.UsedPercent > 90.0 {
 		exitCode = 1
 	}
+	if health.Status != "ok" || !health.Docker.Available || !health.GVisor.Available {
+		exitCode = 1
+	}
 	for _, svc := range services {
 		if isUnhealthyService(svc) {
+			exitCode = 1
+			break
+		}
+	}
+	for _, db := range databases {
+		if isUnhealthyDatabaseStatus(db.Status) {
 			exitCode = 1
 			break
 		}

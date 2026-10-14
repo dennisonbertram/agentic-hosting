@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
@@ -46,9 +47,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		require.NoError(t, err)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -84,9 +85,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		require.NoError(t, err)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -101,9 +102,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		stateDB := testutil.NewStateDB(t)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -124,9 +125,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		require.NoError(t, err)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -141,9 +142,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		stateDB := testutil.NewStateDB(t)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -186,9 +187,9 @@ func TestHandleTenantReactivate(t *testing.T) {
 		require.NoError(t, err)
 
 		srv := NewServer(ServerConfig{
-			Store:          &db.Store{StateDB: stateDB},
-			MasterKey:      masterKey,
-			DevMode:        true,
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
 			BootstrapTokens: []string{bootstrapToken},
 		})
 
@@ -216,4 +217,38 @@ func TestHandleTenantReactivate(t *testing.T) {
 		assert.Equal(t, "active", tenant.Status, "tenant should show active status")
 		assert.Equal(t, "tenant-usekey", tenant.ID)
 	})
+}
+
+func TestHandleTenantReactivate_RestartsDatabasesAndKanban(t *testing.T) {
+	regLimiter.resetForTest()
+	const bootstrapToken = "test-bootstrap-token-for-reactivation"
+	stateDB := testutil.NewStateDB(t)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES ('tenant-restart', 'T', 't@example.com', 'suspended', 1, 1)`)
+	require.NoError(t, err)
+
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       []byte("0123456789abcdef0123456789abcdef"),
+		DevMode:         true,
+		BootstrapTokens: []string{bootstrapToken},
+		DatabaseManager: &fakeDatabaseManager{},
+		KanbanManager:   &fakeKanbanManager{},
+	})
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, reactivateRequest("10.1.0.50", "tenant-restart", bootstrapToken))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case c := <-startCalls:
+			got[c] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for restart calls")
+		}
+	}
+	assert.True(t, got["db:tenant-restart"])
+	assert.True(t, got["kanban:tenant-restart"])
 }

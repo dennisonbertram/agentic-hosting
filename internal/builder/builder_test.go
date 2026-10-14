@@ -1,9 +1,42 @@
 package builder
 
 import (
+	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestStreamLines_OverlongLineDoesNotStopDraining(t *testing.T) {
+	pr, pw := io.Pipe()
+	var mu sync.Mutex
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		streamLines(pr, func(l string) { mu.Lock(); got = append(got, l); mu.Unlock() })
+		close(done)
+	}()
+
+	writeDone := make(chan struct{})
+	go func() {
+		pw.Write([]byte(strings.Repeat("x", 1<<20) + "\nafter\n"))
+		pw.Close()
+		close(writeDone)
+	}()
+
+	select {
+	case <-writeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("writer blocked: streamLines stopped reading after an overlong line")
+	}
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) == 0 || got[len(got)-1] != "after" {
+		t.Fatalf("expected the line after the overlong one to be delivered, got %d lines", len(got))
+	}
+}
 
 func TestIsGitSHA(t *testing.T) {
 	tests := []struct {

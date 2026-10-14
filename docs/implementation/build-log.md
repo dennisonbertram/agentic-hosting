@@ -377,7 +377,7 @@ deploy/
   traefik/traefik.yml     — Traefik static config (Let's Encrypt)
 
 scripts/
-  register.sh, deploy.sh, status.sh, logs.sh, db-provision.sh
+  register.sh, health-check.sh (deploy/status/logs/db scripts replaced by the ahc CLI)
 
 website/
   index.html        — landing page (Tailwind CSS)

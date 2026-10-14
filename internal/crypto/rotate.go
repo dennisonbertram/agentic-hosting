@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 )
 
 // RotateResult summarizes what a key rotation did (or would do in dry-run mode).
@@ -14,12 +16,13 @@ type RotateResult struct {
 	DatabaseConnStrs  int // rows re-encrypted in databases.connection_string_encrypted
 	KanbanTokens      int // rows re-encrypted in kanbans.admin_token_encrypted
 	SnapshotEnvs      int // rows re-encrypted in snapshots.env_encrypted
+	HashKeys          int // server_secrets rows re-encrypted (API-key HMAC key)
 	Errors            int // individual field decryption/encryption failures (should be 0)
 }
 
 // Total returns the total number of fields that were (or would be) re-encrypted.
 func (r RotateResult) Total() int {
-	return r.ServiceEnvVars + r.DatabasePasswords + r.DatabaseConnStrs + r.KanbanTokens + r.SnapshotEnvs
+	return r.ServiceEnvVars + r.DatabasePasswords + r.DatabaseConnStrs + r.KanbanTokens + r.SnapshotEnvs + r.HashKeys
 }
 
 // RotateKeys re-encrypts every encrypted field in the database from oldKey to
@@ -84,6 +87,13 @@ func RotateKeys(db *sql.DB, oldKey, newKey []byte, dryRun bool) (RotateResult, e
 	result.SnapshotEnvs = count
 	result.Errors += errs
 
+	// 6. Re-encrypt the API-key HMAC key so API key hashes stay valid.
+	n, err := rotateAPIKeyHashKey(tx, oldKey, newKey, dryRun)
+	if err != nil {
+		return result, fmt.Errorf("rotate api key hash key: %w", err)
+	}
+	result.HashKeys = n
+
 	// Abort if any errors occurred — we want all-or-nothing.
 	if result.Errors > 0 {
 		return result, fmt.Errorf("rotation aborted: %d field(s) failed to re-encrypt", result.Errors)
@@ -114,6 +124,46 @@ func reencrypt(ciphertextHex string, oldKey, newKey []byte) (string, error) {
 		return "", fmt.Errorf("encrypt: %w", err)
 	}
 	return newCiphertext, nil
+}
+
+// rotateAPIKeyHashKey re-encrypts the server_secrets API-key HMAC key under
+// newKey. If the row does not exist yet (server not started since the
+// migration), it is created holding oldKey, the value existing key hashes were
+// computed with. A wrong oldKey is only detectable when the row already exists.
+func rotateAPIKeyHashKey(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, error) {
+	var enc string
+	err := tx.QueryRow(`SELECT value_encrypted FROM server_secrets WHERE name = ?`, APIKeyHashSecretName).Scan(&enc)
+	switch {
+	case err == sql.ErrNoRows:
+		if dryRun {
+			return 1, nil
+		}
+		newEnc, err := Encrypt(oldKey, newKey)
+		if err != nil {
+			return 0, fmt.Errorf("encrypt: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO server_secrets (name, value_encrypted, created_at) VALUES (?, ?, ?)`,
+			APIKeyHashSecretName, newEnc, time.Now().Unix()); err != nil {
+			return 0, fmt.Errorf("insert: %w", err)
+		}
+		return 1, nil
+	case err != nil && dryRun && strings.Contains(err.Error(), "no such table"):
+		// Dry-run on a DB that predates server_secrets: the table and hash key
+		// row would be created by a live run.
+		return 1, nil
+	case err != nil:
+		return 0, fmt.Errorf("query: %w", err)
+	}
+	newEnc, err := reencrypt(enc, oldKey, newKey)
+	if err != nil {
+		return 0, err
+	}
+	if !dryRun {
+		if _, err := tx.Exec(`UPDATE server_secrets SET value_encrypted = ? WHERE name = ?`, newEnc, APIKeyHashSecretName); err != nil {
+			return 0, fmt.Errorf("update: %w", err)
+		}
+	}
+	return 1, nil
 }
 
 func rotateServiceEnv(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, int, error) {

@@ -548,7 +548,11 @@ curl -s -X POST "$AH_URL/v1/system/bootstrap-token/validate" \
 # → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
 ```
 
-The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register / recover / reactivate / quota patch).
+The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register). Recover / reactivate / quota patch take `X-Admin-Token` when `AH_ADMIN_TOKEN` is set.
+
+## Admin token
+
+`AH_ADMIN_TOKEN` (comma-separated, 32+ chars) authorizes operator-only routes: `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `PATCH /v1/tenants/{id}/quotas`. Send `X-Admin-Token` (or the same value in `X-Bootstrap-Token`). Once configured, a valid bootstrap token on those routes returns **403**. If unset, bootstrap tokens still work (deprecated; startup warning).
 
 ## Register
 
@@ -611,7 +615,7 @@ When every key is gone:
 
 ```
 POST /v1/auth/recover
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 {"email":"agent@example.com"}
 ```
 
@@ -623,7 +627,7 @@ Email must match the tenant. Issues a new key. Same registration rate limiter.
 
 ```
 POST /v1/tenants/{tenantID}/reactivate
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 ```
 
 Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
@@ -642,7 +646,7 @@ Operator quota changes:
 
 ```
 PATCH /v1/tenants/{tenantID}/quotas
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 ```
 
 Same bootstrap rate limiter.
@@ -1209,7 +1213,8 @@ Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (met
 | Header | Where |
 |--------|--------|
 | `Authorization: Bearer …` | All tenant routes |
-| `X-Bootstrap-Token` | Register, recover, reactivate, quotas, bootstrap validate |
+| `X-Bootstrap-Token` | Register (and recover/reactivate/quotas only if `AH_ADMIN_TOKEN` is unset) |
+| `X-Admin-Token` | Recover, reactivate, quotas when `AH_ADMIN_TOKEN` is set |
 | `Idempotency-Key` | Authenticated mutating routes except `POST .../exec` |
 | `Content-Type: application/json` | Bodies |
 | `X-Forwarded-Proto: https` | Required in production from loopback Traefik |
@@ -1921,9 +1926,9 @@ GET /v1/tenant/usage
 PATCH /v1/tenant
 Body: {"name":"new-name"}
 
-# Reactivate a suspended tenant (requires bootstrap token + tenant ID in the path)
+# Reactivate a suspended tenant (requires admin token + tenant ID in the path)
 POST /v1/tenants/:tenantID/reactivate
-Headers: X-Bootstrap-Token: <bootstrap-token>
+Headers: X-Admin-Token: <admin-token>
 # → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
 # Already-active tenants return 409
 
@@ -1951,9 +1956,9 @@ GET /v1/auth/keys
 # Revoke a key
 DELETE /v1/auth/keys/:keyID
 
-# Recover access (requires bootstrap token — use when all keys are lost)
+# Recover access (requires admin token — use when all keys are lost)
 POST /v1/auth/recover
-Headers: X-Bootstrap-Token: <bootstrap-token>, Content-Type: application/json
+Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
 # → {"api_key":"newkeyid.newsecret"}
 # Rate limited: same as tenant registration (5/hour per IP, 20/hour global)

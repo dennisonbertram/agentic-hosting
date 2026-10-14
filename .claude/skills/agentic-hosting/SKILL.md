@@ -47,6 +47,8 @@ ssh root@<server> "grep AH_BOOTSTRAP_TOKEN /etc/default/ah"
 
 Multiple bootstrap tokens are supported — set `AH_BOOTSTRAP_TOKEN` to a comma-separated list (e.g. `token1,token2`). Any valid token in the list is accepted.
 
+`AH_ADMIN_TOKEN` (also comma-separated, 32+ chars) authorizes the operator-only endpoints: key recovery, tenant reactivation and quota updates. Send it as `X-Admin-Token` (or in the `X-Bootstrap-Token` slot). Once set, bootstrap tokens are rejected (403) on those endpoints and only work for registration. If unset, bootstrap tokens still work there (deprecated; the server logs a warning at startup).
+
 To verify a bootstrap token without registering, use `POST /v1/system/bootstrap-token/validate` with body `{"token":"..."}` — always returns `200` with `{"valid":true}` or `{"valid":false}`. Invalid tokens are not a 401.
 
 ```bash
@@ -60,11 +62,11 @@ curl -s -X POST $AH_URL/v1/tenants/register \
 
 ## Recover an API Key
 
-Lost all API keys? Recover access using the bootstrap token and your tenant email:
+Lost all API keys? Recover access using the admin token (or bootstrap token if `AH_ADMIN_TOKEN` is unset) and your tenant email:
 
 ```bash
 curl -s -X POST $AH_URL/v1/auth/recover \
-  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN" \
+  -H "X-Admin-Token: $AH_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"email": "agent@example.com"}'
 # → {"api_key": "newkeyid.newsecret"}
@@ -278,9 +280,9 @@ curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/activity?limit=50" | pyth
 curl -sN -H "Authorization: Bearer $AH_KEY" \
   "$AH_URL/v1/services/$SERVICE_ID/logs?follow=true&tail=100"
 
-# Reactivate a suspended tenant (requires bootstrap token + tenant ID)
+# Reactivate a suspended tenant (requires admin token + tenant ID)
 curl -s -X POST $AH_URL/v1/tenants/$TENANT_ID/reactivate \
-  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN"
+  -H "X-Admin-Token: $AH_ADMIN_TOKEN"
 # → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
 ```
 

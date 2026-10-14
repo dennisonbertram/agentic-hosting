@@ -6,10 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Environments: suspension no longer marks an env stopped when the Docker stop failed; Create re-checks the tenant is active before going running; failed warm-pool adoption (including network disconnect) cleans up with a detached context; workspace sync is killed in-container after its timeout. `ah rotate-key --dry-run` no longer applies migrations; `install-cli.sh` temp-dir trap no longer errors under `set -u`.
+- Security: new `AH_ADMIN_TOKEN` (comma-separated for rotation) is required for `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate` and `PATCH /v1/tenants/{id}/quotas` (send as `X-Admin-Token`, or in the old bootstrap-token slot); bootstrap tokens then get 403 there and keep working for registration. If unset, bootstrap tokens are still accepted with a startup warning (deprecated, to be removed). Invalid-token requests no longer consume the global 20/hour budget, the startup log no longer prints rejected-token characters, and a key revoked during an auth DB read can no longer be re-cached as active.
+- Service, database and environment quotas are now enforced atomically (count inside the INSERT), so concurrent creates can no longer exceed max_services / max_databases / max_environments.
+- GC: tenant networks younger than 15 minutes or with stopped containers are kept; unused built/snapshot images (over 1h old, unreferenced) and anonymous volumes are removed; container ownership is checked by ID across all tables. PullImage now returns pull-stream errors; RemoveContainer removes anonymous volumes.
+- Databases/kanbans: RunDatabase falls back to a local image when the pull fails; failed (re)starts remove the new container (volume kept); suspension also removes failed-row database containers; re-creating a failed kanban removes its container (volume deleted only if setup never completed); reactivation start skips tenants that are no longer active.
+- `ah backup`: retention now keeps the newest 10 state and 10 metering backups separately (state backups were being deleted first), the source DB is opened truly read-only, and the metering path reuses `db.MeteringPath`.
+- Health `?fresh=true` is now limited to one live probe per 10s and concurrent probes share one result; the disk check uses the configured data dir. `ValidateImage` takes the tenant ID: `localhost` registries are rejected and local-registry refs must be the caller's own `ah/<tenant>-` build or `snapshots/<tenant>:` image. `ah.service` now allows writes to `/etc/traefik/dynamic`. Removed `scripts/{deploy,status,logs,db-provision}.sh` (use `ahc`).
+- Build-triggered deploys (`DeployImage`) now take the per-service lock, refuse when the circuit breaker is open, and fall back to name-based cleanup of the old container. Idempotency middleware serializes concurrent same-key requests (waiters replay the first response) and evicts the tenant's oldest entry at the per-tenant cap instead of skipping storage.
+- `ah rotate-key` applies state migrations first (no more "no such table: server_secrets"), `ah backup` accepts relative DB paths, `WipeVolume` helper uses AutoRemove again, and the rotation total counts the API-key hash key.
+- API limits: long routes (logs follow, build logs, DB/kanban/env create, sync, exec) leave the global 200-request throttle and get a per-tenant cap of 4 concurrent requests (429 beyond). Per-request write deadlines (60s; renewed per write on streaming routes) stop slow readers holding slots. `tenant_quotas.api_rate_limit` is now enforced per tenant (burst 2x, cached 30s with the auth lookup). Rate limiter get-or-create is atomic (fixes a data race).
+
+- Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).
+
+- **Master key rotation no longer invalidates API keys** — API key hashes now use a dedicated HMAC key stored encrypted in new `server_secrets` table (seeded from the current master key so existing keys keep working); `ah rotate-key` re-encrypts it.
+- Lifecycle races (R1): the circuit breaker opens only after the container is stopped and removed (failed stops are retried); `Restart` marks the row `restarting` before stopping, so the reconciler no longer counts phantom crashes; deploys and restarts never overwrite an open circuit or reuse the old restart baseline; env lease expiry claims the row before stopping; `Delete` aborts if the container cannot be removed. Failed `/restart` and `/redeploy` now return 502 `deploy failed: <reason>` instead of 500.
+
+### Fixed (W3-B cancellation)
+- Build cancel now cancels the build context, never overwrites a finished build, and a cancelled build no longer deploys; deployment cancel/status updates can no longer overwrite each other. Build log streaming no longer leaks subscribers or hangs, lines over 256KB no longer hang a build, and build logs are written in batches instead of one UPDATE per line.
+
+### Fixed (W2-C databases/kanban)
+
+- Redis create no longer fails (readiness check now AUTHs); NULL `container_id` no longer 500s Get/Delete/reconcile; failed kanban can be re-created; kanban setup failure is `failed`, not `ready`.
+- Tenant reactivation now restarts databases and kanban from their stored volumes/credentials. Database containers are pulled first and get memory/pids limits, no-new-privileges and a reduced capability set.
+
+- **`ahc` CLI review fixes** — uses the server's real statuses (db `ready`, service/build `failed`), fails deploys on failed builds, merges env and file config per field and saves it atomically (0600), honors long exec/create timeouts, propagates `env exec` exit codes, and verifies the installer download against `checksums.txt`.
+
 ### Added
 
 - **Documentation site** — Astro docs in `docs-site/` matching the agentic.hosting landing-page look, covering the live `/v1/` API and operations. GitHub Pages workflow at `.github/workflows/docs.yml`.
 - **Agent onboarding** — repo-root `llms.txt` / `llms-full.txt` (also served at the docs site `/llms.txt`) and a standalone skill at `skills/agentic-hosting/SKILL.md` so an agent can install and operate ah from one URL.
+- **Usage metering collector**: samples CPU and memory of running services every 60s into the metering DB. `memory_mb_avg` is now a real average (it was a sum). `AH_METER_DB_PATH` is honored when set.
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)
   - `ahc deploy` — deploy from Docker images or git repos with build log streaming
   - `ahc service` — full service lifecycle management with env var support
@@ -22,16 +50,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **Docs alignment** — README, homepage, Claude skill/commands, `website/install.sh`, and `scripts/deploy.sh` now match the live API: `/ah-*` slash commands, build fields `source_type`/`source_url`/`source_ref`, `POST /v1/system/bootstrap-token/validate`, `POST /v1/tenants/{id}/reactivate`, 90% disk block, 10-minute idempotency TTL, and `GET /v1/services/{id}/logs`. Audit list: `docs-site/CORRECTIONS.md`.
+- **Docs alignment** — README, homepage, Claude skill/commands, and `website/install.sh` now match the live API: `/ah-*` slash commands, build fields `source_type`/`source_url`/`source_ref`, `POST /v1/system/bootstrap-token/validate`, `POST /v1/tenants/{id}/reactivate`, 90% disk block, 10-minute idempotency TTL, and `GET /v1/services/{id}/logs`. Audit list: `docs-site/CORRECTIONS.md`. Deploys use `ahc` (`scripts/deploy.sh` was removed on main).
 
 ### Fixed
+
+- **Reconciler crash loops**: crashes are now counted from Docker RestartCount across ticks so the circuit breaker actually trips; crashed services stay watched and return to running; unhealthy containers are restarted instead of stopped; status updates are compare-and-swap; not-found detection no longer matches any "404"; failed environment lease stops are retried.
 
 - **`ahc register --save`** — config was written to `~/.ahc/config.json` with wrong field names (`api_key`/`server_url`), making it unreadable by `ahclient.LoadConfig`; now writes to `~/.ah/config.json` with the correct `url`/`key` fields matching the standard config format
 - **Warm pool integration** — `Create()` now acquires pre-warmed containers from the pool instead of always cold-starting; environment creation is now sub-200ms when pool has capacity
 - **Ghost pool rows** — pool refill now prunes DB rows pointing to non-existent containers, preventing stale entries from blocking pool capacity
 - **Pool resource GC** — garbage collector now handles `ah-pool-` volumes and `ah.type=warm-pool` containers to prevent orphaned resources after service restarts
+- **Volume wipe** — `WipeVolume` no longer writes until the shared disk is full: each file is overwritten with exactly its own size. The wipe container now uses pinned, pulled `busybox:1.36`, gVisor, no network, dropped capabilities, memory/pids limits, and is force-removed on timeout
 
 ### Removed
+
+### Fixed (services)
+
+- `/redeploy` now deploys services with no container (after a failed deploy, failed restart or circuit reset); deleting a service with snapshots works; snapshot restore skips the registry pull when the image is local; failed restarts no longer leave deployments stuck as `deploying`; rename keeps the `PORT` override in the Traefik route; Docker not-found detection uses typed errors instead of matching "404".
+- Environments: claimed warm-pool containers are renamed to the tenant env name and kept by GC; pool refill no longer blocks `Acquire`; exec timeouts are enforced and set `timed_out`; tenant suspend stops environments and previews on a detached 5-minute context; previews capped at 5 per environment; `env-` service names reserved.
+- Cancelling a build that is already deploying now returns 409 instead of reporting "cancelled" while the image deploys; deployment cancel only succeeds for `pending` rows. Build log streams no longer repeat a line that was in the initial snapshot.
+- Idempotency cleanup keeps in-flight (pending) entries; the short-route throttle is one shared pool of 200; streaming routes clear a stale write deadline; metering keys CPU baselines by container, advances them only after a successful write, bounds stats calls to 10s and logs a missing container once.
 
 ## [0.5.0] - 2026-03-30
 

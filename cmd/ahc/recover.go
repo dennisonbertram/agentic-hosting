@@ -47,6 +47,10 @@ The new key is shown exactly once — save it immediately.`,
 				return fmt.Errorf("recovery failed: %w", err)
 			}
 
+			if saveFlag {
+				saveResolvedConfig(cmd, c, result.Key, root.jsonOutput)
+			}
+
 			if root.jsonOutput {
 				return printJSON(cmd.OutOrStdout(), result)
 			}
@@ -68,22 +72,12 @@ The new key is shown exactly once — save it immediately.`,
 			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
 			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.Key)
 
-			if saveFlag {
-				cfgPath := defaultConfigPath()
-				serverURL := root.urlFlag
-				if err := saveAPIKey(cfgPath, result.Key, serverURL); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save config: %v\n", err)
-				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Saved to: %s\n", cfgPath)
-				}
-			}
-
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&emailFlag, "email", "", "Registered email address (required)")
 	cmd.Flags().StringVar(&bootstrapToken, "bootstrap-token", "", "Bootstrap token (overrides $AH_BOOTSTRAP_TOKEN)")
-	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save recovered API key to ~/.ahc/config.json")
+	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save recovered API key to ~/.ah/config.json")
 	return cmd
 }

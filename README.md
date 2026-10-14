@@ -168,7 +168,7 @@ curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 
 ### Authentication
 
-Tenant routes require a Bearer key. Public (no API key): `GET /v1/system/health`, `POST /v1/tenants/register`, `POST /v1/auth/recover`, `POST /v1/tenants/{tenantID}/reactivate`, `POST /v1/system/bootstrap-token/validate`, `PATCH /v1/tenants/{tenantID}/quotas`. Register, recover, reactivate, and quota patch send `X-Bootstrap-Token`. Bootstrap validate takes `{"token":"…"}` in the JSON body and always returns `200 {"valid":true|false}`.
+Tenant routes require a Bearer key. Public (no API key): `GET /v1/system/health`, `POST /v1/tenants/register`, `POST /v1/auth/recover`, `POST /v1/tenants/{tenantID}/reactivate`, `POST /v1/system/bootstrap-token/validate`, `PATCH /v1/tenants/{tenantID}/quotas`. Register sends `X-Bootstrap-Token`. Recover, reactivate, and quota patch send `X-Admin-Token` when `AH_ADMIN_TOKEN` is set (bootstrap tokens then get 403 on those routes); if unset, `X-Bootstrap-Token` still works (deprecated). Bootstrap validate takes `{"token":"…"}` in the JSON body and always returns `200 {"valid":true|false}`.
 
 ```
 Authorization: Bearer <api_key>
@@ -400,20 +400,16 @@ export AH_KEY="keyid.secret"
 
 # Register a new tenant (one-time)
 AH_BOOTSTRAP_TOKEN=<token> ./scripts/register.sh my-tenant me@example.com
+```
 
-# Deploy from git or Docker image
-./scripts/deploy.sh https://github.com/org/repo my-app 3000
-./scripts/deploy.sh nginx:alpine my-site 80
+For deploys, status, build logs and databases, use the `ahc` CLI:
 
-# Check status of everything
-./scripts/status.sh
-
-# Provision a database and wire it to a service
-./scripts/db-provision.sh my-app postgres
-./scripts/db-provision.sh my-app redis
-
-# Stream build logs
-./scripts/logs.sh my-app
+```bash
+ahc deploy https://github.com/org/repo my-app
+ahc deploy nginx:alpine my-site
+ahc status
+ahc db provision my-app postgres
+ahc build logs my-app
 ```
 
 See [`scripts/README.md`](scripts/README.md) for full documentation.

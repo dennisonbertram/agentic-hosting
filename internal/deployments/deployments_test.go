@@ -517,7 +517,7 @@ func TestCancel_PendingDeployment(t *testing.T) {
 	assert.NotNil(t, got.CompletedAt)
 }
 
-func TestCancel_DeployingDeployment(t *testing.T) {
+func TestCancel_DeployingDeployment_Returns409(t *testing.T) {
 	db := testutil.NewStateDB(t)
 	seedTestData(t, db, "tenant-1", "svc-1")
 	store := NewStore(db)
@@ -533,10 +533,14 @@ func TestCancel_DeployingDeployment(t *testing.T) {
 	}
 	require.NoError(t, store.Create(ctx, d))
 
-	updated, err := store.Cancel(ctx, "tenant-1", d.ID)
+	// Deploy work has started and cannot be stopped, so a recorded cancel must
+	// never be possible for a deploying row.
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrConflict))
+	got, err := store.Get(ctx, "tenant-1", d.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCancelled, updated.Status)
-	assert.NotNil(t, updated.CancelledAt)
+	assert.Equal(t, StatusDeploying, got.Status)
 }
 
 func TestCancel_RunningDeployment_Returns409(t *testing.T) {
@@ -638,4 +642,44 @@ func TestCancel_WrongTenant(t *testing.T) {
 	_, err := store.Cancel(ctx, "tenant-2", d.ID)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+}
+
+func TestUpdateStatus_DoesNotOverwriteCancelled(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{ServiceID: "svc-1", TenantID: "tenant-1", Image: "nginx:latest",
+		Status: StatusPending, Trigger: TriggerManual, StartedAt: time.Now().Unix()}
+	require.NoError(t, store.Create(ctx, d))
+	_, err := store.Cancel(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+
+	err = store.UpdateStatus(ctx, d.ID, StatusRunning, WithContainerID("c1"))
+	require.Error(t, err)
+
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, got.Status)
+	assert.Empty(t, got.ContainerID)
+}
+
+func TestCancelRow_RefusesNonCancellable(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	store := NewStore(db)
+	ctx := context.Background()
+
+	d := &Deployment{ServiceID: "svc-1", TenantID: "tenant-1", Image: "nginx:latest",
+		Status: StatusRunning, Trigger: TriggerManual, StartedAt: time.Now().Unix()}
+	require.NoError(t, store.Create(ctx, d))
+
+	// The UPDATE itself must refuse a row that changed after Cancel's read.
+	ok, err := store.cancelRow(ctx, d.ID, time.Now().Unix())
+	require.NoError(t, err)
+	assert.False(t, ok)
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, got.Status)
 }

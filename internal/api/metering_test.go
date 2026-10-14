@@ -409,7 +409,8 @@ func TestServiceMetrics_WithData(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&metrics))
 	require.Len(t, metrics, 1)
 	assert.InDelta(t, 15.5, metrics[0].CPUSeconds, 0.01)
-	assert.InDelta(t, 128.0, metrics[0].MemoryMBAvg, 0.01)
+	// One 60s sample: average = memory_mb_seconds / 60.
+	assert.InDelta(t, 128.0/60, metrics[0].MemoryMBAvg, 0.01)
 	assert.Equal(t, int64(5000), metrics[0].NetworkRxBytes)
 	assert.Equal(t, int64(3000), metrics[0].NetworkTxBytes)
 }

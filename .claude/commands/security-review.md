@@ -1,55 +1,37 @@
 ---
 description: Run a security review of the agentic-hosting codebase. Checks for auth bypass, injection, secrets exposure, container escape, and API security issues.
-allowed-tools: Bash
+allowed-tools: Bash, Read, Glob, Grep, Agent
 ---
 
 You are a security auditor specializing in Go backend services, container runtimes, and self-hosted PaaS infrastructure. Perform a thorough security review of the agentic-hosting codebase.
 
-## Setup
+## Data handling
 
-The repo is at the current working directory (or find it with `find ~ -name "go.mod" -path "*/agentic-hosting/*" 2>/dev/null | head -1 | xargs dirname`).
-
-Flatten the codebase:
-```bash
-cd <repo-root>
-repomix --ignore "vendor/,*.sum,*.mod,repomix*" -o /tmp/ah-review.txt .
-wc -l /tmp/ah-review.txt
-```
+Do not send repository code to an external model or service (`llm`, OpenAI,
+OpenRouter, DeepSeek, or similar). Review the code in this session, or with
+Claude subagents that read the files directly. Do not flatten the repo with
+repomix.
 
 ## Review Areas
 
-Pipe the flattened code to an LLM for each of these focused passes:
+Cover each area below. Split the areas across read-only Claude subagents when
+the review is large, and verify each finding against the code before reporting it.
 
 ### Pass 1 — Authentication & Authorization
-```bash
-cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this Go codebase for authentication and authorization issues:
-
 - Bootstrap token validation: is HMAC comparison timing-safe? Any bypass paths?
 - API key validation: prefix-based lookup correct? Timing-safe comparison?
 - Are there any endpoints missing auth middleware?
 - Can a tenant access another tenant's resources?
 - Is the master key used correctly for HMAC derivation?
 
-List every issue as CRITICAL, HIGH, MEDIUM, or LOW with file:line references. Be specific."
-```
-
 ### Pass 2 — Injection & Container Escape
-```bash
-cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this Go codebase for injection and container escape risks:
-
 - Are user-supplied strings ever passed to shell commands (exec.Command with user input)?
 - Are Docker API calls using user input safely (image names, env vars, labels)?
 - gVisor sandbox: is runsc actually enforced? Can a container escape to the host?
 - Are there path traversal risks in any file operations?
 - SQL injection in SQLite queries (raw string interpolation vs prepared statements)?
 
-List every issue as CRITICAL, HIGH, MEDIUM, or LOW with file:line references."
-```
-
 ### Pass 3 — Secrets & Data Exposure
-```bash
-cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this Go codebase for secrets and data exposure:
-
 - Are API keys or tokens ever logged?
 - Is the master key ever exposed in error messages or API responses?
 - Are database connection strings (with credentials) returned to clients safely?
@@ -57,13 +39,7 @@ cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this
 - Are there any hardcoded secrets or credentials?
 - Is TLS enforced for external communication?
 
-List every issue as CRITICAL, HIGH, MEDIUM, or LOW with file:line references."
-```
-
 ### Pass 4 — Denial of Service & Resource Limits
-```bash
-cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this Go codebase for DoS and resource exhaustion:
-
 - Are there rate limits on any endpoints?
 - Can a single tenant exhaust disk, CPU, or memory?
 - Are there request body size limits?
@@ -71,8 +47,7 @@ cat /tmp/ah-review.txt | llm -m gpt-4.1 "You are a security auditor. Review this
 - Are goroutines properly bounded/cancelled?
 - Circuit breaker logic: can it be bypassed or exploited?
 
-List every issue as CRITICAL, HIGH, MEDIUM, or LOW with file:line references."
-```
+List every issue as CRITICAL, HIGH, MEDIUM, or LOW with file:line references.
 
 ## Output Format
 

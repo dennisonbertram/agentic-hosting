@@ -229,10 +229,10 @@ Public (no API key):
 |--------|------|------|
 | GET | `/v1/system/health` | none |
 | POST | `/v1/tenants/register` | `X-Bootstrap-Token` |
-| POST | `/v1/auth/recover` | `X-Bootstrap-Token` + `{"email"}` |
-| POST | `/v1/tenants/{tenantID}/reactivate` | `X-Bootstrap-Token` |
+| POST | `/v1/auth/recover` | `X-Admin-Token` (or bootstrap if `AH_ADMIN_TOKEN` unset) + `{"email"}` |
+| POST | `/v1/tenants/{tenantID}/reactivate` | `X-Admin-Token` (or bootstrap fallback) |
 | POST | `/v1/system/bootstrap-token/validate` | JSON `{"token"}` |
-| PATCH | `/v1/tenants/{tenantID}/quotas` | `X-Bootstrap-Token` |
+| PATCH | `/v1/tenants/{tenantID}/quotas` | `X-Admin-Token` (or bootstrap fallback) |
 
 Bearer (`Authorization: Bearer $AH_KEY`):
 

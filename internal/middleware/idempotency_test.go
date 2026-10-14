@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -316,4 +319,50 @@ func TestIdempotency_LargeResponseNotCached(t *testing.T) {
 
 	assert.Equal(t, 2, callCount, "oversize response must not be cached")
 	assert.Empty(t, rec2.Header().Get("Idempotency-Replayed"))
+}
+
+func TestIdempotency_ConcurrentSameKeyRunsHandlerOnce(t *testing.T) {
+	store := NewIdempotencyStore()
+	var calls int32
+	release := make(chan struct{})
+	handler := store.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"one"}`))
+	}))
+
+	recs := []*httptest.ResponseRecorder{httptest.NewRecorder(), httptest.NewRecorder()}
+	var wg sync.WaitGroup
+	for _, rec := range recs {
+		wg.Add(1)
+		go func(rec *httptest.ResponseRecorder) {
+			defer wg.Done()
+			handler.ServeHTTP(rec, idemRequestWithTenant(http.MethodPost, "/v1/services", "k1", testIdempotencyTenantID, `{"a":1}`))
+		}(rec)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	assert.EqualValues(t, 1, atomic.LoadInt32(&calls))
+	for _, rec := range recs {
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.JSONEq(t, `{"id":"one"}`, rec.Body.String())
+	}
+}
+
+func TestIdempotency_PerTenantCapEvictsOldestInsteadOfSkipping(t *testing.T) {
+	store := NewIdempotencyStore()
+	handler := store.Middleware(idempotencyNextHandler(`{"ok":true}`, http.StatusOK))
+	for i := 0; i < maxIdempotencyPerTenant+5; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, idemRequestWithTenant(http.MethodPost, "/v1/services", fmt.Sprintf("k%d", i), testIdempotencyTenantID, `{}`))
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+	// The newest key must still replay.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, idemRequestWithTenant(http.MethodPost, "/v1/services", fmt.Sprintf("k%d", maxIdempotencyPerTenant+4), testIdempotencyTenantID, `{}`))
+	assert.Equal(t, "true", rec.Header().Get("Idempotency-Replayed"))
 }

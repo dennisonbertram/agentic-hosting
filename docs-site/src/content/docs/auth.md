@@ -29,7 +29,11 @@ curl -s -X POST "$AH_URL/v1/system/bootstrap-token/validate" \
 # → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
 ```
 
-The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register / recover / reactivate / quota patch).
+The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register). Recover / reactivate / quota patch take `X-Admin-Token` when `AH_ADMIN_TOKEN` is set.
+
+## Admin token
+
+`AH_ADMIN_TOKEN` (comma-separated, 32+ chars) authorizes operator-only routes: `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `PATCH /v1/tenants/{id}/quotas`. Send `X-Admin-Token` (or the same value in `X-Bootstrap-Token`). Once configured, a valid bootstrap token on those routes returns **403**. If unset, bootstrap tokens still work (deprecated; startup warning).
 
 ## Register
 
@@ -92,7 +96,7 @@ When every key is gone:
 
 ```
 POST /v1/auth/recover
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 {"email":"agent@example.com"}
 ```
 
@@ -104,7 +108,7 @@ Email must match the tenant. Issues a new key. Same registration rate limiter.
 
 ```
 POST /v1/tenants/{tenantID}/reactivate
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 ```
 
 Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
@@ -123,7 +127,7 @@ Operator quota changes:
 
 ```
 PATCH /v1/tenants/{tenantID}/quotas
-X-Bootstrap-Token: <token>
+X-Admin-Token: <admin-token>
 ```
 
 Same bootstrap rate limiter.

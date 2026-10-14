@@ -42,9 +42,9 @@ GET /v1/tenant/usage
 PATCH /v1/tenant
 Body: {"name":"new-name"}
 
-# Reactivate a suspended tenant (requires bootstrap token + tenant ID in the path)
+# Reactivate a suspended tenant (requires admin token + tenant ID in the path)
 POST /v1/tenants/:tenantID/reactivate
-Headers: X-Bootstrap-Token: <bootstrap-token>
+Headers: X-Admin-Token: <admin-token>
 # → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
 # Already-active tenants return 409
 
@@ -72,9 +72,9 @@ GET /v1/auth/keys
 # Revoke a key
 DELETE /v1/auth/keys/:keyID
 
-# Recover access (requires bootstrap token — use when all keys are lost)
+# Recover access (requires admin token — use when all keys are lost)
 POST /v1/auth/recover
-Headers: X-Bootstrap-Token: <bootstrap-token>, Content-Type: application/json
+Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
 # → {"api_key":"newkeyid.newsecret"}
 # Rate limited: same as tenant registration (5/hour per IP, 20/hour global)

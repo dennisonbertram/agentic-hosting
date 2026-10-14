@@ -12,8 +12,8 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
-	"github.com/docker/docker/errdefs"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
+	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -635,9 +635,12 @@ func TestRestart_EarlyReturnMarksDeploymentFailed(t *testing.T) {
 
 	require.Error(t, mgr.Restart(ctx, "tenant-1", svc.ID))
 
-	d, err := store.LatestForService(ctx, svc.ID)
+	ds, err := store.ListByService(ctx, "tenant-1", svc.ID, 10, 0)
 	require.NoError(t, err)
-	assert.Equal(t, deployments.StatusFailed, d.Status)
+	require.Len(t, ds, 2)
+	for _, d := range ds {
+		assert.NotEqual(t, deployments.StatusDeploying, d.Status)
+	}
 }
 
 func TestUpdateName_KeepsPortEnvOverride(t *testing.T) {

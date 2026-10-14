@@ -157,8 +157,14 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	// provisioning record or creating a volume. Pulling before the quota
 	// transaction avoids holding or extending the check-to-insert window.
 	image := databaseImage(req.Type)
+	// Like docker.pullOrUseLocal, tolerate a failed pull (registry down, rate
+	// limited) when the image is already in the local store.
+	// RunDatabase pulls again; that second pull is not avoided here.
 	if err := m.docker.PullImage(ctx, image); err != nil {
-		return nil, fmt.Errorf("pull database image: %w", err)
+		if ok, _ := m.docker.ImageExists(ctx, image); !ok {
+			return nil, fmt.Errorf("pull database image: %w", err)
+		}
+		log.Printf("WARNING: pull of %s failed (%v); using local image", image, err)
 	}
 
 	id, err := generateID()

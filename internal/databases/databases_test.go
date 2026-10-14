@@ -303,6 +303,21 @@ func TestRedisReady_WrongResponseIsNotReady(t *testing.T) {
 // Manager integration tests
 // ---------------------------------------------------------------------------
 
+func TestCreate_PullFailureWithLocalImageProceeds(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	mock := &testutil.MockDockerClient{
+		PullImageFn:   func(context.Context, string) error { return errors.New("registry down") },
+		ImageExistsFn: func(context.Context, string) (bool, error) { return true, nil },
+	}
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "cached", Type: "postgres"})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "pull database image")
+	}
+	assert.Equal(t, 1, mock.RunDatabaseCalls, "a cached image must let provisioning proceed")
+}
+
 func TestCreate_PullsDatabaseImageBeforeCreatingResources(t *testing.T) {
 	for _, tc := range []struct {
 		dbType string

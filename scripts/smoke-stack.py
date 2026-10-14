@@ -14,11 +14,17 @@ import urllib.parse
 import urllib.request
 
 
+# Docker Hub lists v1.11.0 at multi-platform index sha256:200689790a0a0ea48ca45992e0450bc26ccab5307375b41c84dfc4f2475937ab.
 IMAGE = "traefik/whoami:v1.11.0"
 
 
 class SmokeError(Exception):
     pass
+
+
+class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Client:
@@ -43,7 +49,9 @@ class Client:
             data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as response:
+            opener = urllib.request.build_opener(
+                RejectRedirects(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+            with opener.open(req, timeout=timeout) as response:
                 payload = response.read()
                 if not payload:
                     return response.status, None
@@ -94,11 +102,18 @@ def token_from_file(path):
 
 def checked_url(base_url, insecure_local_http):
     parsed = urllib.parse.urlparse(base_url)
-    require(parsed.scheme in ("http", "https") and parsed.hostname, "base URL must be an http(s) URL")
+    require(parsed.scheme in ("http", "https") and parsed.hostname and
+            parsed.username is None and parsed.password is None and "@" not in parsed.netloc and
+            not parsed.query and not parsed.fragment,
+            "base URL must be an http(s) URL without userinfo, query, or fragment")
     try:
-        loopback = ipaddress_is_loopback(parsed.hostname)
+        parsed.port
     except ValueError:
-        loopback = parsed.hostname.lower() == "localhost"
+        raise SmokeError("base URL has an invalid port") from None
+    try:
+        loopback = is_local_host(parsed.hostname)
+    except ValueError:
+        loopback = False
     forwarded = parsed.scheme == "http" and loopback and insecure_local_http
     require(parsed.scheme == "https" or forwarded,
             "base URL must use public HTTPS, or loopback HTTP with --loopback-proxy")
@@ -109,6 +124,39 @@ def checked_url(base_url, insecure_local_http):
 def ipaddress_is_loopback(host):
     import ipaddress
     return ipaddress.ip_address(host).is_loopback
+
+
+def is_local_host(host):
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress_is_loopback(host)
+    except ValueError:
+        return False
+
+
+def verify_route(client, route, skip, passed, skipped):
+    if skip:
+        skipped.append("service HTTP route (explicitly skipped)")
+        print("SKIPPED service HTTP route: --skip-public-route")
+        return
+    require(bool(route), "service response omitted its URL; pass --skip-public-route only when intentionally skipping route verification")
+    parts = urllib.parse.urlparse(route)
+    require(parts.scheme in ("http", "https") and parts.hostname and
+            parts.username is None and parts.password is None and "@" not in parts.netloc and
+            not parts.fragment,
+            "service route URL was not a valid HTTP(S) URL")
+    try:
+        parts.port
+    except ValueError:
+        raise SmokeError("service route URL has an invalid port") from None
+    require(parts.scheme == "https" or is_local_host(parts.hostname),
+            "service route must use HTTPS unless it points to loopback or .localhost")
+    status, _ = client.request("GET", "", timeout=15, raw_url=route)
+    require(200 <= status < 300, "service route did not return a 2xx response")
+    passed.append("service HTTP route")
+    print("PASS service HTTP route returned 2xx")
 
 
 def main():
@@ -152,6 +200,9 @@ def main():
         require(status == 201 and isinstance(registration, dict), "tenant registration returned an unexpected response")
         api_key = registration.get("api_key")
         tenant_id = registration.get("tenant_id")
+        safe_tenant_id = tenant_id if (isinstance(tenant_id, str) and tenant_id and
+                                       tenant_id.replace("_", "").replace("-", "").isalnum()) else "unknown"
+        print(f"TENANT name={tenant_name} id={safe_tenant_id}")
         require(api_key and tenant_id, "tenant registration response omitted required fields")
         tenant_client = Client(args.base_url, api_key, forwarded)
         record_pass("created isolated synthetic tenant")
@@ -166,24 +217,7 @@ def main():
         service = wait_for("HTTP service deployment", lambda: tenant_client.request("GET", service_path)[1],
                            lambda obj: obj.get("status") == "running", args.service_timeout, passed)
         route = service.get("url")
-        if not route:
-            skipped.append("service HTTP route (API returned no URL)")
-            print("SKIPPED service HTTP route: API returned no URL")
-        elif args.skip_public_route:
-            skipped.append("service HTTP route (explicitly skipped)")
-            print("SKIPPED service HTTP route: --skip-public-route")
-        else:
-            route_parts = urllib.parse.urlparse(route)
-            require(route_parts.scheme in ("http", "https") and route_parts.hostname and
-                    not route_parts.username and not route_parts.password,
-                    "service route URL was not a valid HTTP(S) URL")
-            try:
-                route_status, _ = tenant_client.request("GET", "", timeout=15, raw_url=route)
-                require(200 <= route_status < 300, "service route did not return a 2xx response")
-                record_pass("service HTTP route returned 2xx")
-            except SmokeError:
-                if not args.skip_public_route:
-                    raise
+        verify_route(tenant_client, route, args.skip_public_route, passed, skipped)
 
         created["environment_name"] = "smoke-env-" + suffix
         status, env = tenant_client.request("POST", "/v1/environments",
@@ -226,32 +260,38 @@ def main():
 
     if tenant_client:
         # Recover IDs if a successful server-side create timed out before returning its response.
-        for key, endpoint, name_field, target in (
-            ("service", "/v1/services", "service_name", "service"),
-            ("environment", "/v1/environments", "environment_name", "environment"),
+        for endpoint, name_field, target, resource_label in (
+            ("/v1/services", "service_name", "service", "service"),
+            ("/v1/environments", "environment_name", "environment", "environment"),
         ):
             if created[target] is None and created[name_field]:
                 try:
                     _, listing = tenant_client.request("GET", endpoint)
-                    if isinstance(listing, list):
-                        found = next((item.get("id") for item in listing
-                                      if isinstance(item, dict) and item.get("name") == created[name_field]), None)
-                        if found:
-                            created[target] = found
-                except SmokeError:
-                    pass
+                    require(isinstance(listing, list), f"cleanup could not inspect synthetic {resource_label} listing")
+                    matches = [item for item in listing
+                               if isinstance(item, dict) and item.get("name") == created[name_field]]
+                    if matches and not all(item.get("id") for item in matches):
+                        failures.append(f"cleanup found synthetic {resource_label} without a usable ID")
+                    elif matches:
+                        created[target] = matches[0]["id"]
+                except SmokeError as exc:
+                    failures.append(f"cleanup recovery listing for synthetic {resource_label} failed: {exc}")
         if len(created["databases"]) < len(created["database_names"]):
             try:
                 _, listing = tenant_client.request("GET", "/v1/databases")
-                if isinstance(listing, list):
-                    known = set(created["databases"])
-                    for item in listing:
-                        if (isinstance(item, dict) and item.get("name") in created["database_names"]
-                                and item.get("id") not in known):
+                require(isinstance(listing, list), "cleanup could not inspect synthetic database listing")
+                known = set(created["databases"])
+                for name in created["database_names"]:
+                    matches = [item for item in listing
+                               if isinstance(item, dict) and item.get("name") == name]
+                    if matches and not all(item.get("id") for item in matches):
+                        failures.append(f"cleanup found synthetic database {name} without a usable ID")
+                    for item in matches:
+                        if item.get("id") not in known:
                             created["databases"].append(item["id"])
                             known.add(item["id"])
-            except SmokeError:
-                pass
+            except SmokeError as exc:
+                failures.append("cleanup recovery listing for synthetic databases failed: " + str(exc))
         resources = []
         if created["environment"]:
             resources.append(("environment", "/v1/environments/" + urllib.parse.quote(created["environment"], safe="")))

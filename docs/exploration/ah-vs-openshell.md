@@ -10,7 +10,7 @@ ah is a single Go binary that turns any Linux server into a PaaS operated entire
 - **Zero-config isolation**: Every container runs under gVisor (runsc) with all capabilities dropped, read-only rootfs, and per-tenant network segmentation. No configuration needed — it's the default.
 - **Circuit breaker for autonomous loops**: Agents can crash-loop a service at machine speed. ah detects 5 crashes in 10 minutes and pauses automatically, with exponential backoff recovery (30m, 1h, 4h).
 - **Idempotent by design**: Every write endpoint accepts an idempotency key. Retries from flaky LLM tool calls produce the same result, not duplicate deployments.
-- **Cheap to run**: A single $4-54/mo Hetzner server runs 1-50+ services. No per-deploy fees, no platform markup.
+- **No platform fee**: Hetzner lists the CX33 at $9.99/month in its USD price list or €8.49/month in its EU price list, before VAT and IPv4. A primary IPv4 adds $0.60 or €0.50/month, respectively. That is $10.59 or €8.99/month before VAT with IPv4; service capacity depends on workload. ah has no per-deploy fee. See [Hetzner's current price list](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/) and [IPv4 pricing](https://docs.hetzner.com/general/infrastructure-and-availability/ipv4-pricing/).
 
 **Target audience**: AI agent developers who need their agents to deploy and operate stateless web services, APIs, and databases without human intervention.
 

@@ -1,3 +1,7 @@
+docs-site/node_modules/
+docs-site/dist/
+docs-site/.astro/
+
 bin/
 *.db
 *.db-shm
@@ -10,3 +14,10 @@ repomix.txt
 # Code review artifacts
 repomix-output.txt
 code-reviews/
+
+# Claude agent memory (local)
+.claude/agent-memory/
+
+# Built binaries
+/ah
+/ahc

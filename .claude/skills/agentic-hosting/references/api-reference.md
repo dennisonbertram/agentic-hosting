@@ -38,14 +38,15 @@ GET /v1/tenant
 GET /v1/tenant/usage
 # → {"services":{"count":2,"limit":20},"databases":{"count":1,"limit":3},...}
 
-# Update tenant name or email
+# Update tenant name (email is not updatable here)
 PATCH /v1/tenant
-Body: {"name":"new-name","email":"new@email.com"}
+Body: {"name":"new-name"}
 
-# Reactivate a suspended tenant (requires bootstrap token)
-POST /v1/tenant/reactivate
-Headers: X-Bootstrap-Token: <bootstrap-token>
-# → 200 on success; restores a suspended tenant to active status
+# Reactivate a suspended tenant (requires admin token + tenant ID in the path)
+POST /v1/tenants/:tenantID/reactivate
+Headers: X-Admin-Token: <admin-token>
+# → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
+# Already-active tenants return 409
 
 # Delete tenant (irreversible — removes ALL resources)
 DELETE /v1/tenant
@@ -61,8 +62,8 @@ DELETE /v1/tenant
 # Create a named key
 POST /v1/auth/keys
 Body: {"name":"agent-name","expires_in":2592000}  # expires_in in seconds, omit for no expiry
-# → {"id":"...","key":"keyid.secret","name":"...","created_at":unix}
-# key shown exactly once
+# → {"id":"...","api_key":"keyid.secret","name":"...","prefix":"...","expires_at":unix}
+# api_key shown exactly once (field name is api_key, not key)
 
 # List keys (no plaintext values)
 GET /v1/auth/keys
@@ -71,18 +72,19 @@ GET /v1/auth/keys
 # Revoke a key
 DELETE /v1/auth/keys/:keyID
 
-# Recover access (requires bootstrap token — use when all keys are lost)
+# Recover access (requires admin token — use when all keys are lost)
 POST /v1/auth/recover
-Headers: X-Bootstrap-Token: <bootstrap-token>, Content-Type: application/json
+Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
 # → {"api_key":"newkeyid.newsecret"}
 # Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
 # Email must match the tenant's registered email
 
 # Validate a bootstrap token (does not register — just checks validity)
-POST /v1/auth/bootstrap/validate
-Headers: X-Bootstrap-Token: <bootstrap-token>
-# → 200 if valid, 401 if invalid
+POST /v1/system/bootstrap-token/validate
+Body: {"token":"<bootstrap-token>"}
+# → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
+# Rate limited like registration (5/IP/hour, 20/hour global)
 ```
 
 **Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
@@ -95,12 +97,14 @@ Headers: X-Bootstrap-Token: <bootstrap-token>
 # Create service
 POST /v1/services
 Body: {
-  "name": "string",           # required
-  "image": "nginx:alpine",    # optional; omit for git-build workflow
-  "port": 80,                 # port the app listens on
-  "memory_mb": 256,           # optional, default 512
-  "cpu_count": 1              # optional, default 1
+  "name": "string",           # required, max 128
+  "image": "nginx:alpine",    # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
+  "port": 80,                 # 0 / omitted → 8000; must be 1–65535 if set
+  "env": {"KEY": "value"}     # optional inline env vars
 }
+# There is no memory_mb / cpu_count on CreateRequest.
+# For git builds, send image "pending" (what ahc uses); create always starts
+# an async Deploy (the placeholder pull fails), then POST .../builds replaces it.
 # → {"id":"hex32","name":"...","status":"deploying","url":"http://<id>.localhost",...}
 # Port must be > 0; returns 400 if invalid
 
@@ -153,17 +157,18 @@ Body: {"KEY":"value","OTHER":"value2"}
 # Env vars: delete one key
 DELETE /v1/services/:serviceID/env/:key
 
-# Redeploy (rebuild from same git URL/branch as last build)
+# Redeploy (rebuild from same source_url / source_ref as last build)
 POST /v1/services/:serviceID/redeploy
 # → {"id":"...","status":"pending","created_at":unix}
-# Returns the new build object; equivalent to starting a new build with the same git_url/branch
+# Returns the new build object
 
 # Deployment history
 GET /v1/services/:serviceID/deployments
 # → [{"id":"...","build_id":"...","source":"image|build","image":"...","status":"running","started_at":unix,"finished_at":unix,"deployed_at":unix}]
 
-# Stream runtime logs (basic — stdout/stderr not yet fully supported, see #11)
-GET /v1/services/:serviceID/logs
+# Stream runtime logs (Docker stdout/stderr — implemented)
+GET /v1/services/:serviceID/logs?follow=true&tail=100
+# text/plain; tail default 100, max 10000
 ```
 
 ### Environment Variable Rules
@@ -191,7 +196,9 @@ GET /v1/services/:serviceID/logs
 ```bash
 # Start a Nixpacks build from git
 POST /v1/services/:serviceID/builds
-Body: {"git_url":"https://github.com/org/repo","branch":"main"}
+Body: {"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}
+# source_type must be "git". source_ref defaults to "main" if omitted.
+# There is no git_url / branch field.
 # → {"id":"...","status":"pending","created_at":unix}
 
 # List builds for a service
@@ -311,8 +318,9 @@ GET /v1/activity?limit=50
 #   resource_type=service|database|build   — filter by resource type
 #   action=created|started|failed|...      — filter by action
 #   service_id=<id>                        — filter by service
-#   since=2026-03-01T00:00:00Z             — RFC3339 lower bound
+#   since=1710000000                       — unix timestamp (seconds), not RFC3339
 #   offset=0                               — pagination offset (int)
+# Default limit is 50 (activity only); max 200.
 ```
 
 **Audit events:** Sensitive operations are automatically logged: env var reveals (`?reveal=true`), connection string access, and kanban admin token access.
@@ -339,4 +347,5 @@ Add to any mutating request to make retries safe:
 ```
 Idempotency-Key: <any-stable-uuid>
 ```
-Same key + same tenant + same endpoint = same result. Valid 24 hours.
+Same key + same tenant + same method + same path + same body hash = same result. TTL is 10 minutes.
+`POST /v1/environments/{id}/exec` is not idempotent.

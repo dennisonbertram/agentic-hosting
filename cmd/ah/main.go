@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"regexp"
 	"strings"
@@ -45,6 +46,12 @@ func main() {
 			return
 		case "rotate-key":
 			runRotateKey(os.Args[2:])
+			return
+		case "build-broker":
+			runBuildBroker()
+			return
+		case "build-worker":
+			runBuildWorker(os.Args[2:], cfg)
 			return
 		case "serve":
 			// Remove "serve" from args so flag.Parse works
@@ -93,7 +100,7 @@ func main() {
 				continue
 			}
 			if len(tok) < 32 {
-				log.Fatalf("each bootstrap token must be at least 32 characters for brute-force resistance (got %d for token starting with %.8s...)", len(tok), tok)
+				log.Fatalf("each bootstrap token must be at least 32 characters for brute-force resistance (got %d characters)", len(tok))
 			}
 			bootstrapTokens = append(bootstrapTokens, tok)
 		}
@@ -101,8 +108,24 @@ func main() {
 			log.Fatalf("AH_BOOTSTRAP_TOKEN is set but contains no valid tokens")
 		}
 		if len(bootstrapTokens) > 1 {
-			log.Printf("bootstrap token rotation: %d tokens configured (all are valid for registration and recovery)", len(bootstrapTokens))
+			log.Printf("bootstrap token rotation: %d tokens configured (all are valid for registration)", len(bootstrapTokens))
 		}
+	}
+
+	// Admin token: authorizes recover, reactivate and quota update. Comma-separated for rotation.
+	var adminTokens []string
+	for _, tok := range strings.Split(cfg.AdminToken, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if len(tok) < 32 {
+			log.Fatalf("each AH_ADMIN_TOKEN must be at least 32 characters (got %d characters)", len(tok))
+		}
+		adminTokens = append(adminTokens, tok)
+	}
+	if len(adminTokens) == 0 && len(bootstrapTokens) > 0 {
+		log.Printf("WARNING: AH_ADMIN_TOKEN is not set; bootstrap tokens are also accepted for recover, reactivate and quota update. This fallback is deprecated and will be removed; set AH_ADMIN_TOKEN.")
 	}
 
 	if *openRegistration && !*devMode {
@@ -139,8 +162,10 @@ func main() {
 		log.Fatalf("master key file %s contains invalid hex characters: %v\n%s", *masterKeyPath, err, keyErrMsg)
 	}
 
+	// AH_METER_DB_PATH is honored only when set explicitly; otherwise the metering
+	// DB stays at <db>-metering.db so existing data is not orphaned.
 	// Open databases
-	store, err := db.Open(*dbPath)
+	store, err := db.OpenWithMetering(*dbPath, os.Getenv("AH_METER_DB_PATH"))
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
@@ -196,44 +221,39 @@ func main() {
 	envMgr.SetPool(envPool)
 	go envPool.Run(context.Background())
 
+	// Usage metering collector (60s samples of running services)
+	meterCtx, meterCancel := context.WithCancel(context.Background())
+	defer meterCancel()
+	go metering.NewCollector(store.StateDB, store.MeteringDB, dockerClient).Run(meterCtx)
+
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
 	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
-		Store:            store,
-		MasterKey:        masterKey[:32],
-		DevMode:          *devMode,
-		BootstrapTokens:  bootstrapTokens,
-		OpenRegistration: *openRegistration,
-		Docker:           dockerClient,
-		BuildManager:     buildMgr,
-		DeploymentStore:  deployStore,
-		DatabaseManager:  dbMgr,
+		Store:              store,
+		MasterKey:          masterKey[:32],
+		DevMode:            *devMode,
+		BootstrapTokens:    bootstrapTokens,
+		AdminTokens:        adminTokens,
+		OpenRegistration:   *openRegistration,
+		Docker:             dockerClient,
+		BuildManager:       buildMgr,
+		DeploymentStore:    deployStore,
+		DatabaseManager:    dbMgr,
 		KanbanManager:      kanbanMgr,
 		EnvironmentManager: envMgr,
 		MeteringStore:      meteringStore,
-		BaseDomain:       *baseDomain,
-		TraefikConfigDir: cfg.TraefikConfigDir,
+		BaseDomain:         *baseDomain,
+		TraefikConfigDir:   cfg.TraefikConfigDir,
+		DataDir:            filepath.Dir(*dbPath),
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).
 	// Must explicitly pass --listen-addr=0.0.0.0 to bind all interfaces.
-	addr := "127.0.0.1:" + *port
-	if *listenAddr != "" {
-		addr = *listenAddr + ":" + *port
-	}
-
-	httpServer := &http.Server{
-		Addr:              addr,
-		Handler:           srv,
-		ReadTimeout:       10 * time.Second,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
+	addr := listenAddress(*listenAddr, *port)
+	httpServer := newHTTPServer(addr, srv)
 
 	// Graceful shutdown
 	done := make(chan os.Signal, 1)
@@ -272,6 +292,7 @@ func main() {
 	log.Println("shutting down...")
 	reconcilerCancel()
 	gcCancel()
+	meterCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

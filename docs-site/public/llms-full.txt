@@ -1,0 +1,2235 @@
+# agentic-hosting — full documentation
+> Generated from `docs-site/src/content/docs` for LLM context. Canonical routes live in `internal/api/server.go`.
+This file is the complete docs dump. Prefer `llms.txt` for navigation and `skills/agentic-hosting/SKILL.md` for an end-to-end operator runbook.
+
+
+# Overview
+
+# Hosting infrastructure built for AI agents
+
+**agentic-hosting** is a self-hosted PaaS designed to be operated by AI agents over HTTP. You install a single Go binary (`ah`) on a Linux server. Agents then deploy containers, build from git, provision Postgres or Redis, and recover from crashes — all through a versioned JSON API.
+
+There is no required dashboard. Humans can use the optional supervisory UI or the `ahc` CLI. Agents use `/v1/`.
+
+## What you get
+
+- **Control plane** — `ah`, a single Go 1.25 binary with CGO (SQLite). Default listen address: `127.0.0.1:8080`.
+- **Isolation** — tenant service containers run under **gVisor (`runsc`)**, with `CapDrop=ALL`, `ReadonlyRootfs`, `no-new-privileges`, and a per-tenant Docker bridge (`ICC=false`, no internet egress).
+- **Builds** — **Nixpacks** source-to-image from HTTPS git URLs on GitHub, GitLab, Bitbucket, sr.ht, or Codeberg. Images land in a loopback registry at `127.0.0.1:5000`.
+- **Ingress** — **Traefik** terminates TLS and routes by host. `ah` writes file-provider config; service containers set `traefik.enable=false` so Docker labels cannot hijack routing.
+- **State** — **SQLite** in WAL mode: `ah.db` (control plane) and a metering DB. Secrets at rest use **AES-256-GCM**.
+- **Self-heal** — a reconciler every **30s**, a garbage collector every **5 min**, a crash-loop circuit breaker, and disk watermarks that block new work at **90%**.
+
+## Design principles (from the code, not a pitch)
+
+1. **Agentic-first** — every mutating endpoint returns JSON. Errors are `{"error":"..."}`. Write routes accept an `Idempotency-Key`.
+2. **One happy path per primitive** — Postgres or Redis, Nixpacks, Traefik. No plugin marketplace.
+3. **Multi-tenant** — API keys are scoped to one tenant. Resources are namespaced. Rate limits are per-tenant and global.
+4. **Secure by default** — gVisor is required in production. The API binds loopback unless you pass `--dev`. HTTPS is enforced unless `--dev` is set.
+
+## Two binaries
+
+| Binary | Role |
+|--------|------|
+| `ah` | Control plane daemon (`serve`), plus `ah backup` and `ah rotate-key` |
+| `ahc` | Client CLI for humans and scripts (`deploy`, `service`, `db`, `env`, `status`, …) |
+
+Install the client with:
+
+```bash
+curl -fsSL https://agentic.hosting/install-cli.sh | bash
+```
+
+## How agents talk to it
+
+```
+Authorization: Bearer <keyID>.<secret>
+```
+
+Public (no API key):
+
+- `GET /v1/system/health` → `{"status":"ok"}`
+- `POST /v1/tenants/register` (bootstrap token)
+- `POST /v1/auth/recover`
+- `POST /v1/tenants/{tenantID}/reactivate`
+- `POST /v1/system/bootstrap-token/validate`
+- `PATCH /v1/tenants/{tenantID}/quotas`
+
+Everything else requires a tenant API key. See [Registration & API keys](./auth/) and the [REST API](./api/).
+
+## Production shape
+
+```
+Internet
+   │
+Traefik :80 / :443
+   │
+   ├── ah API          127.0.0.1:8080
+   ├── Service A       gVisor, tenant bridge
+   └── Service B       gVisor, tenant bridge
+
+SQLite + master.key    /var/lib/ah/
+Private registry       127.0.0.1:5000
+```
+
+## Give this to your agent
+
+One file is enough to onboard:
+
+- [`llms.txt`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt) — llmstxt.org index
+- [Operator skill](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md) — install, register, deploy, databases, logs, API
+
+Details: [Give this to your agent](./for-agents/).
+
+The public site is [agentic.hosting](https://agentic.hosting). Source is [github.com/dennisonbertram/agentic-hosting](https://github.com/dennisonbertram/agentic-hosting).
+
+<a href="https://github.com/dennisonbertram/agentic-hosting">★ Star on GitHub</a> if you run this or send agents to it.
+
+
+# Give this to your agent
+
+# Give this to your agent
+
+Paste one of these URLs into an agent chat. The agent can fetch the file and operate agentic-hosting without a dashboard.
+
+## Index (`llms.txt`)
+
+[llmstxt.org](https://llmstxt.org/) format: project summary plus links to every docs page.
+
+```
+https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt
+```
+
+On this docs site (after GitHub Pages is enabled):
+
+```
+https://dennisonbertram.github.io/agentic-hosting/llms.txt
+```
+
+On the production website (baked into the nginx image):
+
+```
+https://agentic.hosting/llms.txt
+https://agentic.hosting/docs/llms.txt
+```
+
+Full docs dump (every page + API reference, one markdown file):
+
+```
+https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms-full.txt
+```
+
+## Standalone skill
+
+Agent Skills / Claude Code format (`name` + `description` frontmatter). Self-contained: install the server, register a tenant, deploy from git, add Postgres/Redis, read logs, and the live `/v1/` map.
+
+```
+https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md
+```
+
+Copy into Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills/agentic-hosting
+curl -fsSL https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md \
+  -o ~/.claude/skills/agentic-hosting/SKILL.md
+```
+
+The in-repo Claude skill and `/ah-*` slash commands are the same API, split for Claude Code:
+
+- `.claude/skills/agentic-hosting/SKILL.md`
+- `.claude/commands/ah-deploy.md` (and `ah-status`, `ah-db`, `ah-logs`, `ah-register`, `ah-snapshot`)
+- `curl -fsSL https://agentic.hosting/install-skill.sh | bash`
+
+## What the agent will do
+
+1. Install `ah` on Ubuntu (Docker, gVisor, Nixpacks, Traefik, systemd)
+2. Read `AH_BOOTSTRAP_TOKEN` from `/etc/default/ah`
+3. `POST /v1/tenants/register` → save `api_key` (shown once)
+4. Deploy with `source_type` / `source_url` / `source_ref` (not `git_url` / `branch`)
+5. Provision Postgres or Redis and wire `DATABASE_URL` / `REDIS_URL`
+6. Stream `GET /v1/services/{id}/logs`
+
+Source of truth: `internal/api/server.go`. Stale vs correct: [CORRECTIONS.md](https://github.com/dennisonbertram/agentic-hosting/blob/main/docs-site/CORRECTIONS.md).
+
+
+# Why it exists
+
+# Why it exists
+
+Standard hosting platforms assume a human at a keyboard: HTML error pages, OAuth consent screens, dashboards that must be clicked. Agents fail those surfaces in predictable ways.
+
+agentic-hosting was built so an agent can own the full lifecycle of a service without a human in the loop.
+
+## What breaks agents on typical clouds
+
+| Failure mode | What `ah` does instead |
+|--------------|------------------------|
+| HTML 500 pages | Every handler writes JSON. Errors are `{"error":"<message>"}` via `httpx.WriteError` / `apierr.WriteAPIError`. |
+| Duplicate creates on retry | Authenticated mutating routes run through an idempotency store keyed by tenant + method + path + `Idempotency-Key`. TTL is **10 minutes**. Body hash mismatches return 409. |
+| Crash loops at machine speed | Reconciler opens a circuit after **5 crashes in 600 seconds**, stops the container, and backs off 30m → 1h → 4h. |
+| Unbounded blast radius | Keys belong to one tenant. Max **20** active keys. Registration requires a bootstrap token (unless `--dev --open-registration`). |
+| Disk filled by a runaway deploy | `diskcheck.CheckAll` on `/var/lib/ah` and `/var/lib/docker`: warn at **80%**, **block at 90%** on deploy, build, database create, kanban create, and backup. |
+
+These are implemented behaviors, not slogans. The circuit math lives in `internal/reconciler`. Idempotency TTL is `idempotencyTTL = 10 * time.Minute` in `internal/middleware/idempotency.go`. Disk thresholds are hardcoded `80, 90` at every call site.
+
+## Who it is for
+
+- An operator who will run **one Linux server** (the documented production host is a Hetzner box) and hand agents an API key.
+- Agents that can call HTTP, store a `keyID.secret`, and poll `status` until `running` or `failed`.
+- Humans who want a supervisory view — the repo ships `website/dashboard/` and `GET /v1/activity`, but they are optional.
+
+## Who it is not for
+
+- Multi-region or multi-node control planes. State is local SQLite. Horizontal scaling is explicitly a gap (`docs/architecture/horizontal-scaling-gap-analysis.md`).
+- Billing. Metering tables and `GET /v1/tenant/usage/metrics` exist; nothing invoices from them.
+- Arbitrary git hosts. Builds accept only `github.com`, `gitlab.com`, `bitbucket.org`, `sr.ht`, and `codeberg.org` over HTTPS.
+
+## Economics the code actually encodes
+
+There is no platform fee in the binary. Quotas are per-tenant rows in `tenant_quotas`:
+
+| Quota | Default |
+|-------|---------|
+| Services | 5 |
+| Databases | 3 |
+| Environments | 2 |
+| Memory | 2048 MB |
+| CPU | 2.0 cores |
+| Disk | 20 GB |
+| API rate limit column | 100 |
+| Concurrent builds (quota column) | 3 |
+| Env vars per service | 50 |
+| API keys | 20 (enforced in `handleKeyCreate`, not the quota table) |
+| Tenants on the instance | 1000 active |
+
+Operators raise quotas with `PATCH /v1/tenants/{tenantID}/quotas` and a bootstrap token.
+
+## Related reading
+
+- [Architecture](./architecture/) — how the pieces connect
+- [Security model](./security/) — isolation layers
+- [Roadmap](./roadmap/) — what the code does **not** do yet
+
+
+# Architecture
+
+# Architecture
+
+`ah` is the control plane. Docker, gVisor, Traefik, Nixpacks, and SQLite are the runtime. Nothing else is required at process start besides a master key and (in production) a bootstrap token.
+
+## Process map
+
+```
+[Traefik]  TLS + Host routing (file provider + Docker provider for Traefik itself)
+    │
+[ah HTTP, default 127.0.0.1:8080]
+    ├── chi v5 router
+    ├── auth middleware (HMAC-SHA256 API keys, 30s cache, 5000 entries)
+    ├── per-tenant rate limit (100 rps, burst 200)
+    ├── global rate limit (500 rps, burst 1000)
+    ├── idempotency cache (10 min, 8KB stored body)
+    └── handlers under /v1/
+
+[Reconciler]     30s   DB desired state ↔ Docker
+[GC]             5min  orphan containers, volumes, images, build dirs, snapshots
+[Warm pool]      60s   pre-warmed environment containers (size 2, max 6)
+```
+
+`cmd/ah/main.go` starts the HTTP server, then the reconciler, then GC. The warm pool goroutine starts with the environment manager.
+
+## The `ah` binary
+
+Entry point: `cmd/ah/main.go`.
+
+| Subcommand | What it does |
+|------------|----------------|
+| `ah` / `ah serve` | HTTP API + background loops |
+| `ah backup [db-path]` | WAL-safe `VACUUM INTO` + gzip, keep last 10 |
+| `ah rotate-key` | Re-encrypt secrets with a new AES-256-GCM master key |
+
+Flags (serve):
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--port` | `8080` | Combined with listen address |
+| `--listen-addr` | empty → `127.0.0.1` | Non-loopback is **fatal** unless `--dev` |
+| `--db-path` | `/var/lib/ah/ah.db` | From `AH_DB_PATH` / `AH_DATA_DIR` |
+| `--master-key-path` | `/var/lib/ah/master.key` | 64 hex chars (32 bytes) |
+| `--base-domain` | `AH_BASE_DOMAIN` or empty | Public URLs become `https://{dns_label}.{base}` |
+| `--dev` | false | Disables HTTPS enforcement; gVisor missing is a warning, not fatal |
+| `--open-registration` | false | Requires `--dev`. Skips bootstrap token |
+
+Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_PATH`, `AH_MASTER_KEY_PATH`, `AH_BUILD_DIR`, `AH_NIXPACKS_PATH`, `AH_DOCKER_DATA_DIR`, `AH_BASE_DOMAIN`, `AH_TRAEFIK_CONFIG_DIR`, `AH_KANBAN_PORT_START` / `END` (7100–9100), `AH_SNAPSHOT_MAX_PER_SERVICE` (10), `AH_SNAPSHOT_MAX_AGE` (30 days), `AH_BOOTSTRAP_TOKEN` (comma-separated, each ≥32 chars).
+
+`AH_BOOTSTRAP_TOKEN` is required unless `--dev --open-registration`.
+
+## Docker + gVisor
+
+`internal/docker/client.go` creates service containers with:
+
+- `Runtime: "runsc"`
+- `PidsLimit: 256`
+- `MemorySwap = Memory` (no extra swap)
+- Default 512 MB / 1 CPU unless tenant limits say otherwise
+- `CapDrop: ALL`, `SecurityOpt: no-new-privileges`, `ReadonlyRootfs: true`
+- tmpfs on `/tmp` (64m), `/var/run`, `/var/tmp`, `/run` (16m each), `noexec,nosuid`
+- `RestartPolicy: unless-stopped`
+- Network: per-tenant bridge `ah-tenant-{tenantID}`
+- Label `traefik.enable=false` (routing is file-provider only)
+
+Production **refuses to start** if `runsc` is not a configured Docker runtime (`VerifyGVisorRuntime`). `--dev` logs a warning and continues.
+
+Default container port if the service omits one: **8000**.
+
+## Traefik
+
+- Network name expected by ops docs and code comments: `traefik-public`
+- Dynamic config directory: `AH_TRAEFIK_CONFIG_DIR` (default `/etc/traefik/dynamic`)
+- `ah` writes host routes for services and environment previews
+- Without `--base-domain`, URLs are `http://{serviceID}.localhost` and localhost file routes are generated
+- With `--base-domain example.com`, URLs are `https://{dns_label}.example.com`
+- `dns_label` is a normalized service name, globally unique, max 63 chars
+- Reserved labels: `api`, `admin`, `dashboard`, `traefik`, `www`, `mail`, `smtp`, `health`, `status`, `metrics`, `grafana`, `prometheus`, `registry`, `auth`, `login`, `oauth`
+
+The API itself must sit behind Traefik on loopback. `requireHTTPS` only trusts `X-Forwarded-Proto: https` from a loopback `RemoteAddr`. Non-loopback requests have `X-Forwarded-*` and `X-Real-Ip` stripped.
+
+## Nixpacks
+
+`internal/builder` clones the repo (SSRF-constrained to the allowlisted hosts), runs `nixpacks plan`, builds an image, and pushes to `127.0.0.1:5000/ah/{serviceID}:{buildID}` (see `builds.ImageTag`). A successful build calls the service manager's deploy function.
+
+Global in-flight build slots: **10** (`buildQueue` buffer in `internal/builds`). Quota column `max_builds_concurrent` defaults to 3 per tenant in the schema.
+
+Build logs cap at **5 MB**, then a 500-line tail ring is kept.
+
+## SQLite
+
+Two files under `/var/lib/ah/` by default:
+
+| File | Purpose |
+|------|---------|
+| `ah.db` | Tenants, keys, quotas, services, env, builds, databases, deployments, snapshots, kanbans, environments, warm pool, previews |
+| `{stem}-metering.db` | `usage_events` + `usage_daily` (backup looks for `ah-metering.db` next to `ah.db`) |
+
+Migrations live in `internal/db/migrations/` (`state_001` … `state_019`, `metering_001`). WAL mode.
+
+`go-sqlite3` requires **CGO**. Cross-compiling with `CGO_ENABLED=0` produces a binary that will not run correctly.
+
+## Request path
+
+1. Body cap **1 MB** (`MaxBytesReader`)
+2. Global throttle **200** in-flight (`chi/middleware.Throttle`)
+3. Strip untrusted forwarded headers
+4. HTTPS check (unless `--dev`)
+5. Auth (Bearer `keyID.secret` → HMAC-SHA256 verify against stored hash)
+6. Per-tenant + global token buckets
+7. Idempotency (mutating authenticated routes; **not** `POST /v1/environments/{id}/exec`)
+8. 30s timeout on short routes; logs, DB create, kanban create, environment create/sync skip that timeout
+
+## Packages that matter
+
+| Path | Role |
+|------|------|
+| `internal/api` | HTTP surface |
+| `internal/services` | Service lifecycle + deploy |
+| `internal/builder` / `internal/builds` | Nixpacks pipeline |
+| `internal/databases` | Postgres 15 / Redis 7 |
+| `internal/environments` | Instant workspaces + warm pool |
+| `internal/reconciler` | 30s sync + circuit breaker |
+| `internal/gc` | 5 min cleanup |
+| `internal/diskcheck` | 80 / 90 watermarks |
+| `internal/crypto` | AES-GCM, HMAC API keys, bcrypt (passwords) |
+| `internal/middleware` | Auth, rate limit, idempotency |
+
+## What is not in the runtime
+
+- No Prometheus exporter
+- No multi-node consensus
+- No mTLS between tenant services (they cannot reach each other on the tenant bridge anyway: `ICC=false`)
+
+
+# Install & quickstart
+
+# Install & quickstart
+
+These steps match `cmd/ah`, `deploy/ah.service`, and `internal/config`. Paths are `/var/lib/ah` and `/etc/default/ah` (not `paasd`).
+
+## Requirements
+
+- Linux (Ubuntu 22.04+ is what the skill runbook assumes)
+- Docker with the `runsc` runtime registered
+- Go 1.25+ **with CGO** to build `ah` (the CLI `ahc` does not need CGO)
+- Nixpacks on `PATH` (default `/usr/local/bin/nixpacks`)
+- Traefik on Docker network `traefik-public`
+- Loopback registry on `127.0.0.1:5000` if you use git builds
+- `AH_BOOTSTRAP_TOKEN` ≥ 32 characters
+- `/var/lib/ah/master.key` — exactly 64 lowercase hex characters (32 bytes)
+
+## 1. Docker + gVisor
+
+```bash
+curl -fsSL https://get.docker.com | sh
+
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+sudo apt-get update && sudo apt-get install -y runsc
+
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc"
+    }
+  },
+  "default-address-pools": [{"base":"172.20.0.0/14","size":24}]
+}
+EOF
+sudo systemctl restart docker
+docker info 2>/dev/null | grep runsc
+```
+
+## 2. Go and Nixpacks
+
+```bash
+wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz -O /tmp/go.tar.gz
+sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+# new shells:
+export PATH=$PATH:/usr/local/go/bin
+
+curl -sSL https://nixpacks.com/install.sh | bash
+```
+
+Build **on the server**. `CGO_ENABLED=0` is not supported for `ah`.
+
+## 3. Traefik + registry
+
+```bash
+docker network create --driver bridge traefik-public
+
+# Traefik needs a static config and a dynamic dir that ah can write.
+# See deploy/traefik/ in the repo for the Let's Encrypt layout.
+
+docker run -d --name paas-registry --restart unless-stopped \
+  -p 127.0.0.1:5000:5000 \
+  -v /var/lib/ah/registry:/var/lib/registry \
+  registry:2
+```
+
+## 4. Build and install `ah`
+
+```bash
+git clone https://github.com/dennisonbertram/agentic-hosting /agentic-hosting
+cd /agentic-hosting
+CGO_ENABLED=1 go build -o bin/ah ./cmd/ah
+sudo cp bin/ah /usr/local/bin/ah
+
+sudo mkdir -p /var/lib/ah/builds /var/lib/ah/backups
+sudo head -c 32 /dev/urandom | xxd -p -c 64 | sudo tee /var/lib/ah/master.key >/dev/null
+sudo chmod 600 /var/lib/ah/master.key
+
+# Bootstrap token (save this; you need it to register tenants)
+openssl rand -hex 32
+```
+
+```bash
+sudo tee /etc/default/ah <<EOF
+AH_BOOTSTRAP_TOKEN=<paste-64-hex-token>
+# optional:
+# AH_BASE_DOMAIN=apps.example.com
+# AH_BOOTSTRAP_TOKEN=new_token,old_token
+EOF
+sudo chmod 600 /etc/default/ah
+
+sudo cp deploy/ah.service /etc/systemd/system/ah.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ah
+```
+
+The unit runs `ah serve --port 8080 --db-path /var/lib/ah/ah.db --master-key-path /var/lib/ah/master.key` as user `ah` with Docker socket access. Create that system user before enabling the unit.
+
+Health check from the host (HTTPS middleware only trusts loopback + `X-Forwarded-Proto`):
+
+```bash
+curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
+# {"status":"ok"}
+```
+
+## 5. Dev mode (laptop)
+
+```bash
+make build
+AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum ./bin/ah --dev --port 8080
+# or open registration (no bootstrap token):
+./bin/ah --dev --open-registration --port 8080
+```
+
+`--dev` turns off HTTPS enforcement. gVisor missing is a warning. `--open-registration` without `--dev` is a fatal error.
+
+## 6. Register a tenant and deploy
+
+```bash
+export AH_URL=https://your-domain   # or http://127.0.0.1:8080 in --dev
+export AH_BOOTSTRAP_TOKEN=...
+
+curl -s -X POST "$AH_URL/v1/tenants/register" \
+  -H "X-Bootstrap-Token: $AH_BOOTSTRAP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-agent","email":"agent@example.com"}'
+# {"tenant_id":"...","api_key":"keyid.secret"}   ← shown once
+```
+
+```bash
+export AH_KEY='keyid.secret'
+
+curl -s -X POST "$AH_URL/v1/services" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"name":"web","image":"nginx:alpine","port":80}'
+```
+
+Or with the CLI:
+
+```bash
+curl -fsSL https://agentic.hosting/install-cli.sh | bash
+ahc configure --url "$AH_URL" --key "$AH_KEY"
+ahc deploy nginx:alpine web --port 80
+ahc status
+```
+
+Git deploys are a create + build. See [Deploy from git](./deploy/).
+
+## File layout
+
+```
+/var/lib/ah/
+├── ah.db
+├── ah-metering.db      # created alongside state
+├── master.key          # chmod 600
+├── builds/
+├── backups/            # ah backup
+└── registry/           # if you bind-mount it here
+```
+
+## Claude Code skill (optional)
+
+```bash
+curl -fsSL https://agentic.hosting/install-skill.sh | bash
+# installs SKILL.md + /ah-deploy /ah-status /ah-db /ah-logs /ah-register /ah-snapshot
+```
+
+Details: [Claude Code skill](./claude-code/).
+
+
+# Registration & API keys
+
+# Registration & API keys
+
+Access is a **tenant** plus one or more **API keys**. Keys are `keyID.secret`. The secret is returned once. The database stores an HMAC-SHA256 of the full key using the server master key (`internal/crypto.HashAPIKey`). Verification is constant-time (`hmac.Equal`).
+
+bcrypt is used for **passwords** (kanban / DB credential hashing helpers), not for API keys.
+
+## Bootstrap token
+
+Production will not start without `AH_BOOTSTRAP_TOKEN` unless you pass `--dev --open-registration`.
+
+- Minimum length **32** characters per token
+- Comma-separated list is allowed: `AH_BOOTSTRAP_TOKEN=new,old` — both work during rotation
+- Compared with HMAC (no length leak) in `validateBootstrapToken`
+- Sent as header **`X-Bootstrap-Token`** (not `Authorization`)
+
+Validate without registering:
+
+```bash
+curl -s -X POST "$AH_URL/v1/system/bootstrap-token/validate" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\":\"$AH_BOOTSTRAP_TOKEN\"}"
+# → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
+```
+
+The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used by register). Recover / reactivate / quota patch take `X-Admin-Token` when `AH_ADMIN_TOKEN` is set.
+
+## Admin token
+
+`AH_ADMIN_TOKEN` (comma-separated, 32+ chars) authorizes operator-only routes: `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `PATCH /v1/tenants/{id}/quotas`. Send `X-Admin-Token` (or the same value in `X-Bootstrap-Token`). Once configured, a valid bootstrap token on those routes returns **403**. If unset, bootstrap tokens still work (deprecated; startup warning).
+
+## Register
+
+```
+POST /v1/tenants/register
+X-Bootstrap-Token: <token>
+{"name":"my-agent","email":"agent@example.com"}
+```
+
+Rules from `handleTenantRegister`:
+
+- Name 2–128 characters
+- Email must match `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, max 256
+- Max **1000** active tenants
+- Duplicate name/email → **422** (`registration failed, please check your details and try again`)
+- Rate limit: **5 / IP / hour** and **20 / hour global** (same limiter as recover, reactivate, quota patch, bootstrap validate)
+
+Response:
+
+```json
+{"tenant_id":"<hex>","api_key":"<keyID>.<secret>"}
+```
+
+`--dev --open-registration` skips the bootstrap header. Anyone who can reach the port can create tenants.
+
+## Authenticated requests
+
+```
+Authorization: Bearer <keyID>.<secret>
+```
+
+Auth middleware (`internal/middleware/auth.go`):
+
+- Looks up the key by ID, checks not revoked / not expired / tenant `active`
+- Verifies HMAC
+- Caches the lookup **30 seconds** (max 5000 entries) so revocation can lag up to 30s
+- Samples `last_used_at` at most every 5 minutes
+
+Suspended tenants cannot authenticate.
+
+## Create, list, revoke
+
+```
+POST   /v1/auth/keys     {"name":"ci","expires_in":2592000}
+GET    /v1/auth/keys
+DELETE /v1/auth/keys/{keyID}
+```
+
+- `name` defaults to `unnamed`
+- `expires_in` is seconds, must be > 0, max ~10 years
+- Response field is **`api_key`** (not `key`)
+- List never returns the secret; it returns `id`, `name`, `prefix`, `created_at`, `last_used_at`, `expires_at`
+- Max **20** non-revoked keys per tenant → **409** `quota exceeded: maximum API keys reached...`
+
+Creating a key invalidates the auth cache for that tenant.
+
+## Recover lost keys
+
+When every key is gone:
+
+```
+POST /v1/auth/recover
+X-Admin-Token: <admin-token>
+{"email":"agent@example.com"}
+```
+
+Email must match the tenant. Issues a new key. Same registration rate limiter.
+
+## Reactivate a suspended tenant
+
+`DELETE /v1/tenant` soft-deletes: status becomes suspended and services/DBs/kanbans/builds are stopped.
+
+```
+POST /v1/tenants/{tenantID}/reactivate
+X-Admin-Token: <admin-token>
+```
+
+Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
+
+## Tenant self-service
+
+| Method | Path | Notes |
+|--------|------|--------|
+| GET | `/v1/tenant` | `id`, `name`, `email`, `status`, timestamps |
+| PATCH | `/v1/tenant` | **`name` only** (2–128 chars). Email is not updatable here. |
+| DELETE | `/v1/tenant` | Suspend + stop resources |
+| GET | `/v1/tenant/usage` | Used/max for services, databases, API keys; memory/cpu/disk/rate_limit quotas |
+| GET | `/v1/tenant/usage/metrics` | Metering rollups (`period=hourly\|daily`, `since`/`until` RFC3339) |
+
+Operator quota changes:
+
+```
+PATCH /v1/tenants/{tenantID}/quotas
+X-Admin-Token: <admin-token>
+```
+
+Same bootstrap rate limiter.
+
+## `ahc` equivalents
+
+```bash
+ahc register --name my-agent --email agent@example.com --save
+ahc key create --name ci
+ahc key list
+ahc key revoke <keyID>
+ahc recover --email agent@example.com
+```
+
+Config file expected by `ahclient.LoadConfig` is `~/.ah/config.json` with `url` and `key`.
+
+
+# Deploy from git
+
+# Deploy from git
+
+Two deploy paths exist:
+
+1. **Image** — `POST /v1/services` with `"image"` (Docker Hub name or `127.0.0.1:5000/...` / `localhost:5000/...`). Deploy starts asynchronously (10 minute timeout).
+2. **Git** — create a service with a placeholder image (`ahc` sends `"pending"` — `image` is required), then `POST /v1/services/{id}/builds` with `source_type: "git"`.
+
+There is no `git_url` / `branch` field on the build API. The struct is:
+
+```json
+{
+  "source_type": "git",
+  "source_url": "https://github.com/org/repo",
+  "source_ref": "main"
+}
+```
+
+`source_type` must be `git`. `source_ref` defaults to **`main`**. SHA refs are allowed (sanitized, then clone + checkout).
+
+## Allowed git hosts
+
+From `allowedGitHosts` in `internal/builds`:
+
+- `github.com`
+- `gitlab.com`
+- `bitbucket.org`
+- `sr.ht`
+- `codeberg.org`
+
+Also enforced:
+
+- HTTPS only
+- No userinfo in the URL
+- URL max 2048 chars
+- Ref max 256 chars, charset `A-Za-z0-9._/-`
+
+This is SSRF / DNS-rebinding protection, not a preference list.
+
+## Sequence
+
+```bash
+# 1. Create the service (`image` is required; "pending" is the ahc placeholder)
+curl -s -X POST "$AH_URL/v1/services" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"name":"web","image":"pending","port":3000}'
+
+# 2. Start the build
+curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/builds" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}'
+# 202 {"build_id":"...","status":"pending","image":"127.0.0.1:5000/..."}
+
+# 3. Stream logs (no 30s request timeout on this route)
+curl -sN -H "Authorization: Bearer $AH_KEY" \
+  "$AH_URL/v1/services/$SERVICE_ID/builds/$BUILD_ID/logs?follow=true"
+```
+
+On success the build manager calls `DeployImage` and the service moves to running (or failed). Poll `GET /v1/services/{id}`.
+
+Stuck `deploying` longer than **10 minutes** is marked `failed` by the reconciler.
+
+## Images ah will accept
+
+`services.ValidateImage`:
+
+- Docker Hub: `name`, `name:tag`, `org/name:tag` (lowercase path rules)
+- Local registry: `127.0.0.1:5000/...` or `localhost:5000/...` with at least two path segments after the host
+
+Arbitrary registries are rejected.
+
+## CLI and skill shortcuts
+
+```bash
+ahc deploy https://github.com/org/repo web --port 3000
+# or
+ahc deploy nginx:alpine web --port 80
+```
+
+`ahc deploy` treats `http://` or `https://` as git. The Claude command `/ah-deploy` does the same, then streams build logs.
+
+## Redeploy
+
+```
+POST /v1/services/{id}/redeploy
+```
+
+Starts a new build from the **last** git `source_url` / `source_ref` recorded for that service. Returns the new build object.
+
+## Cancel
+
+```
+DELETE /v1/services/{id}/builds/{buildID}
+```
+
+Tenant suspend also runs `CancelAllForTenant` for pending/running builds.
+
+## Concurrency and disk
+
+- In-flight build slots: **10** process-wide. A full queue fails the new build with **409** `build queue full; try again later`.
+- Disk: warn 80%, block 90% on `/var/lib/ah` and `/var/lib/docker` before the build starts.
+- Logs: 5 MB then last 500 lines kept.
+
+## List
+
+```
+GET /v1/services/{id}/builds
+GET /v1/builds?limit=100          # tenant-wide, max 200
+GET /v1/services/{id}/builds/{id}
+GET /v1/services/{id}/deployments
+POST /v1/services/{id}/deployments/{deploymentID}/cancel
+```
+
+## URLs after deploy
+
+| Mode | URL |
+|------|-----|
+| No `--base-domain` | `http://{serviceID}.localhost` |
+| `--base-domain apps.example.com` | `https://{dns_label}.apps.example.com` |
+
+`dns_label` is stored at create time and does not change if you later restart `ah` with a different `--base-domain`. Reserved names are rejected (see [Architecture](./architecture/)). Labels are globally unique across tenants.
+
+## Snapshots (fork, not a build)
+
+```
+POST /v1/services/{id}/snapshots   {"name":"before"}
+POST /v1/services?from_snapshot={snapshotID}   {"name":"fork"}
+```
+
+Copies image, port, and env. No Nixpacks run. Still goes through the async deploy path.
+
+
+# Postgres & Redis
+
+# Managed Postgres and Redis
+
+`POST /v1/databases` provisions one engine per type: **Postgres** or **Redis**. There is no MySQL, no custom image, no HA.
+
+```json
+{"name":"mydb","type":"postgres"}
+```
+
+`type` must be `postgres` or `redis`. Names are DNS-safe (alnum + hyphen, start/end alnum). Default quota: **3** databases per tenant (non-`failed` rows count).
+
+Creation is a long route (no 30s chi timeout). Use an `Idempotency-Key`. Disk check 80/90 runs first.
+
+## Endpoints
+
+| Method | Path | Result |
+|--------|------|--------|
+| POST | `/v1/databases` | Provision; connection string included on create |
+| GET | `/v1/databases` | Paginated list |
+| GET | `/v1/databases/{dbID}` | Record without forcing a decrypt |
+| GET | `/v1/databases/{dbID}/connection-string` | `{"connection_string":"..."}` — **AUDIT** logged |
+| DELETE | `/v1/databases/{dbID}` | Container + volume wiped |
+
+Passwords and connection strings are AES-256-GCM encrypted at rest (tenant-derived key material via the master key).
+
+## Wiring a service
+
+The platform does **not** auto-inject `DATABASE_URL`. You set env and restart:
+
+```bash
+CONN=$(curl -s -H "Authorization: Bearer $AH_KEY" \
+  "$AH_URL/v1/databases/$DB_ID/connection-string" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["connection_string"])')
+
+curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/env" \
+  -H "Authorization: Bearer $AH_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"DATABASE_URL\":\"$CONN\"}"
+
+curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/restart" \
+  -H "Authorization: Bearer $AH_KEY"
+```
+
+Restart **recreates** the container so new env vars take effect.
+
+`/ah-db` and `scripts/db-provision.sh` do this pair of calls. `ahc db` is the CLI.
+
+## Runtime facts
+
+- Containers use gVisor (`runsc`)
+- Host bind is loopback-oriented in the manager; tenants reach DBs via the connection string the API returns
+- Ports are unique (migration `state_006`)
+- Readiness is protocol-level (Postgres/Redis), not “TCP accepted”
+- Tenant suspend/delete stops database containers
+- DELETE wipes volume data before removal
+- GC looks for `ah-db-*` volumes not referenced in the DB (age > 10 minutes)
+
+Stale `provisioning` rows are marked `failed` and cleaned on manager startup (`ReconcileStale`).
+
+## CLI
+
+```bash
+ahc db create --name mydb --type postgres
+ahc db list
+ahc db connection-string <id>
+ahc db delete <id>
+```
+
+
+# Env vars & secrets
+
+# Env vars and secrets
+
+Service env lives in `service_env`, encrypted with **AES-256-GCM**. The API never writes plaintext to SQLite.
+
+## Set (merge, not replace)
+
+```
+POST /v1/services/{id}/env
+{"DATABASE_URL":"...","NODE_ENV":"production"}
+```
+
+This is an **upsert**. Keys omitted from the body are left alone. There is no replace-all PATCH.
+
+- Max **100 keys per request**
+- Quota `max_env_vars_per_service` defaults to **50**
+- Response notes that a **restart recreates** the container
+
+You can also pass `"env"` on `POST /v1/services` at create time. Same validation.
+
+## Get
+
+```
+GET /v1/services/{id}/env              # values masked
+GET /v1/services/{id}/env?reveal=true  # plaintext — AUDIT logged
+```
+
+## Delete one key
+
+```
+DELETE /v1/services/{id}/env/{key}
+```
+
+## Validation (`services.ValidateEnvVars`)
+
+| Rule | Value |
+|------|--------|
+| Key pattern | `^[a-zA-Z_][a-zA-Z0-9_]{0,127}$` |
+| Value size | ≤ 32,768 bytes |
+| Null bytes | rejected |
+| Denied keys | `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH` (**case-insensitive**) |
+
+Denied keys return 400 with the key name as sent (`env var "path" is not allowed`).
+
+## Master key
+
+`/var/lib/ah/master.key` is 32 raw bytes encoded as 64 hex chars. Lose it and encrypted env + DB passwords are unrecoverable.
+
+Rotate:
+
+```bash
+ah rotate-key --new-key-file /path/to/new.key
+```
+
+`cmd/ah/rotate_key.go` re-encrypts stored secrets. Back up the old key until you confirm services still start.
+
+## Instant environment files
+
+Workspace environments are **not** the same as service env vars.
+
+- `POST /v1/environments/{id}/sync` clones `{"git_url":"https://...","git_ref":"HEAD"}` into the workspace (HTTPS only)
+- There is **no** `GET/PUT /v1/environments/{id}/files` route in `setupRoutes` (older build-log text is stale)
+
+Exec is `POST /v1/environments/{id}/exec` with `{"command":["ls","-la"],"work_dir":"/workspace","timeout":60}`. Exec is **not** idempotent (intentionally excluded from the idempotency middleware group). Timeout max 300s, default 60s.
+
+
+# Reconciliation
+
+# Reconciliation
+
+`internal/reconciler` runs every **30 seconds** (`main.go` passes `30*time.Second`). It is the difference between “SQLite says running” and “Docker has a live container.”
+
+Do not `docker stop` a tenant container and expect it to stay down. If the row is `running`, the next ticks will treat that as a crash.
+
+## What each tick does
+
+### 1. Crash detection
+
+For each service with `status = 'running'` and a `container_id`:
+
+- Missing container → crash
+- Exited / dead → crash
+- Transient inspect errors are **skipped** (not counted)
+
+Crash accounting (two-step SQL, to avoid SQLite evaluation-order bugs):
+
+- Window is **600 seconds**
+- First crash in a new window sets `crash_count = 1`
+- Further crashes in the window increment
+- At **5** crashes inside the window: `circuit_open = 1`, `circuit_open_count++`, `circuit_retry_at` set, container **stopped**
+
+See [Crash-loop & disk guards](./guards/) for backoff.
+
+### 1a. Unhealthy
+
+If Docker reports `unhealthy`, the reconciler stops the container (so `unless-stopped` can start a fresh one) and counts it as a crash. The platform does **not** inject a wget HEALTHCHECK — `RunContainer` comments say healthchecks are left to the image author because many images lack curl/wget.
+
+### 1b. Auto recovery
+
+Rows with `circuit_open = 1` and `circuit_retry_at <= now` are reset: circuit closed, `crash_count = 0`, status `stopped`. A later tick / start path can bring them back.
+
+### 2. Stale deploys
+
+`deploying` longer than **10 minutes** → `failed`.
+
+### 3. Missing containers
+
+A stored `container_id` that Docker cannot find (when not already handled as a running-crash) → `stopped`.
+
+### 4. Split-brain
+
+Containers labeled `ah.service` that are not in the DB are logged for GC.
+
+## Garbage collector
+
+`internal/gc`, interval **5 minutes**, first run delayed **2 minutes** after process start.
+
+Removes (resource age must be **> 10 minutes** to avoid racing deploys):
+
+- Orphan service / database containers
+- Orphan `ah-db-*` volumes
+- Warm-pool leftovers (`ah-pool-` volumes, `ah.type=warm-pool`)
+- Build directories older than **1 hour**
+- Dangling images
+- Snapshots over `--snapshot-max-per-service` (default 10) or `--snapshot-max-age` (default 30 days)
+
+## Warm pool (environments)
+
+Not the reconciler. `environments.PoolManager` refills every **60s**, pool size **2** per enabled template, max **6** total. Default / node / python are pooled; **go is cold-start**. Ghost rows pointing at missing containers are pruned on refill.
+
+## Implications for operators
+
+| Action | Use |
+|--------|-----|
+| Stop a service | `POST /v1/services/{id}/stop` |
+| Pause crash loops | Wait for circuit, or `POST .../reset` after you fix the app |
+| Delete leftovers | API delete + wait for GC (10 min age gate) |
+| Inspect drift | `GET /v1/system/health/detailed?fresh=true` and `docker ps` |
+
+
+# Crash-loop & disk guards
+
+# Crash-loop and disk guards
+
+These exist because agents retry faster than humans.
+
+## Circuit breaker
+
+Implemented in `internal/reconciler` (not a library).
+
+| Parameter | Value |
+|-----------|--------|
+| Crash window | 600 seconds |
+| Open threshold | `crash_count >= 5` inside the window |
+| On open | Container stopped, `circuit_open = 1` |
+| Manual reset | `POST /v1/services/{id}/reset` |
+
+Backoff (`circuitRetryBackoff`):
+
+| `circuit_open_count` | Wait |
+|----------------------|------|
+| 1 (and 0 treated as 1) | 30 minutes |
+| 2 | 1 hour |
+| 3+ | 4 hours |
+
+When `circuit_retry_at` elapses, the reconciler clears the circuit and sets status `stopped` so a subsequent start can happen. If the app still crash-loops, the circuit opens again and the count escalates.
+
+**Do not script reset in a tight loop.** Reset is for “we fixed the binary / env.”
+
+Statuses you will see: `crashed`, and after enough failures the circuit columns flip. Some docs say `circuit_open` as a status string; the DB also has a boolean `circuit_open` column. Read both `status` and `circuit_open` on `GET /v1/services/{id}`.
+
+## Disk watermarks
+
+`internal/diskcheck.Check(path, warnPct, blockPct)`:
+
+- Used % ≥ warn → log warning, allow
+- Used % ≥ block → return error, caller fails the operation
+- Total bytes 0 → allow (cannot measure)
+
+Every production call site uses **80 / 90** on `/var/lib/ah` and `/var/lib/docker` (or the backup directory):
+
+- Service deploy (`services.go`, `deploy_image.go`)
+- Build start
+- Database create
+- Kanban create
+- `ah backup`
+
+`GET /v1/system/health/detailed` reports `disk` (`/var/lib/ah`) and `docker_disk` (`/var/lib/docker`). If either `used_percent > 90`, overall `status` becomes `degraded`. Pass `?fresh=true` to skip the 30s cache.
+
+Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `degraded` >200.
+
+## Other backpressure
+
+| Limit | Value |
+|-------|--------|
+| Global in-flight HTTP | 200 (`Throttle`) |
+| Request body | 1 MB |
+| Concurrent image deploys | 5 (`maxConcurrentDeploys`) |
+| Queued deploys | 20 |
+| Build slots | 10 |
+| PIDs per service container | 256 |
+| Default memory / CPU | 512 MB / 1 CPU |
+
+When disk is over 90%, expect **503** or a wrapped `disk check:` error on create/deploy/build — not a silent queue.
+
+
+# Rate limits
+
+# Rate limits
+
+Two layers sit on **authenticated** routes after auth middleware.
+
+## Per tenant
+
+`middleware.NewRateLimiter(100, 200)` — token bucket **100 requests/second**, burst **200**, keyed by tenant ID.
+
+Headers on every authenticated response:
+
+- `X-RateLimit-Limit`
+- `X-RateLimit-Remaining`
+
+On exceed: **429** `{"error":"rate limit exceeded"}` plus `Retry-After`.
+
+If tenant ID is missing on an authenticated route, the limiter **fails closed** with 500 (should not happen).
+
+LRU cap 10_000 tenant buckets; idle entries dropped after 1 hour (cleanup every 5 minutes).
+
+## Global
+
+`middleware.NewGlobalRateLimiter(500, 1000)` — **500 rps**, burst **1000**, process-wide.
+
+Same 429 + `Retry-After` behavior.
+
+## Registration / bootstrap
+
+`registrationLimiter` in `internal/api/tenants.go`:
+
+| Scope | Limit | Window |
+|-------|--------|--------|
+| Per client IP | 5 | 1 hour |
+| Global | 20 | 1 hour |
+
+Applied to:
+
+- `POST /v1/tenants/register`
+- `POST /v1/auth/recover`
+- `POST /v1/tenants/{id}/reactivate`
+- `PATCH /v1/tenants/{id}/quotas`
+- `POST /v1/system/bootstrap-token/validate`
+
+IP comes from `trustedRealIP`: `X-Real-Ip` **only** if `RemoteAddr` is loopback (Traefik). `X-Forwarded-For` is not trusted.
+
+Invalid bootstrap tokens **still consume** the limiter (brute-force resistance).
+
+## Quota vs 429
+
+`apierr.QuotaExceeded` is **409 Conflict**, not 429. Hitting `max_services` is a resource conflict. Hammering the API is a rate limit.
+
+The `tenant_quotas.api_rate_limit` column defaults to 100 and is **exposed** on `GET /v1/tenant/usage`, but the HTTP limiter is constructed with the constants above — it does not read that column per request.
+
+## Idempotency is not a rate limit
+
+`Idempotency-Key` dedups retries for **10 minutes**. Same key + same tenant + method + path + body → replayed response. Different body → **409**. Stored response cap 8 KB. Exec is excluded.
+
+
+# Backups
+
+# Backups
+
+```bash
+ah backup
+# optional path:
+ah backup /var/lib/ah/ah.db
+```
+
+Implementation: `cmd/ah/backup.go`.
+
+## Procedure
+
+1. Destination dir: `{dirname(db)}/backups` (mode 0700)
+2. Disk check on that dir at 80 / 90
+3. Open the state DB read-only, WAL
+4. `VACUUM INTO` a temp file (5 minute timeout) — consistent snapshot under WAL
+5. Gzip to `ah-YYYYMMDD-HHMMSS.db.gz` via temp + `rename` (mode 0600)
+6. If `{db-stem}-metering.db` exists (for `ah.db` that is `ah-metering.db`), backup it as `ah-metering-YYYYMMDD-HHMMSS.db.gz` (warnings only on failure)
+7. Keep the **10 newest** `*.db.gz` files; delete older ones (lexicographic timestamp sort)
+
+This is metadata + encrypted blobs. It is **not** a Docker volume dump. Postgres/Redis data lives in `ah-db-*` volumes and is not inside the SQLite file.
+
+## What you must copy besides SQLite
+
+| Artifact | Why |
+|----------|-----|
+| `master.key` | Without it, env vars and DB passwords cannot be decrypted |
+| `/etc/default/ah` | Bootstrap token(s) |
+| Docker volumes | Database contents, environment workspaces |
+| Registry data | Built images if you have not pushed elsewhere |
+
+`master.key` is not written into the gzip backup.
+
+## Restore (operational, not a subcommand)
+
+There is no `ah restore`. Stop `ah`, replace `ah.db` with a decompressed VACUUM copy, restore `master.key`, start `ah`. The reconciler will then compare rows to Docker (containers may be gone — expect `stopped` / crash handling).
+
+## Litestream
+
+`docs/ops/litestream-replication.md` exists in the repo as an ops note. The binary itself only implements the `VACUUM INTO` path above.
+
+## Snapshot retention (services, not SQLite)
+
+Service snapshots (image + env forks) are pruned by GC using `AH_SNAPSHOT_MAX_PER_SERVICE` (default 10) and `AH_SNAPSHOT_MAX_AGE` (default 30d). That is unrelated to `ah backup`.
+
+
+# REST API
+
+# REST API reference
+
+Base path: `/v1/`. Versioning rule in this repo: breaking changes require `/v2/`; additive fields do not.
+
+Auth header for tenant routes:
+
+```
+Authorization: Bearer <keyID>.<secret>
+```
+
+Errors (both `httpx.WriteError` and `apierr.WriteAPIError`):
+
+```json
+{"error":"human-readable message"}
+```
+
+There is no machine `code` field in the JSON body. Status codes carry the class of error.
+
+Pagination (where implemented): `limit` default **100** (activity default **50**), max **200**, `offset` ≥ 0. Oversize `limit` is clamped.
+
+Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (metrics `since`/`until`).
+
+## Conventions
+
+| Header | Where |
+|--------|--------|
+| `Authorization: Bearer …` | All tenant routes |
+| `X-Bootstrap-Token` | Register (and recover/reactivate/quotas only if `AH_ADMIN_TOKEN` is unset) |
+| `X-Admin-Token` | Recover, reactivate, quotas when `AH_ADMIN_TOKEN` is set |
+| `Idempotency-Key` | Authenticated mutating routes except `POST .../exec` |
+| `Content-Type: application/json` | Bodies |
+| `X-Forwarded-Proto: https` | Required in production from loopback Traefik |
+
+Public health is constant-time and does not touch SQLite.
+
+---
+
+## System
+
+### `GET /v1/system/health`
+
+Public. `{"status":"ok"}`.
+
+### `GET /v1/system/health/detailed`
+
+Auth. Cached 30s. `?fresh=true` bypasses and refreshes the cache.
+
+```json
+{
+  "status": "ok",
+  "docker": {"available": true, "version": "29.x"},
+  "gvisor": {"available": true, "version": "..."},
+  "disk": {"total_gb": 0, "free_gb": 0, "used_percent": 0},
+  "docker_disk": {"total_gb": 0, "free_gb": 0, "used_percent": 0},
+  "docker_storage": {
+    "images_size_bytes": 0,
+    "containers_size_bytes": 0,
+    "volumes_size_bytes": 0,
+    "build_cache_size_bytes": 0,
+    "total_size_gb": 0
+  },
+  "traefik_networks": 0
+}
+```
+
+`status` becomes `degraded` if SQLite ping fails, either disk path is >90%, or `ah-tenant-*` networks > 200.
+
+### `POST /v1/system/bootstrap-token/validate`
+
+Bootstrap token. Registration rate limiter. 200 if valid, 401 if not.
+
+---
+
+## Tenants
+
+### `POST /v1/tenants/register`
+
+Bootstrap (unless `--open-registration`). Body: `{"name","email"}`.  
+`201`/`200` with `{"tenant_id","api_key"}`. See [Registration](./auth/).
+
+### `GET /v1/tenant`
+
+`{"id","name","email","status","created_at","updated_at"}`.
+
+### `PATCH /v1/tenant`
+
+`{"name":"new-name"}` only.
+
+### `DELETE /v1/tenant`
+
+Soft-delete / suspend. Stops services, DBs, kanban; cancels builds.
+
+### `GET /v1/tenant/usage`
+
+```json
+{
+  "services": {"used": 0, "max": 5},
+  "databases": {"used": 0, "max": 3},
+  "api_keys": {"used": 0, "max": 20},
+  "memory_mb": 2048,
+  "cpu_cores": 2.0,
+  "disk_gb": 20,
+  "rate_limit": 100
+}
+```
+
+### `GET /v1/tenant/usage/metrics`
+
+Query: `period=hourly|daily` (default daily), `since`, `until` (RFC3339), `service_id`. 503 if metering store is nil.
+
+### `POST /v1/tenants/{tenantID}/reactivate`
+
+Bootstrap. New API key. Tenant must exist and be suspended.
+
+### `PATCH /v1/tenants/{tenantID}/quotas`
+
+Bootstrap. Body fields (all optional, must be ≥ 1 and under caps):
+
+| Field | Cap |
+|-------|-----|
+| `max_services` | 100 |
+| `max_databases` | 50 |
+| `max_builds_concurrent` | 10 |
+| `max_env_vars_per_service` | 500 |
+
+Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`, `api_rate_limit`.
+
+---
+
+## API keys
+
+### `POST /v1/auth/keys`
+
+`{"name","expires_in"}` → `{"id","name","api_key","prefix","expires_at"}`.
+
+### `GET /v1/auth/keys`
+
+Array of key metadata (no secrets).
+
+### `DELETE /v1/auth/keys/{keyID}`
+
+Revoke.
+
+### `POST /v1/auth/recover`
+
+Bootstrap + `{"email"}`.
+
+---
+
+## Services
+
+### `POST /v1/services`
+
+```json
+{"name":"web","image":"nginx:alpine","port":80,"env":{"KEY":"val"}}
+```
+
+- `name` required, max 128
+- `image` validated (Docker Hub or loopback registry)
+- `port` 0 means default **8000**; explicit values must be 1–65535
+- Returns **201** with `status: "deploying"`; deploy runs in a 10-minute background context
+
+### `POST /v1/services?from_snapshot={id}`
+
+`{"name":"fork"}`. Copies snapshot image, port, env.
+
+### `GET /v1/services`
+
+Paginated list.
+
+### `GET /v1/services/{serviceID}`
+
+Includes `url`, `dns_label`, `last_error`, crash/circuit fields.
+
+### `PATCH /v1/services/{serviceID}`
+
+Rename only: `{"name"}`. Allowed characters: alnum, hyphen, underscore, space, dot. DNS uniqueness still applies when `--base-domain` is set.
+
+### `DELETE /v1/services/{serviceID}`
+
+### Lifecycle
+
+| Method | Path |
+|--------|------|
+| POST | `/v1/services/{id}/start` |
+| POST | `/v1/services/{id}/stop` |
+| POST | `/v1/services/{id}/restart` |
+| POST | `/v1/services/{id}/redeploy` |
+| POST | `/v1/services/{id}/reset` |
+
+Restart recreates the container (env changes apply).
+
+### Logs
+
+```
+GET /v1/services/{id}/logs?follow=true&tail=100
+```
+
+`text/plain`. `tail` default 100, max 10000. Implemented (`handleServiceLogs` → Docker logs).
+
+### Env
+
+See [Env vars](./env/).
+
+### Deployments
+
+```
+GET /v1/services/{id}/deployments
+POST /v1/services/{id}/deployments/{deploymentID}/cancel
+```
+
+### Metrics
+
+```
+GET /v1/services/{id}/metrics?period=daily&since=&until=
+```
+
+---
+
+## Builds
+
+### `POST /v1/services/{id}/builds`
+
+```json
+{"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}
+```
+
+**202** `{"build_id","status","image"}`.
+
+### `GET /v1/services/{id}/builds`
+
+### `GET /v1/builds?limit=`
+
+Tenant-wide.
+
+### `GET /v1/services/{id}/builds/{buildID}`
+
+### `GET /v1/services/{id}/builds/{buildID}/logs?follow=true`
+
+`text/plain`. `follow=true` preflights existence before writing 200.
+
+### `DELETE /v1/services/{id}/builds/{buildID}`
+
+`{"status":"cancelled"}`.
+
+---
+
+## Databases
+
+```json
+{"name":"mydb","type":"postgres"}
+```
+
+`type`: `postgres` | `redis`.
+
+| Method | Path |
+|--------|------|
+| POST | `/v1/databases` |
+| GET | `/v1/databases` |
+| GET | `/v1/databases/{dbID}` |
+| GET | `/v1/databases/{dbID}/connection-string` |
+| DELETE | `/v1/databases/{dbID}` |
+
+---
+
+## Snapshots
+
+```
+POST /v1/services/{id}/snapshots   {"name","description"}
+GET  /v1/snapshots
+GET  /v1/snapshots/{snapshotID}
+DELETE /v1/snapshots/{snapshotID}
+```
+
+---
+
+## Kanban (Vikunja)
+
+One board per tenant. Create is async; poll `GET /v1/kanban` until `url` is set. Host ports default **7100–9100**.
+
+| Method | Path |
+|--------|------|
+| POST | `/v1/kanban` |
+| GET | `/v1/kanban` |
+| GET | `/v1/kanban/admin-token` |
+| DELETE | `/v1/kanban` |
+
+Admin token access is AUDIT-logged.
+
+---
+
+## Environments (workspaces)
+
+Templates: `default` (Ubuntu 24.04), `node`, `python`, `go`. Default lease **3600s**. Quota default **2** environments.
+
+### `GET /v1/environments/templates`
+
+### `GET /v1/environments/templates/{templateID}`
+
+### `POST /v1/environments`
+
+```json
+{"name":"scratch","template_id":"node","lease_duration_seconds":3600}
+```
+
+Name: `^[a-zA-Z][a-zA-Z0-9_-]*$`.
+
+### `GET /v1/environments`
+
+### `GET /v1/environments/{envID}`
+
+### `DELETE /v1/environments/{envID}` → 204
+
+### `POST /v1/environments/{envID}/start` → `{"status":"running"}`
+
+### `POST /v1/environments/{envID}/stop` → `{"status":"stopped"}`
+
+### `POST /v1/environments/{envID}/lease`
+
+```json
+{"duration_seconds":3600}
+```
+
+Must be positive. Returns the updated environment (including `lease_expires_at`).
+
+### `POST /v1/environments/{envID}/exec`
+
+```json
+{"command":["uname","-a"],"work_dir":"/workspace","timeout":60}
+```
+
+```json
+{"exit_code":0,"stdout":"...","stderr":"","truncated":false,"timed_out":false,"duration_ms":12}
+```
+
+Not idempotent.
+
+### `POST /v1/environments/{envID}/sync`
+
+```json
+{"git_url":"https://github.com/org/repo","git_ref":"HEAD"}
+```
+
+`git_url` required, must start with `https://`.
+
+### Previews
+
+```
+POST   /v1/environments/{id}/previews   {"name":"web","port":3000}
+GET    /v1/environments/{id}/previews
+DELETE /v1/environments/{id}/previews/{previewID}   → 204
+```
+
+Preview name: `^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`.
+
+---
+
+## Activity
+
+```
+GET /v1/activity?limit=50&offset=0&resource_type=service&action=service.created&service_id=&since=1710000000
+```
+
+`since` is a **unix timestamp**, not RFC3339 (the skill’s ISO example is wrong).
+
+Synthetic feed assembled from tenants, services, builds, databases, API keys. Sensitive reveals (env `reveal=true`, connection strings, kanban admin token) emit AUDIT log lines.
+
+---
+
+## HTTP status map
+
+| Code | Typical cause |
+|------|----------------|
+| 400 | Validation (`apierr.Validation`) or bad JSON |
+| 401 | Bad/missing API key or bootstrap token |
+| 403 | HTTPS required; or `apierr.Forbidden` |
+| 404 | Missing resource |
+| 409 | Quota, name conflict, idempotency body mismatch, build queue full |
+| 413 | Body > 1 MB |
+| 422 | Registration uniqueness (deliberately vague) |
+| 429 | Rate limit |
+| 500 | Unexpected |
+| 503 | Docker/build/metering/registration unavailable; often disk |
+
+## Timeouts
+
+| Class | Timeout |
+|-------|---------|
+| Most routes | 30s (`chi.Timeout`) |
+| Server `WriteTimeout` | 30s |
+| `ReadTimeout` / `ReadHeaderTimeout` | 10s / 5s |
+| Logs, DB create, kanban create, env create/sync, exec | no chi 30s timeout |
+
+Streaming past 30s write timeout can still be cut by `http.Server.WriteTimeout`. In practice log follow is used on the long-timeout group; watch server-level write timeout if streams die at ~30s.
+
+
+# Claude Code skill
+
+# Claude Code skill and slash commands
+
+**Share this instead of a runbook:** the standalone skill at [`skills/agentic-hosting/SKILL.md`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md) plus [`llms.txt`](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt). See [Give this to your agent](./for-agents/).
+
+The repo also ships a Claude Code skill at `.claude/skills/agentic-hosting/SKILL.md` and commands under `.claude/commands/`. The homepage, `install.sh`, and `install-skill.sh` all install the six `/ah-*` commands.
+
+## Install
+
+```bash
+curl -fsSL https://agentic.hosting/install-skill.sh | bash
+```
+
+That script copies:
+
+- `~/.claude/skills/agentic-hosting/SKILL.md`
+- references: `api-reference.md`, `operations.md`, `custom-domains.md`, `server-setup.md`
+- Commands: `ah-deploy`, `ah-status`, `ah-db`, `ah-logs`, `ah-register`, `ah-snapshot`
+
+Manual copy:
+
+```bash
+mkdir -p ~/.claude/skills/agentic-hosting
+cp .claude/skills/agentic-hosting/SKILL.md ~/.claude/skills/agentic-hosting/
+cp -r .claude/commands/*.md /your/project/.claude/commands/
+```
+
+Then set:
+
+```bash
+export AH_URL=https://your-host
+export AH_KEY=keyid.secret
+```
+
+## Commands that exist in git
+
+| Command | File | What it tells the agent to do |
+|---------|------|--------------------------------|
+| `/ah-deploy <git-or-image> <name> [port]` | `ah-deploy.md` | Health + disk check, create service or build, poll 10 minutes |
+| `/ah-status` | `ah-status.md` | Detailed health, list services and databases, surface circuits |
+| `/ah-db <service> <postgres\|redis> [name]` | `ah-db.md` | Create DB, fetch connection string, set env, restart |
+| `/ah-logs <service> [build-id]` | `ah-logs.md` | Runtime logs, or build logs when a build-id is given |
+| `/ah-register <name> <email>` | `ah-register.md` | `POST /v1/tenants/register` |
+| `/ah-snapshot <service> [name]` | `ah-snapshot.md` | `POST /v1/services/{id}/snapshots` |
+
+There is also `.claude/commands/security-review.md` — a four-pass code audit command, **not** an `ah` operator command.
+
+## Scripts (no Claude required)
+
+`scripts/` — `register.sh`, `deploy.sh`, `status.sh`, `logs.sh`, `db-provision.sh`. Same env vars (`AH_URL`, `AH_KEY`). See `scripts/README.md`.
+
+## Skill vs this site
+
+The skill, slash commands, homepage, and this site are aligned with `internal/api/server.go`. The audit of older wording is in [`docs-site/CORRECTIONS.md`](https://github.com/dennisonbertram/agentic-hosting/blob/main/docs-site/CORRECTIONS.md). Prefer the [REST API](./api/) page if anything still disagrees.
+
+
+# Security model
+
+# Security model
+
+Layers that exist in code today. Plans (HKDF split, Firecracker, mTLS) are not claimed here — see [Roadmap](./roadmap/).
+
+## Container isolation
+
+Every tenant **service** container (`RunContainer`):
+
+| Control | Value |
+|---------|--------|
+| Runtime | `runsc` (gVisor) — required in production |
+| Capabilities | drop ALL |
+| Privileges | `no-new-privileges` |
+| Rootfs | read-only + tmpfs on `/tmp`, `/var/run`, `/var/tmp`, `/run` |
+| PIDs | 256 |
+| Swap | `MemorySwap = Memory` |
+| Restart | `unless-stopped` (defeated when the circuit opens — reconciler stops the container) |
+| Traefik Docker provider | `traefik.enable=false` so image labels cannot register routes |
+
+Database and environment containers also use `runsc` (see `internal/docker` / `internal/environments`).
+
+## Network isolation
+
+- Per-tenant bridge `ah-tenant-{id}`
+- Comments and construction treat the network as **internal**, **ICC=false**, no container internet egress
+- Traefik is attached to each tenant network for ingress
+- Cross-tenant: separate bridges
+- API bind: `127.0.0.1` unless `--dev` + explicit `--listen-addr`
+
+Tenant containers are not given a path to the Docker socket.
+
+## Secrets
+
+| Secret | Storage |
+|--------|---------|
+| Service env | AES-256-GCM in `service_env` |
+| DB passwords / connection strings | AES-256-GCM |
+| Snapshot env | encrypted blob |
+| Kanban admin token | encrypted; reveal AUDIT-logged |
+| API keys | HMAC-SHA256 hex (64 chars) keyed by master key |
+| Master key | 32-byte file, chmod 600 |
+| Bootstrap tokens | env only, HMAC-compared |
+
+`ah rotate-key` re-encrypts rows. There is **no** HKDF domain separation in the running crypto helpers yet (that is a planned doc under `docs/security/`).
+
+## API / HTTP
+
+- Production: `requireHTTPS`. Trust `X-Forwarded-Proto` only from loopback
+- `stripUntrustedForwardedHeaders` always (including `--dev`)
+- Client IP for registration limits: `X-Real-Ip` from loopback only
+- Auth cache 30s (revocation delay)
+- Body 1 MB; idempotency hash cap matches
+- Chi logger logs method/path/status/latency — not headers or bodies
+- Registration errors are generic 422 to reduce email enumeration
+
+## systemd (`deploy/ah.service`)
+
+`NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectKernelTunables/Modules`, `ProtectControlGroups`, `RestrictSUIDSGID`, `LockPersonality`, `PrivateDevices`, `RestrictNamespaces`, `ProtectKernelLogs`, `UMask=0077`.
+
+`ReadWritePaths` includes `/var/lib/ah`, Traefik dynamic `ah.yml`, and the Docker socket.
+
+Runs as user `ah`, group `docker`.
+
+## What a stolen tenant key can do
+
+Everything in that tenant: deploy, delete services, read revealed env, fetch DB connection strings, create keys (up to 20), delete the tenant.
+
+It cannot:
+
+- Register new tenants (bootstrap token)
+- Change another tenant’s quotas
+- Talk to another tenant’s containers over the bridge
+- Enable Traefik routes via container labels
+
+Treat `AH_KEY` like a production credential. Prefer a dedicated key per agent (`POST /v1/auth/keys`) and revoke it.
+
+## Build egress
+
+Git clone only talks to five HTTPS hosts. That is not a general egress proxy. `docs/security/build-egress-allowlist.md` describes a Squid approach that is **not** wired into `ah` as a running feature.
+
+
+# Troubleshooting
+
+# Troubleshooting
+
+## `{"error":"HTTPS required"}` on curl to :8080
+
+Production mode only accepts `X-Forwarded-Proto: https` from **loopback**. Direct `http://127.0.0.1:8080` without that header is 403.
+
+```bash
+curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
+```
+
+Or hit the Traefik HTTPS URL. Or run `--dev`.
+
+## `ah` will not start
+
+| Log / symptom | Cause |
+|---------------|--------|
+| `AH_BOOTSTRAP_TOKEN must be set` | Missing `/etc/default/ah` or empty token |
+| `each bootstrap token must be at least 32 characters` | Token too short |
+| `master key must be 64 hex characters` | Wrong `master.key` |
+| `gVisor is required` | `runsc` not in Docker runtimes (non-dev) |
+| `address already in use` | Orphan `ah` still bound; `ss -tlnp \| grep 8080` |
+| Service inactive after reboot | `systemctl enable ah` was never run |
+
+The unit reads `EnvironmentFile=-/etc/default/ah` (the `-` means missing file is ignored — then the binary fatals on the empty token).
+
+## `FATAL: non-loopback listen address`
+
+You passed `--listen-addr=0.0.0.0` without `--dev`. That is intentional.
+
+## Circuit open / service `crashed`
+
+Five exits or unhealthies in 10 minutes. Container is stopped.
+
+1. `GET /v1/services/{id}` and `/logs`
+2. Fix image or env
+3. `POST /v1/services/{id}/reset`
+4. `POST /v1/services/{id}/start`
+
+Or wait for auto-backoff (30m / 1h / 4h).
+
+## Deploy / build returns disk error
+
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`.
+
+```bash
+curl -s -H "Authorization: Bearer $AH_KEY" \
+  "$AH_URL/v1/system/health/detailed?fresh=true"
+# prune Docker objects if you understand the blast radius
+```
+
+## Build `failed` immediately with `unsupported source_type`
+
+You sent `git_url` / `branch`. Send `source_type`, `source_url`, `source_ref`.
+
+## Build rejected host
+
+Only the five allowlisted git hostnames. HTTPS, no credentials in the URL.
+
+## `409` on create
+
+Quota (`max_services`, keys, databases, environments), duplicate DNS label, idempotency body mismatch, or build queue full. Read `error`.
+
+## `401` on every call
+
+Key format is `keyID.secret` (one dot). Tenant suspended. Key revoked or expired. Auth cache is 30s — a brand-new key should work immediately; a just-revoked key may work for up to 30s.
+
+## Registration 422
+
+Name or email already taken. The message is intentionally vague.
+
+## Registration 429
+
+5/IP/hour or 20/hour global, including **failed** token guesses.
+
+## gVisor / containers never start
+
+`docker info` must list `runsc`. Production `ah` exits if it does not. `--dev` only warns — then `Runtime: runsc` still fails at container create.
+
+## CGO / crash on start after a Mac build
+
+`go-sqlite3` needs `CGO_ENABLED=1` on Linux. Build on the server.
+
+## Website / docs container not updating
+
+`website/` is a baked nginx image. Rebuild the image after HTML or docs-site changes. The container does not bind-mount the repo in the documented production flow.
+
+## Skill commands 404
+
+Use `/ah-deploy` not `/deploy`. Both `install-skill.sh` and `install.sh` now download the `/ah-*` command files.
+
+## Logs die at ~30 seconds
+
+`http.Server.WriteTimeout` is 30s. The route group removes chi’s timeout for streams, but the server write timeout still applies. Use `follow=true` in short bursts or raise the server timeout if you fork the binary.
+
+## Useful inspect
+
+```bash
+journalctl -u ah -f
+curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
+sqlite3 /var/lib/ah/ah.db 'SELECT name FROM schema_migrations ORDER BY name;'
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Runtime}}'
+```
+
+
+# Roadmap
+
+# Roadmap
+
+This page lists **gaps the codebase itself acknowledges**. It is not a promise of delivery dates.
+
+## Shipped (see the rest of these docs)
+
+Control plane API, tenants, HMAC keys, services, Nixpacks git builds, Postgres/Redis, env encryption, reconciler + circuit breaker, GC, disk watermarks, backups, `ah rotate-key`, snapshots, Vikunja kanban, instant environments + warm pool + previews, metering **query** endpoints, activity feed, supervisory dashboard assets, `ahc` CLI, Claude skill / `ah-*` commands.
+
+Current tagged line in `CHANGELOG.md` is **0.5.0** (instant environments). Unreleased work includes `ahc` polish and warm-pool fixes.
+
+## Explicitly not done
+
+From `docs/implementation/build-log.md` and architecture notes:
+
+| Gap | Evidence |
+|-----|----------|
+| Billing | Metering tables exist; nothing invoices |
+| Prometheus / Grafana | No exporter |
+| Multi-node / HA control plane | SQLite + local Docker; `docs/architecture/horizontal-scaling-gap-analysis.md` |
+| HKDF key separation | Plan in `docs/security/hkdf-key-separation-plan.md` — runtime still uses the raw master key for HMAC + AES |
+| Firecracker | Plan only (`docs/architecture/firecracker-integration-plan.md`) |
+| Daemonless builds (Kaniko) | Prototype note, Nixpacks+Docker is what runs |
+| Build egress proxy (Squid) | Decision doc, not a running proxy in `ah` |
+| mTLS between services | Listed as planned in README; networks already deny ICC |
+| CI/CD deploy pipeline | `docs/decisions/cicd-pipeline.md` — implementation deferred (this docs workflow is static Pages only) |
+
+## Open GitHub issues (at the time this page was written)
+
+The tracker is the live list: [github.com/dennisonbertram/agentic-hosting/issues](https://github.com/dennisonbertram/agentic-hosting/issues).
+
+Examples that were open:
+
+- [#108](https://github.com/dennisonbertram/agentic-hosting/issues/108) — env var set response masking connection strings
+- [#82](https://github.com/dennisonbertram/agentic-hosting/issues/82) — custom domain management API UX
+
+README’s older “planned” bullets (HKDF, multi-domain routing, billing API, mTLS, audit logging) are partly stale: **AUDIT log lines** already exist for sensitive reads; custom domains exist as `--base-domain` + Traefik, not as a tenant self-serve multi-domain API.
+
+## Docs vs skill drift
+
+Operator skill references were not all updated when routes moved (`/v1/system/bootstrap-token/validate`, `/v1/tenants/{id}/reactivate`, build `source_url`). Treat `internal/api/server.go` as canonical.
+
+## How to follow along
+
+- [Changelog](https://agentic.hosting/changelog/)
+- [CHANGELOG.md](https://github.com/dennisonbertram/agentic-hosting/blob/main/CHANGELOG.md)
+- [Build log](https://github.com/dennisonbertram/agentic-hosting/blob/main/docs/implementation/build-log.md)
+
+<a href="https://github.com/dennisonbertram/agentic-hosting">★ Star on GitHub</a> to watch releases.
+
+
+# Skill API reference
+
+# Full API Reference
+
+Base URL: `$AH_URL` (e.g. `https://agentic.hosting`)
+Auth header: `Authorization: Bearer $AH_KEY` (all endpoints except health)
+
+---
+
+## System
+
+```bash
+# Public health check
+GET /v1/system/health
+# → {"status":"ok"}
+
+# Detailed health (auth required)
+GET /v1/system/health/detailed
+# → {"status":"ok","docker":{"available":true,"version":"29.x","storage_info":{"driver":"overlay2","data_space_used":"12.3 GB","data_space_total":"435 GB"}},"gvisor":{"available":true},"disk":{"total_gb":435,"free_gb":397,"used_percent":8.7}}
+# Add ?fresh=true to bypass the 30-second cache:
+GET /v1/system/health/detailed?fresh=true
+```
+
+---
+
+## Tenants
+
+```bash
+# Register (requires X-Bootstrap-Token header)
+POST /v1/tenants/register
+Body: {"name":"string","email":"string"}
+# → {"tenant_id":"hex32","api_key":"keyid.secret"}
+# api_key shown exactly once — save it immediately
+
+# Get current tenant
+GET /v1/tenant
+# → {"id":"...","name":"...","email":"...","status":"active","created_at":unix}
+
+# Get usage stats
+GET /v1/tenant/usage
+# → {"services":{"count":2,"limit":20},"databases":{"count":1,"limit":3},...}
+
+# Update tenant name (email is not updatable here)
+PATCH /v1/tenant
+Body: {"name":"new-name"}
+
+# Reactivate a suspended tenant (requires admin token + tenant ID in the path)
+POST /v1/tenants/:tenantID/reactivate
+Headers: X-Admin-Token: <admin-token>
+# → {"tenant_id":"...","api_key":"keyid.secret","status":"active"}
+# Already-active tenants return 409
+
+# Delete tenant (irreversible — removes ALL resources)
+DELETE /v1/tenant
+```
+
+**Note:** Quota exceeded errors return `409 Conflict` (not `403`).
+
+---
+
+## API Keys
+
+```bash
+# Create a named key
+POST /v1/auth/keys
+Body: {"name":"agent-name","expires_in":2592000}  # expires_in in seconds, omit for no expiry
+# → {"id":"...","api_key":"keyid.secret","name":"...","prefix":"...","expires_at":unix}
+# api_key shown exactly once (field name is api_key, not key)
+
+# List keys (no plaintext values)
+GET /v1/auth/keys
+# → [{"id":"...","name":"...","created_at":unix,"expires_at":unix|null}]
+
+# Revoke a key
+DELETE /v1/auth/keys/:keyID
+
+# Recover access (requires admin token — use when all keys are lost)
+POST /v1/auth/recover
+Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
+Body: {"email":"tenant@example.com"}
+# → {"api_key":"newkeyid.newsecret"}
+# Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
+# Email must match the tenant's registered email
+
+# Validate a bootstrap token (does not register — just checks validity)
+POST /v1/system/bootstrap-token/validate
+Body: {"token":"<bootstrap-token>"}
+# → 200 {"valid":true} or 200 {"valid":false} — never 401 for a bad token
+# Rate limited like registration (5/IP/hour, 20/hour global)
+```
+
+**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
+
+---
+
+## Services
+
+```bash
+# Create service
+POST /v1/services
+Body: {
+  "name": "string",           # required, max 128
+  "image": "nginx:alpine",    # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
+  "port": 80,                 # 0 / omitted → 8000; must be 1–65535 if set
+  "env": {"KEY": "value"}     # optional inline env vars
+}
+# There is no memory_mb / cpu_count on CreateRequest.
+# For git builds, send image "pending" (what ahc uses); create always starts
+# an async Deploy (the placeholder pull fails), then POST .../builds replaces it.
+# → {"id":"hex32","name":"...","status":"deploying","url":"http://<id>.localhost",...}
+# Port must be > 0; returns 400 if invalid
+
+# Create service from snapshot (instant fork — copies image, env, resource limits)
+POST /v1/services?from_snapshot=:snapshotID
+Body: {"name":"forked-service"}
+# → same response as create service
+
+# List services (paginated)
+GET /v1/services?limit=50&offset=0
+# → [{"id":"...","name":"...","status":"running","url":"...","image":"..."}]
+
+# Get one service
+GET /v1/services/:serviceID
+# → {"id":"...","name":"...","status":"running","url":"...","last_error":"...","circuit_open":false}
+
+# Rename a service (validates DNS-safe name)
+PATCH /v1/services/:serviceID
+Body: {"name":"new-name"}
+# → returns updated service object
+
+# Delete service
+DELETE /v1/services/:serviceID
+
+# Start / Stop / Restart
+POST /v1/services/:serviceID/start
+POST /v1/services/:serviceID/stop
+POST /v1/services/:serviceID/restart
+
+# Reset circuit breaker
+POST /v1/services/:serviceID/reset
+
+# Env vars: list (optionally revealed)
+GET /v1/services/:serviceID/env?reveal=true
+# → {"KEY":"value",...}  (values masked by default, plaintext with reveal=true)
+
+# Env vars: set/update (additive merge — does NOT replace all vars)
+# This endpoint uses upsert semantics: keys in the request body are added or
+# updated, but existing keys NOT mentioned in the request body are left
+# untouched. To remove a key, use DELETE. There is no PATCH endpoint —
+# POST is the only write method and it always merges.
+#
+# Example: if the service already has {"A":"1","B":"2"} and you POST {"B":"99","C":"3"},
+# the result is {"A":"1","B":"99","C":"3"} — A is preserved, B is updated, C is added.
+POST /v1/services/:serviceID/env
+Body: {"KEY":"value","OTHER":"value2"}
+# → {"status":"updated","note":"restart will recreate the container with the new env vars"}
+# Max 100 keys per request.
+
+# Env vars: delete one key
+DELETE /v1/services/:serviceID/env/:key
+
+# Redeploy (rebuild from same source_url / source_ref as last build)
+POST /v1/services/:serviceID/redeploy
+# → {"id":"...","status":"pending","created_at":unix}
+# Returns the new build object
+
+# Deployment history
+GET /v1/services/:serviceID/deployments
+# → [{"id":"...","build_id":"...","source":"image|build","image":"...","status":"running","started_at":unix,"finished_at":unix,"deployed_at":unix}]
+
+# Stream runtime logs (Docker stdout/stderr — implemented)
+GET /v1/services/:serviceID/logs?follow=true&tail=100
+# text/plain; tail default 100, max 10000
+```
+
+### Environment Variable Rules
+
+**Key format**: Keys must match the pattern `^[a-zA-Z_][a-zA-Z0-9_]{0,127}$` — start with a letter or underscore, followed by up to 127 alphanumeric characters or underscores.
+
+**Value limits**: Values may be up to 32,768 bytes (32 KB). Null bytes (`\x00`) are not allowed.
+
+**Forbidden keys**: The following environment variable names are reserved by the platform and cannot be set by tenants:
+
+| Key | Reason |
+|-----|--------|
+| `PATH` | Overriding the system PATH could break container execution |
+| `LD_PRELOAD` | Security risk — could inject shared libraries into processes |
+| `LD_LIBRARY_PATH` | Security risk — could redirect shared library loading |
+
+**Case-insensitive matching**: Forbidden key checks are **case-insensitive**. All of the following will be rejected: `PATH`, `path`, `Path`, `LD_PRELOAD`, `ld_preload`, `Ld_Preload`. The error message will report the key name exactly as you sent it (e.g., `env var "path" is not allowed`).
+
+**Per-request limit**: A single POST request can set at most 100 keys. To set more, issue multiple requests (they merge additively).
+
+---
+
+## Builds
+
+```bash
+# Start a Nixpacks build from git
+POST /v1/services/:serviceID/builds
+Body: {"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}
+# source_type must be "git". source_ref defaults to "main" if omitted.
+# There is no git_url / branch field.
+# → {"id":"...","status":"pending","created_at":unix}
+
+# List builds for a service
+GET /v1/services/:serviceID/builds
+# → [{"id":"...","status":"building|succeeded|failed|cancelled","image":"..."}]
+
+# Get one build
+GET /v1/services/:serviceID/builds/:buildID
+# → {"id":"...","status":"succeeded","image":"127.0.0.1:5000/ah-.../svc-...:latest"}
+
+# Stream build logs
+GET /v1/services/:serviceID/builds/:buildID/logs?follow=true
+# Streams newline-delimited text; blocks until build completes when follow=true
+
+# Cancel a build
+DELETE /v1/services/:serviceID/builds/:buildID
+
+# List all builds across all services (tenant-wide)
+GET /v1/builds?limit=50
+```
+
+**Build log ring buffer:** Logs are tail-preserved when they exceed the maximum size -- the oldest lines are dropped so the most recent output is always available.
+
+**Auto-cancel on suspension:** When a tenant is suspended, all in-progress builds for that tenant are automatically cancelled (`CancelAllForTenant`).
+
+**Pagination limit cap:** List endpoints enforce a server-side maximum on `limit`; requests above the cap are silently clamped.
+
+---
+
+## Databases
+
+```bash
+# Create postgres or redis (takes up to 30s — use idempotency key)
+POST /v1/databases
+Header: Idempotency-Key: <uuid>
+Body: {"name":"string","type":"postgres"}  # type: "postgres" | "redis"
+# → {"id":"...","name":"...","type":"postgres","status":"running","port":5432}
+
+# List databases
+GET /v1/databases
+# → [{"id":"...","name":"...","type":"postgres","status":"running"}]
+
+# Get one database
+GET /v1/databases/:dbID
+
+# Get decrypted connection string
+GET /v1/databases/:dbID/connection-string
+# → {"connection_string":"postgres://user:pass@127.0.0.1:5432/dbname"}
+
+# Delete database (irreversible — destroys container and data volume)
+DELETE /v1/databases/:dbID
+```
+
+**Name validation:** Database names must be DNS-safe -- alphanumeric characters and hyphens only, must start and end with an alphanumeric character.
+
+---
+
+## Snapshots
+
+Snapshots capture a service's current image, env config, and resource settings for instant forking.
+
+```bash
+# Take a snapshot of a service
+POST /v1/services/:serviceID/snapshots
+Body: {"name":"before-migration"}
+# → {"id":"...","name":"...","service_id":"...","image":"...","created_at":unix}
+
+# List all snapshots (tenant-wide)
+GET /v1/snapshots
+# → [{"id":"...","name":"...","service_id":"...","created_at":unix}]
+
+# Get one snapshot
+GET /v1/snapshots/:snapshotID
+
+# Delete snapshot
+DELETE /v1/snapshots/:snapshotID
+```
+
+**Retention policy:** Snapshots older than `--snapshot-max-age` or exceeding `--snapshot-max-per-service` are automatically cleaned up by the GC.
+
+---
+
+## Kanban (Vikunja)
+
+Provisions a per-tenant Vikunja kanban board in a dedicated container. Provisioning is async -- the `POST` returns immediately and the kanban URL becomes available once the container is ready. Poll `GET /v1/kanban` until the `url` field is populated.
+
+The host port range for kanban containers is configurable via `--kanban-port-start` and `--kanban-port-end` daemon flags.
+
+```bash
+# Provision board (async — poll GET /v1/kanban for URL; use idempotency key)
+POST /v1/kanban
+Header: Idempotency-Key: <uuid>
+# → {"id":"...","url":"http://...:PORT","created_at":unix}
+
+# Get board info
+GET /v1/kanban
+# → {"id":"...","url":"http://...:PORT","created_at":unix}
+
+# Get admin token (decrypted)
+GET /v1/kanban/admin-token
+# → {"admin_token":"..."}
+
+# Delete board (irreversible)
+DELETE /v1/kanban
+```
+
+---
+
+## Activity
+
+```bash
+# Synthetic event log for the tenant
+GET /v1/activity?limit=50
+# → [{"id":"...","resource_type":"service|database|build","action":"created|started|failed","message":"...","created_at":unix}]
+
+# Filtering parameters:
+#   resource_type=service|database|build   — filter by resource type
+#   action=created|started|failed|...      — filter by action
+#   service_id=<id>                        — filter by service
+#   since=1710000000                       — unix timestamp (seconds), not RFC3339
+#   offset=0                               — pagination offset (int)
+# Default limit is 50 (activity only); max 200.
+```
+
+**Audit events:** Sensitive operations are automatically logged: env var reveals (`?reveal=true`), connection string access, and kanban admin token access.
+
+---
+
+## Service Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `created` | Just created, not yet deploying |
+| `deploying` | Container pull/start in progress |
+| `running` | Container is up and passing health checks |
+| `stopped` | Manually stopped |
+| `failed` | Deploy timed out (10 min) or fatal error |
+| `circuit_open` | Crash-looped (5 crashes / 10 min); manually reset required |
+| `crashed` | Container exited unexpectedly; reconciler will restart |
+
+---
+
+## Idempotency
+
+Add to any mutating request to make retries safe:
+```
+Idempotency-Key: <any-stable-uuid>
+```
+Same key + same tenant + same method + same path + same body hash = same result. TTL is 10 minutes.
+`POST /v1/environments/{id}/exec` is not idempotent.

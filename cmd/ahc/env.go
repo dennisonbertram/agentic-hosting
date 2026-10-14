@@ -292,8 +292,19 @@ func runEnvExec(c *ahclient.Client, w io.Writer, nameOrID string, command []stri
 		fmt.Fprint(w, result.Stderr)
 	}
 
+	if result.Truncated {
+		fmt.Fprintln(os.Stderr, "ahc: warning: command output was truncated by the server")
+	}
+	if result.TimedOut {
+		fmt.Fprintln(os.Stderr, "ahc: command timed out")
+		code := result.ExitCode
+		if code == 0 {
+			code = 124 // same convention as timeout(1)
+		}
+		return &exitCodeError{code: code, msg: fmt.Sprintf("command timed out (exit code %d)", code)}
+	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("command exited with exit code %d", result.ExitCode)
+		return &exitCodeError{code: result.ExitCode, msg: fmt.Sprintf("command exited with exit code %d", result.ExitCode)}
 	}
 	return nil
 }

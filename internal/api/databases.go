@@ -1,15 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/go-chi/chi/v5"
 )
+
+const databaseCreateTimeout = 6 * time.Minute
 
 // requireDBManager is a guard that returns 503 if dbManager is nil.
 func (s *Server) requireDBManager(w http.ResponseWriter) bool {
@@ -32,7 +36,14 @@ func (s *Server) handleDatabaseCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := s.dbManager.Create(r.Context(), tenantID, req)
+	// A cold database image can take several minutes to pull, followed by up to
+	// 30 seconds of readiness checks. The global server WriteTimeout is only
+	// 30 seconds, so give this route a matching bounded context and response
+	// deadline instead of letting provisioning finish after the client times out.
+	ctx, cancel := context.WithTimeout(r.Context(), databaseCreateTimeout)
+	defer cancel()
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(databaseCreateTimeout + 5*time.Second))
+	db, err := s.dbManager.Create(ctx, tenantID, req)
 	if err != nil {
 		apierr.WriteAPIError(w, err)
 		return

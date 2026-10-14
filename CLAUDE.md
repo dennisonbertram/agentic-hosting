@@ -9,7 +9,9 @@ Single Go binary PaaS designed for AI agents: deploy, manage, and monitor servic
 - Default working dir: `~/Develop/agentic-hosting` (capital D)
 - Always read `docs/implementation/build-log.md` at the start of a new session to orient yourself
 - Read `CHANGELOG.md` to understand recent changes
-- Server: `65.21.67.254`, SSH: `ssh -i ~/.ssh/id_hetzner_claudeops root@65.21.67.254`
+- Current server: Hetzner host `170337926`, IPv4 `178.104.44.25` (Ubuntu 24.04).
+- Permanent SSH host key: Ed25519 fingerprint `SHA256:PeDsaS5dEfMAjVePNjnFn8ZTGDXW8oyHKfL9UqFWbKc`. Verify it through the trusted provisioning channel before connecting.
+- The former server at `65.21.67.254` is retired and untrusted. Do not connect to it or accept its SSH host key.
 
 ## Commit Conventions
 
@@ -42,14 +44,11 @@ Single Go binary PaaS designed for AI agents: deploy, manage, and monitor servic
 - Never mark a task done without verifying `go build ./...` passes
 - Never modify the master key path or bootstrap token logic without a security review
 
-## Ralph Loop
+## Code Review
 
-Use the Ralph Loop (iterative AI review) for:
-
-- New API endpoints
-- Security-sensitive changes (auth, crypto, rate limiting)
-- Reconciler logic changes
-- Any change touching circuit breaker or health probe logic
+- Run `/code-astra-review` once on the final diff before opening a PR. Changes to auth, crypto, rate limiting, the reconciler, the circuit breaker, health probes, the master key path, or bootstrap token logic must have this review before merge.
+- Use `/security-review` for a whole-codebase security audit.
+- Reviewer subagents must not send repository code to external model services (`llm`, OpenAI, OpenRouter, DeepSeek, or similar). Only `/code-astra-review` sends code outside, and only because it is the review the user chose.
 
 ## Key Files
 

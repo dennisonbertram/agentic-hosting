@@ -1,9 +1,15 @@
 package databases
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,7 +72,7 @@ func serveFakeRedis(t *testing.T) int {
 			go func(c net.Conn) {
 				defer c.Close()
 				buf := make([]byte, 64)
-				c.Read(buf) //nolint:errcheck
+				c.Read(buf)                  //nolint:errcheck
 				c.Write([]byte("+PONG\r\n")) //nolint:errcheck
 			}(conn)
 		}
@@ -161,7 +167,7 @@ func TestPostgresReady_ErrorResponseIsReady(t *testing.T) {
 func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 	port := serveSilentTCP(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a silent TCP listener should not be considered redis-ready")
 }
 
@@ -170,8 +176,98 @@ func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 func TestRedisReady_ProperPongIsReady(t *testing.T) {
 	port := serveFakeRedis(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.True(t, got, "a fake redis server responding +PONG should be considered ready")
+}
+
+func TestRedisReady_AuthenticatesBeforePingAndHandlesPartialReplies(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		auth, err := readTestRedisCommand(reader)
+		if err != nil || !reflect.DeepEqual(auth, []string{"AUTH", "synthetic-password"}) {
+			return
+		}
+		_, _ = conn.Write([]byte("+O"))
+		_, _ = conn.Write([]byte("K\r\n"))
+		ping, err := readTestRedisCommand(reader)
+		if err != nil || !reflect.DeepEqual(ping, []string{"PING"}) {
+			return
+		}
+		_, _ = conn.Write([]byte("+PO"))
+		_, _ = conn.Write([]byte("NG\r\n"))
+	}()
+
+	assert.True(t, redisReady(ln.Addr().String(), "synthetic-password"))
+}
+
+func TestRedisReady_RejectsInvalidPassword(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = readTestRedisCommand(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte("-WRONGPASS invalid username-password pair\r\n"))
+	}()
+
+	assert.False(t, redisReady(ln.Addr().String(), "synthetic-password"))
+}
+
+func TestRedisReady_RejectsUnauthenticatedRedis(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = readTestRedisCommand(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte("-NOAUTH Authentication required.\r\n"))
+	}()
+
+	assert.False(t, redisReady(ln.Addr().String(), ""))
+}
+
+func readTestRedisCommand(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil || len(line) < 4 || line[0] != '*' {
+		return nil, fmt.Errorf("invalid RESP array")
+	}
+	count, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")[1:])
+	if err != nil || count < 1 || count > 4 {
+		return nil, fmt.Errorf("invalid RESP array length")
+	}
+	args := make([]string, 0, count)
+	for range count {
+		line, err = reader.ReadString('\n')
+		if err != nil || len(line) < 4 || line[0] != '$' {
+			return nil, fmt.Errorf("invalid RESP bulk length")
+		}
+		length, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")[1:])
+		if err != nil || length < 0 || length > 1024 {
+			return nil, fmt.Errorf("invalid RESP bulk length")
+		}
+		arg := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, arg); err != nil || !bytes.HasSuffix(arg, []byte("\r\n")) {
+			return nil, fmt.Errorf("invalid RESP bulk argument")
+		}
+		args = append(args, string(arg[:length]))
+	}
+	return args, nil
 }
 
 // TestRedisReady_WrongResponseIsNotReady verifies that a server responding
@@ -199,13 +295,58 @@ func TestRedisReady_WrongResponseIsNotReady(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a redis server returning a non-PONG response should not be considered ready")
 }
 
 // ---------------------------------------------------------------------------
 // Manager integration tests
 // ---------------------------------------------------------------------------
+
+func TestCreate_PullFailureWithLocalImageProceeds(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	mock := &testutil.MockDockerClient{
+		PullImageFn:   func(context.Context, string) error { return errors.New("registry down") },
+		ImageExistsFn: func(context.Context, string) (bool, error) { return true, nil },
+	}
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "cached", Type: "postgres"})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "pull database image")
+	}
+	assert.Equal(t, 1, mock.RunDatabaseCalls, "a cached image must let provisioning proceed")
+}
+
+func TestCreate_PullsDatabaseImageBeforeCreatingResources(t *testing.T) {
+	for _, tc := range []struct {
+		dbType string
+		image  string
+	}{
+		{"postgres", "postgres:16-alpine"},
+		{"redis", "redis:7-alpine"},
+	} {
+		t.Run(tc.dbType, func(t *testing.T) {
+			stateDB := testutil.NewStateDB(t)
+			seedDatabaseTestData(t, stateDB, 5)
+			mock := &testutil.MockDockerClient{
+				PullImageFn: func(context.Context, string) error {
+					return errors.New("synthetic pull failure")
+				},
+			}
+			mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+			got, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "image-check", Type: tc.dbType})
+			require.ErrorContains(t, err, "pull database image")
+			assert.Nil(t, got)
+			assert.Equal(t, []string{tc.image}, mock.PullImageCalls)
+			assert.Empty(t, mock.CreateVolumeCalls, "volume must not be created when the base image cannot be pulled")
+			assert.Zero(t, mock.RunDatabaseCalls, "container must not be started when the base image cannot be pulled")
+			var rows int
+			require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM databases WHERE tenant_id = ?`, "tenant-1").Scan(&rows))
+			assert.Zero(t, rows, "failed image pull must not leave a failed database record")
+		})
+	}
+}
 
 func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
@@ -252,6 +393,7 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, second)
 	assert.ErrorContains(t, err, "quota exceeded: maximum 1 databases reached")
+	assert.Equal(t, []string{"postgres:16-alpine", "postgres:16-alpine"}, dockerClient.PullImageCalls)
 }
 
 // TestDelete_WipesVolumeBeforeRemoval verifies that WipeVolume is called before
@@ -341,11 +483,11 @@ func TestValidateName_ValidNames(t *testing.T) {
 		"mydb",
 		"my-db-1",
 		"postgres_main",
-		"a",              // single letter
-		"A",              // single uppercase letter
-		"db1",            // letter then digits
-		"my_db",          // underscores
-		"My-Mixed_Case1", // mixed case with hyphens and underscores
+		"a",                     // single letter
+		"A",                     // single uppercase letter
+		"db1",                   // letter then digits
+		"my_db",                 // underscores
+		"My-Mixed_Case1",        // mixed case with hyphens and underscores
 		strings.Repeat("a", 63), // max length
 	}
 	for _, name := range valid {
@@ -394,4 +536,47 @@ func seedDatabaseTestData(t *testing.T, stateDB *sql.DB, maxDatabases int) {
 		"tenant-1", maxDatabases,
 	)
 	require.NoError(t, err)
+}
+
+func TestGetAndDeleteDatabaseWithNullContainerID(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	dockerClient := &testutil.MockDockerClient{}
+	mgr := NewManager(stateDB, dockerClient, []byte("0123456789abcdef0123456789abcdef"))
+	for _, tc := range []struct {
+		id     string
+		status string
+	}{
+		{id: "failed-create", status: "failed"},
+		{id: "provisioning-create", status: "provisioning"},
+	} {
+		_, err := stateDB.Exec(`INSERT INTO databases
+			(id, tenant_id, name, type, status, container_id, port, db_name, username, password_encrypted, volume_name, created_at, updated_at)
+			VALUES (?, 'tenant-1', ?, 'redis', ?, NULL, 16379, '', '', 'encrypted', ?, 1, 1)`,
+			tc.id, tc.id, tc.status, "volume-"+tc.id)
+		require.NoError(t, err)
+	}
+
+	for _, tc := range []struct {
+		id     string
+		status string
+	}{
+		{id: "failed-create", status: "failed"},
+		{id: "provisioning-create", status: "provisioning"},
+	} {
+		db, err := mgr.Get(context.Background(), "tenant-1", tc.id)
+		require.NoError(t, err)
+		assert.Equal(t, tc.status, db.Status)
+		assert.Empty(t, db.ContainerID)
+	}
+
+	err := mgr.Delete(context.Background(), "tenant-1", "failed-create")
+	require.NoError(t, err)
+	assert.Empty(t, dockerClient.StopContainerCalls)
+	assert.Empty(t, dockerClient.RemoveContainerCalls)
+	assert.Equal(t, []string{"volume-failed-create"}, dockerClient.WipeVolumeCalls)
+	assert.Equal(t, []string{"volume-failed-create"}, dockerClient.RemoveVolumeCalls)
+	var count int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM databases WHERE id = 'failed-create'`).Scan(&count))
+	assert.Zero(t, count)
 }

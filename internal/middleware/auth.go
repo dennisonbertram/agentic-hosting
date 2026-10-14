@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
@@ -30,13 +31,22 @@ type authCacheEntry struct {
 	tenantID  string
 	keyHash   string
 	status    string
+	rateLimit int    // tenant_quotas.api_rate_limit; 0 = default
 	expiresAt *int64 // key expiration time (nil = no expiry)
 	cachedAt  time.Time
 }
 
 type authCache struct {
 	lru *cache.LRU[string, *authCacheEntry]
+	// mu guards gen against concurrent invalidate/setIfUnchanged. gen is bumped
+	// by every invalidation so a request that read the DB before a revoke
+	// cannot write its stale entry back afterwards.
+	mu  sync.Mutex
+	gen uint64
 }
+
+// authAfterDBRead is a test hook called after the auth DB read, before the cache write.
+var authAfterDBRead func()
 
 func newAuthCache() *authCache {
 	c := &authCache{
@@ -66,7 +76,25 @@ func (c *authCache) set(keyID string, entry *authCacheEntry) {
 	c.lru.Set(keyID, entry)
 }
 
+func (c *authCache) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gen
+}
+
+// setIfUnchanged caches entry only if no invalidation happened since gen was read.
+func (c *authCache) setIfUnchanged(keyID string, entry *authCacheEntry, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.lru.Set(keyID, entry)
+	}
+}
+
 func (c *authCache) invalidate(keyID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gen++
 	c.lru.Delete(keyID)
 }
 
@@ -83,6 +111,9 @@ func (a *AuthCacheInvalidator) InvalidateKey(keyID string) {
 
 // InvalidateTenant removes all cached keys belonging to the given tenant.
 func (a *AuthCacheInvalidator) InvalidateTenant(tenantID string) {
+	a.cache.mu.Lock()
+	defer a.cache.mu.Unlock()
+	a.cache.gen++
 	a.cache.lru.DeleteFunc(func(_ string, v *authCacheEntry) bool {
 		return v.tenantID == tenantID
 	})
@@ -123,7 +154,7 @@ func (t *lastUsedTracker) maybeUpdate(keyID string) {
 	}
 }
 
-func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
+func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCacheInvalidator) {
 	tracker := newLastUsedTracker(db)
 	cache := newAuthCache()
 	invalidator := &AuthCacheInvalidator{cache: cache}
@@ -158,6 +189,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 			}
 
 			var tenantID, keyHash, status string
+			var rateLimit int
 
 			// Check auth cache first to reduce DB load
 			if cached, ok := cache.get(keyID); ok {
@@ -170,18 +202,21 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 				tenantID = cached.tenantID
 				keyHash = cached.keyHash
 				status = cached.status
+				rateLimit = cached.rateLimit
 			} else {
+				gen := cache.generation()
 				now := time.Now().Unix()
 				var expiresAt *int64
 				err := db.QueryRowContext(r.Context(),
-					`SELECT ak.tenant_id, ak.key_hash, t.status, ak.expires_at
+					`SELECT ak.tenant_id, ak.key_hash, t.status, ak.expires_at, COALESCE(q.api_rate_limit, 0)
 					 FROM api_keys ak
 					 JOIN tenants t ON t.id = ak.tenant_id
+					 LEFT JOIN tenant_quotas q ON q.tenant_id = ak.tenant_id
 					 WHERE ak.id = ?
 					   AND ak.revoked_at IS NULL
 					   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
 					keyID, now,
-				).Scan(&tenantID, &keyHash, &status, &expiresAt)
+				).Scan(&tenantID, &keyHash, &status, &expiresAt, &rateLimit)
 				if err == sql.ErrNoRows {
 					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 					return
@@ -191,13 +226,17 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 					return
 				}
 
-				cache.set(keyID, &authCacheEntry{
+				if authAfterDBRead != nil {
+					authAfterDBRead()
+				}
+				cache.setIfUnchanged(keyID, &authCacheEntry{
 					tenantID:  tenantID,
 					keyHash:   keyHash,
 					status:    status,
+					rateLimit: rateLimit,
 					expiresAt: expiresAt,
 					cachedAt:  time.Now(),
-				})
+				}, gen)
 			}
 
 			if status != "active" {
@@ -205,7 +244,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 				return
 			}
 
-			if !crypto.VerifyAPIKey(keyHash, secret, masterKey) {
+			if !crypto.VerifyAPIKey(keyHash, secret, hashKey) {
 				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
@@ -214,6 +253,7 @@ func Auth(db *sql.DB, masterKey []byte) (func(http.Handler) http.Handler, *AuthC
 
 			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
 			ctx = context.WithValue(ctx, KeyIDKey, keyID)
+			ctx = ContextWithRateLimit(ctx, rateLimit)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

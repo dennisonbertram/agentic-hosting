@@ -141,7 +141,7 @@ func TestRotateKeys_RoundTrip(t *testing.T) {
 	assert.Equal(t, 1, result.KanbanTokens, "expected 1 kanban token")
 	assert.Equal(t, 1, result.SnapshotEnvs, "expected 1 snapshot env blob")
 	assert.Equal(t, 0, result.Errors, "expected no errors")
-	assert.Equal(t, 6, result.Total(), "expected 6 total fields")
+	assert.Equal(t, 7, result.Total(), "expected 7 total fields")
 
 	// Verify data can be decrypted with the NEW key.
 	// 1. Service env vars
@@ -241,7 +241,7 @@ func TestRotateKeys_EmptyDatabase(t *testing.T) {
 	result, err := crypto.RotateKeys(db, oldKey, newKey, false)
 	require.NoError(t, err)
 
-	assert.Equal(t, 0, result.Total(), "no data to rotate should succeed with 0 total")
+	assert.Equal(t, 1, result.Total(), "only the API-key hash key row is rotated")
 	assert.Equal(t, 0, result.Errors)
 }
 
@@ -407,7 +407,7 @@ func TestRotateKeys_MultipleRows(t *testing.T) {
 	assert.Equal(t, 2, result.DatabasePasswords)
 	assert.Equal(t, 2, result.DatabaseConnStrs)
 	assert.Equal(t, 0, result.Errors)
-	assert.Equal(t, 7, result.Total())
+	assert.Equal(t, 8, result.Total())
 
 	// Spot check one value from each service.
 	var enc string

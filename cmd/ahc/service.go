@@ -163,13 +163,15 @@ func newServiceCreateCmd(root *rootState) *cobra.Command {
 The service is created with the given name and optional configuration.
 After creation, the platform will attempt to deploy the service automatically.
 
-At minimum, a name is required. If --image is not provided, a default
-placeholder image is used.`,
+Both --name and --image are required.`,
 		Example: `  ahc service create --name my-api --image nginx:latest --port 80
   ahc service create --name worker --image myapp:v2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if name == "" {
 				return fmt.Errorf("--name is required")
+			}
+			if image == "" {
+				return fmt.Errorf("--image is required (e.g. --image nginx:latest)")
 			}
 			c, err := getClient(root)
 			if err != nil {
@@ -193,7 +195,7 @@ placeholder image is used.`,
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", "Name for the new service (required)")
-	cmd.Flags().StringVar(&image, "image", "", "Docker image to deploy (e.g. nginx:latest)")
+	cmd.Flags().StringVar(&image, "image", "", "Docker image to deploy, e.g. nginx:latest (required)")
 	cmd.Flags().IntVar(&port, "port", 0, "Port the service listens on (0 = use default)")
 	return cmd
 }

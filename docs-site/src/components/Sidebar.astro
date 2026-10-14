@@ -1,0 +1,51 @@
+---
+import { nav } from '../data/nav';
+
+const { current } = Astro.props as { current: string };
+const base = import.meta.env.BASE_URL;
+
+function hrefFor(slug: string) {
+  return slug ? `${base}${slug}/` : base;
+}
+
+function isActive(slug: string) {
+  return current === slug;
+}
+---
+
+<aside
+  id="docs-sidebar"
+  class="docs-sidebar hidden lg:block w-64 shrink-0 border-r border-stone-200 bg-stone-50 lg:sticky lg:top-[57px] lg:h-[calc(100vh-57px)] overflow-y-auto"
+>
+  <div class="px-5 py-6">
+    <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-4">Documentation</p>
+    {nav.map((section) => (
+      <div class="mb-6">
+        <p class="text-[11px] uppercase tracking-widest text-stone-400 font-mono-stack mb-2">{section.label}</p>
+        <ul class="space-y-0.5">
+          {section.items.map((item) => (
+            <li>
+              <a
+                href={hrefFor(item.slug)}
+                class:list={[
+                  'block rounded-md px-2.5 py-1.5 text-sm transition-colors',
+                  isActive(item.slug)
+                    ? 'bg-stone-900 text-stone-50'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100',
+                ]}
+              >
+                {item.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
+    <a
+      href="https://github.com/dennisonbertram/agentic-hosting"
+      class="mt-2 inline-flex items-center gap-1.5 text-xs text-stone-50 bg-stone-900 rounded-full px-3 py-1.5 hover:opacity-90"
+    >
+      ★ Star on GitHub
+    </a>
+  </div>
+</aside>

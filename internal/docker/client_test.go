@@ -2,10 +2,40 @@ package docker
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/go-connections/nat"
 )
+
+func TestConfiguredContainerPortUsesPORTThenUniqueExposedTCPPort(t *testing.T) {
+	cfg := &container.Config{
+		Env: []string{"TOKEN=must-not-be-returned", "PORT=3000"},
+		ExposedPorts: nat.PortSet{
+			nat.Port("80/tcp"):   struct{}{},
+			nat.Port("3000/tcp"): struct{}{},
+		},
+	}
+	if got := configuredContainerPort(cfg); got != 3000 {
+		t.Fatalf("configuredContainerPort with PORT = %d, want 3000", got)
+	}
+
+	unique := &container.Config{ExposedPorts: nat.PortSet{nat.Port("8080/tcp"): struct{}{}}}
+	if got := configuredContainerPort(unique); got != 8080 {
+		t.Fatalf("configuredContainerPort with one exposed TCP port = %d, want 8080", got)
+	}
+
+	ambiguous := &container.Config{ExposedPorts: nat.PortSet{
+		nat.Port("8080/tcp"): struct{}{},
+		nat.Port("9090/tcp"): struct{}{},
+	}}
+	if got := configuredContainerPort(ambiguous); got != 0 {
+		t.Fatalf("configuredContainerPort with ambiguous exposed ports = %d, want 0", got)
+	}
+}
 
 func TestBuildServiceContainerConfig_DoesNotInjectHealthcheck(t *testing.T) {
 	cfg := buildServiceContainerConfig(
@@ -132,6 +162,22 @@ func TestContainerName(t *testing.T) {
 	}
 }
 
+func TestEnvironmentContainerLabelsKeepLifecycleTypeReserved(t *testing.T) {
+	base := RunEnvironmentConfig{
+		TenantID: "tenant-1", EnvID: "env-1",
+		Labels: map[string]string{"ah.type": "attacker-value", "ah.tenant": "attacker-tenant"},
+	}
+	labels := environmentContainerLabels(base)
+	if labels["ah.type"] != "environment" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("environment labels did not preserve reserved identity: %#v", labels)
+	}
+	base.WarmPool = true
+	labels = environmentContainerLabels(base)
+	if labels["ah.type"] != "warm-pool" || labels["ah.tenant"] != "tenant-1" {
+		t.Fatalf("warm-pool lifecycle was not explicitly applied: %#v", labels)
+	}
+}
+
 func TestTenantNetworkName(t *testing.T) {
 	tests := []struct {
 		tenantID string
@@ -146,6 +192,54 @@ func TestTenantNetworkName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("TenantNetworkName(%q) = %q, want %q", tc.tenantID, got, tc.want)
 		}
+	}
+}
+
+func TestPerWorkloadIngressNetworkNames(t *testing.T) {
+	tenantID := "tenant-1"
+	serviceID := "svc-1"
+	environmentID := "env-1"
+	if got, want := ServiceIngressNetworkName(tenantID, serviceID), "ah-ingress-tenant-1-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressNetworkName(tenantID, environmentID), "ah-ingress-tenant-1-environment-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := TenantIngressNetworkPrefix(tenantID), "ah-ingress-tenant-1-"; got != want {
+		t.Fatalf("TenantIngressNetworkPrefix() = %q, want %q", got, want)
+	}
+	if got, want := ServiceIngressAlias(tenantID, serviceID), "ah-route-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressAlias() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressAlias(tenantID, environmentID), "ah-route-env-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressAlias() = %q, want %q", got, want)
+	}
+}
+
+func TestPerWorkloadIngressAliasesFitDockerDNSLabelLimit(t *testing.T) {
+	fullID := "0123456789abcdef0123456789abcdef"
+	serviceAlias := ServiceIngressAlias("tenant-with-a-long-id", fullID)
+	environmentAlias := EnvironmentIngressAlias("tenant-with-a-long-id", fullID)
+	if len(serviceAlias) > 63 || len(environmentAlias) > 63 {
+		t.Fatalf("aliases exceed Docker DNS-label limit: service=%q (%d), environment=%q (%d)",
+			serviceAlias, len(serviceAlias), environmentAlias, len(environmentAlias))
+	}
+	if serviceAlias == environmentAlias {
+		t.Fatalf("service and environment aliases must have distinct prefixes: %q", serviceAlias)
+	}
+	if serviceAlias != ServiceIngressAlias("different-tenant", fullID) {
+		t.Fatal("globally unique workload IDs should produce tenant-independent aliases")
+	}
+}
+
+func TestBridgeNetworkCreateOptionsKeepTenantIsolationAndAllowIngressPair(t *testing.T) {
+	tenant := bridgeNetworkCreateOptions(false)
+	if !tenant.Internal || tenant.Driver != "bridge" || tenant.Options["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Fatalf("tenant/pool network options weakened isolation: %#v", tenant)
+	}
+	ingress := bridgeNetworkCreateOptions(true)
+	if !ingress.Internal || ingress.Driver != "bridge" || ingress.Options["com.docker.network.bridge.enable_icc"] != "true" {
+		t.Fatalf("ingress pair network options do not allow internal proxy traffic: %#v", ingress)
 	}
 }
 
@@ -332,5 +426,63 @@ func TestRunDatabaseConfig_DefaultLabels(t *testing.T) {
 	}
 	if custom["custom"] != "label" {
 		t.Errorf("custom label = %q, want %q", custom["custom"], "label")
+	}
+}
+
+func TestWipeConfigs(t *testing.T) {
+	cfg, host := wipeConfigs("vol1")
+	if !strings.HasPrefix(cfg.Image, "busybox:") || strings.HasSuffix(cfg.Image, ":latest") {
+		t.Errorf("image must be pinned, got %q", cfg.Image)
+	}
+	if host.Runtime != "runsc" {
+		t.Errorf("runtime = %q, want runsc", host.Runtime)
+	}
+	if host.NetworkMode != "none" {
+		t.Errorf("network = %q, want none", host.NetworkMode)
+	}
+	if len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" {
+		t.Errorf("CapDrop = %v, want [ALL]", host.CapDrop)
+	}
+	if !host.AutoRemove {
+		t.Error("AutoRemove must be set so a crash cannot strand the container on the volume")
+	}
+	if cfg.Labels["ah.managed"] != "true" || cfg.Labels["ah.type"] != "wipe" {
+		t.Errorf("labels = %v, want ah.managed=true ah.type=wipe", cfg.Labels)
+	}
+	if host.Memory == 0 || host.PidsLimit == nil {
+		t.Error("memory and pids limits must be set")
+	}
+	script := strings.Join(cfg.Cmd, " ")
+	if strings.Contains(script, "if=/dev/zero") || !strings.Contains(script, `head -c "$(wc -c`) {
+		t.Errorf("wipe must cap writes to the file size, got %q", script)
+	}
+}
+
+// Runs the wipe script (without the final rm) in a real container and checks
+// each file keeps its size and is zeroed. Skipped when docker is unavailable.
+func TestWipeScript_BoundedToFileSize(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("docker daemon not reachable")
+	}
+	script := strings.Replace(wipeScript, `rm -f "$1"`, `echo "$(wc -c < "$1") $(tr -d "\\000" < "$1" | wc -c)"`, 1)
+	script = `mkdir -p /data/sub; echo -n hello > /data/a; head -c 5000 /dev/urandom > /data/sub/b; ` + script
+	if err := exec.Command("docker", "pull", "-q", wipeImage).Run(); err != nil {
+		t.Skipf("cannot pull %s: %v", wipeImage, err)
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--network", "none", wipeImage, "sh", "-c", script).Output()
+	if err != nil {
+		t.Skipf("cannot run %s: %v: %s", wipeImage, err, out)
+	}
+	// per file: "<size> <non-zero byte count>"
+	f := strings.Fields(string(out))
+	got := map[string]bool{}
+	for i := 0; i+1 < len(f); i += 2 {
+		got[f[i]+" "+f[i+1]] = true
+	}
+	if !got["5 0"] || !got["5000 0"] {
+		t.Fatalf("sizes changed or data not zeroed: %q", out)
 	}
 }

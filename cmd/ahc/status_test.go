@@ -64,12 +64,12 @@ func TestStatus_ExitCode0_WhenHealthy(t *testing.T) {
 	assert.Equal(t, 0, exitCode, "exit code must be 0 when all systems are healthy")
 }
 
-// ---- BT-002: Exit code 1 when a service has circuit_open status ----
+// ---- BT-002: Exit code 1 when a service has circuit-open status ----
 
 func TestStatus_ExitCode1_WhenServiceCircuitOpen(t *testing.T) {
 	health, _, databases := healthyState()
 	services := []ahclient.Service{
-		{ID: "aabbccdd11223344aabbccdd11223344", Name: "web", Status: "circuit_open", CrashCount: 5},
+		{ID: "aabbccdd11223344aabbccdd11223344", Name: "web", Status: "failed", CircuitOpen: true, CrashCount: 5},
 	}
 	srv := buildStatusServer(health, services, databases)
 	defer srv.Close()
@@ -78,7 +78,7 @@ func TestStatus_ExitCode1_WhenServiceCircuitOpen(t *testing.T) {
 
 	exitCode, err := runStatusCmd(c, &bytes.Buffer{}, false)
 	require.NoError(t, err)
-	assert.Equal(t, 1, exitCode, "exit code must be 1 when a service is circuit_open")
+	assert.Equal(t, 1, exitCode, "exit code must be 1 when a service is circuit-open")
 }
 
 // ---- BT-003: Exit code 1 when disk usage >90% ----
@@ -243,12 +243,12 @@ func TestStatus_Disk90Percent_IsNotCritical(t *testing.T) {
 
 // ---- regression tests ----
 
-// REG-001: When both a circuit_open service AND healthy disk exist, exit code is still 1
+// REG-001: When both a circuit-open service AND healthy disk exist, exit code is still 1
 func TestStatus_Regression_CircuitOpenTakesPrecedence(t *testing.T) {
 	health, _, databases := healthyState()
 	health.Disk.UsedPercent = 50 // healthy disk
 	services := []ahclient.Service{
-		{ID: "aabbccdd11223344aabbccdd11223344", Name: "api", Status: "circuit_open", CrashCount: 3},
+		{ID: "aabbccdd11223344aabbccdd11223344", Name: "api", Status: "failed", CircuitOpen: true, CrashCount: 3},
 		{ID: "bbbbccdd11223344aabbccdd11223344", Name: "worker", Status: "running", CrashCount: 0},
 	}
 	srv := buildStatusServer(health, services, databases)
@@ -258,14 +258,14 @@ func TestStatus_Regression_CircuitOpenTakesPrecedence(t *testing.T) {
 
 	exitCode, err := runStatusCmd(c, &bytes.Buffer{}, false)
 	require.NoError(t, err)
-	assert.Equal(t, 1, exitCode, "exit code must be 1 even when only one service is circuit_open")
+	assert.Equal(t, 1, exitCode, "exit code must be 1 even when only one service is circuit-open")
 }
 
 // REG-002: JSON output must include exit-code-relevant status so callers can inspect it
 func TestStatus_JSONOutput_IncludesUnhealthyStatus(t *testing.T) {
 	health, _, databases := healthyState()
 	services := []ahclient.Service{
-		{ID: "aabbccdd11223344aabbccdd11223344", Name: "api", Status: "circuit_open", CrashCount: 3},
+		{ID: "aabbccdd11223344aabbccdd11223344", Name: "api", Status: "failed", CircuitOpen: true, CrashCount: 3},
 	}
 	srv := buildStatusServer(health, services, databases)
 	defer srv.Close()
@@ -275,7 +275,7 @@ func TestStatus_JSONOutput_IncludesUnhealthyStatus(t *testing.T) {
 
 	exitCode, err := runStatusCmd(c, out, true)
 	require.NoError(t, err)
-	assert.Equal(t, 1, exitCode, "exit code must be 1 in JSON mode when service is circuit_open")
+	assert.Equal(t, 1, exitCode, "exit code must be 1 in JSON mode when service is circuit-open")
 
 	// JSON should still be parseable
 	var result map[string]json.RawMessage
@@ -294,6 +294,48 @@ func TestStatus_EmptyLists_DoNotCrash(t *testing.T) {
 	exitCode, err := runStatusCmd(c, out, false)
 	require.NoError(t, err)
 	assert.Equal(t, 0, exitCode, "empty service/database lists must not cause failure")
+}
+
+func TestStatus_ExitCode1ForDegradedSystemHealth(t *testing.T) {
+	health, services, databases := healthyState()
+	health.Status = "degraded"
+	srv := buildStatusServer(health, services, databases)
+	defer srv.Close()
+
+	code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+}
+
+func TestStatus_ExitCode1ForMissingIsolationOrDatabaseFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ahclient.DetailedHealthResponse, []ahclient.Database)
+	}{
+		{name: "docker unavailable", mutate: func(h *ahclient.DetailedHealthResponse, _ []ahclient.Database) { h.Docker.Available = false }},
+		{name: "gvisor unavailable", mutate: func(h *ahclient.DetailedHealthResponse, _ []ahclient.Database) { h.GVisor.Available = false }},
+		{name: "database failed", mutate: func(_ *ahclient.DetailedHealthResponse, dbs []ahclient.Database) { dbs[0].Status = "failed" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health, services, databases := healthyState()
+			tc.mutate(&health, databases)
+			srv := buildStatusServer(health, services, databases)
+			defer srv.Close()
+			code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+			require.NoError(t, err)
+			assert.Equal(t, 1, code)
+		})
+	}
+}
+
+func TestStatus_ExitCode1ForDockerDiskCritical(t *testing.T) {
+	health, services, databases := healthyState()
+	health.DockerDisk.UsedPercent = 91
+	srv := buildStatusServer(health, services, databases)
+	defer srv.Close()
+	code, err := runStatusCmd(ahclient.NewClient(srv.URL, "key"), &bytes.Buffer{}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
 }
 
 // ---- helpers ----

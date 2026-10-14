@@ -1,4 +1,4 @@
-.PHONY: build build-cli run clean test test-coverage lint
+.PHONY: build build-cli run clean test test-coverage lint docs docs-dev
 
 build:
 	CGO_ENABLED=1 go build -o bin/ah ./cmd/ah
@@ -17,5 +17,11 @@ test-coverage:
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
+docs:
+	cd docs-site && npm ci && npm run llms && npm run build
+
+docs-dev:
+	cd docs-site && npm install && npm run dev
+
 clean:
-	rm -rf bin/ coverage.out coverage.html
+	rm -rf bin/ coverage.out coverage.html docs-site/dist docs-site/.astro

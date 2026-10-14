@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type ServerConfig struct {
 	MasterKey        []byte
 	DevMode          bool
 	BootstrapTokens  []string
+	AdminTokens      []string // operator-only endpoints (recover/reactivate/quota); empty = fall back to BootstrapTokens
 	OpenRegistration bool
 	Docker           docker.Client
 	BuildManager     *builds.Manager
@@ -41,6 +43,7 @@ type ServerConfig struct {
 	EnvironmentManager *environments.Manager
 	BaseDomain         string
 	TraefikConfigDir   string
+	DataDir            string // data dir for health disk checks (default /var/lib/ah)
 }
 
 type kanbanManager interface {
@@ -49,6 +52,7 @@ type kanbanManager interface {
 	GetAdminToken(ctx context.Context, tenantID string) (string, error)
 	Delete(ctx context.Context, tenantID string) error
 	StopForTenant(ctx context.Context, tenantID string)
+	StartForTenant(ctx context.Context, tenantID string)
 }
 
 type databaseManager interface {
@@ -59,15 +63,19 @@ type databaseManager interface {
 	GetConnectionString(ctx context.Context, tenantID, dbID string) (string, error)
 	Delete(ctx context.Context, tenantID, dbID string) error
 	StopAllForTenant(ctx context.Context, tenantID string)
+	StartAllForTenant(ctx context.Context, tenantID string)
 }
 
 type Server struct {
 	store             *db.Store
 	masterKey         []byte
+	apiKeyHashKey     []byte // HMAC key for API key hashes; independent of master key rotation
 	devMode           bool
 	bootstrapTokens   []string
+	adminTokens       []string
 	openRegistration  bool
 	baseDomain        string
+	dataDir           string
 	router            chi.Router
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
@@ -83,7 +91,21 @@ type Server struct {
 	authRateLimiter   *middleware.RateLimiter
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
+	longInflight      *middleware.InflightLimiter
 }
+
+const (
+	// shortRouteConcurrency caps in-flight short requests (global pool). Long
+	// routes are excluded so slow exec/log streams cannot starve /v1/system/health.
+	shortRouteConcurrency = 200
+	// maxLongPerTenant caps concurrent long-running requests per tenant.
+	maxLongPerTenant = 4
+	// normalWriteDeadline bounds a whole response on short routes.
+	normalWriteDeadline = 60 * time.Second
+	// streamIdleWriteDeadline is how long a long/streaming route may go without
+	// the client accepting data before the connection is cut.
+	streamIdleWriteDeadline = 60 * time.Second
+)
 
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.Store == nil || cfg.Store.StateDB == nil {
@@ -91,7 +113,11 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	// Initialize auth middleware and cache invalidator early so they are
 	// guaranteed non-nil before any request can arrive.
-	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, cfg.MasterKey)
+	hashKey, err := crypto.LoadOrCreateAPIKeyHashKey(cfg.Store.StateDB, cfg.MasterKey)
+	if err != nil {
+		panic("ah: " + err.Error())
+	}
+	authMW, authInvalidator := middleware.Auth(cfg.Store.StateDB, hashKey)
 	rl := middleware.NewRateLimiter(100, 200)
 	globalRL := middleware.NewGlobalRateLimiter(500, 1000)
 	idem := middleware.NewIdempotencyStore()
@@ -106,10 +132,13 @@ func NewServer(cfg ServerConfig) *Server {
 	s := &Server{
 		store:             cfg.Store,
 		masterKey:         cfg.MasterKey,
+		apiKeyHashKey:     hashKey,
 		devMode:           cfg.DevMode,
 		bootstrapTokens:   cfg.BootstrapTokens,
+		adminTokens:       cfg.AdminTokens,
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
+		dataDir:           cfg.DataDir,
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,
@@ -124,6 +153,7 @@ func NewServer(cfg ServerConfig) *Server {
 		authRateLimiter:   rl,
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
+		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
 	}
 	s.setupRoutes()
 	return s
@@ -138,9 +168,6 @@ func (s *Server) setupRoutes() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(maxBodySize(1 << 20))
-	// Global concurrency limiter: cap in-flight requests to prevent goroutine exhaustion
-	r.Use(chimw.Throttle(200))
-
 	// Strip forwarded headers from non-loopback requests to prevent spoofing.
 	// This runs unconditionally (including dev mode) as a defense-in-depth measure.
 	r.Use(stripUntrustedForwardedHeaders)
@@ -152,8 +179,14 @@ func (s *Server) setupRoutes() {
 		r.Use(requireHTTPS)
 	}
 
+	// One throttle instance so public and authenticated short routes share a
+	// single pool of shortRouteConcurrency slots.
+	shortThrottle := chimw.Throttle(shortRouteConcurrency)
+
 	// Public routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
+		r.Use(shortThrottle)
+		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
@@ -173,6 +206,8 @@ func (s *Server) setupRoutes() {
 
 	// Authenticated short-lived routes keep the standard request timeout.
 	r.Group(func(r chi.Router) {
+		r.Use(shortThrottle)
+		r.Use(middleware.WriteDeadline(normalWriteDeadline))
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
@@ -258,6 +293,8 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.longInflight.Middleware)
+		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Use(s.idempotencyStore.Middleware)
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
@@ -273,6 +310,8 @@ func (s *Server) setupRoutes() {
 		r.Use(s.authMW)
 		r.Use(s.authRateLimiter.Middleware)
 		r.Use(s.globalRateLimiter.Middleware)
+		r.Use(s.longInflight.Middleware)
+		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Post("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
 	})
 

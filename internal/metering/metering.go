@@ -9,13 +9,16 @@ import (
 
 // Metric represents an aggregated resource usage data point.
 type Metric struct {
-	Timestamp       string  `json:"timestamp"`
-	CPUSeconds      float64 `json:"cpu_seconds"`
-	MemoryMBAvg     float64 `json:"memory_mb_avg"`
-	NetworkRxBytes  int64   `json:"network_rx_bytes"`
-	NetworkTxBytes  int64   `json:"network_tx_bytes"`
-	ServiceID       string  `json:"service_id,omitempty"`
+	Timestamp      string  `json:"timestamp"`
+	CPUSeconds     float64 `json:"cpu_seconds"`
+	MemoryMBAvg    float64 `json:"memory_mb_avg"`
+	NetworkRxBytes int64   `json:"network_rx_bytes"`
+	NetworkTxBytes int64   `json:"network_tx_bytes"`
+	ServiceID      string  `json:"service_id,omitempty"`
 }
+
+// SampleSeconds is how long one usage_events sample row represents.
+const SampleSeconds = 60
 
 // Store wraps the metering SQLite database connection to provide
 // resource usage query methods.
@@ -55,14 +58,14 @@ func (s *Store) QueryTenantMetrics(tenantID, period string, since, until time.Ti
 			%s AS bucket,
 			COALESCE(service_id, '') AS svc_id,
 			COALESCE(SUM(cpu_seconds), 0),
-			COALESCE(SUM(memory_mb_seconds), 0),
+			COALESCE(SUM(memory_mb_seconds) / (COUNT(*) * %d.0), 0),
 			COALESCE(SUM(network_ingress_bytes), 0),
 			COALESCE(SUM(network_egress_bytes), 0)
 		FROM usage_events
 		WHERE tenant_id = ?
 		  AND recorded_at >= ?
 		  AND recorded_at <= ?
-	`, timeBucket)
+	`, timeBucket, SampleSeconds)
 
 	args := []any{tenantID, since.Unix(), until.Unix()}
 
@@ -91,7 +94,7 @@ func (s *Store) QueryServiceMetrics(tenantID, serviceID, period string, since, u
 			%s AS bucket,
 			COALESCE(service_id, '') AS svc_id,
 			COALESCE(SUM(cpu_seconds), 0),
-			COALESCE(SUM(memory_mb_seconds), 0),
+			COALESCE(SUM(memory_mb_seconds) / (COUNT(*) * %d.0), 0),
 			COALESCE(SUM(network_ingress_bytes), 0),
 			COALESCE(SUM(network_egress_bytes), 0)
 		FROM usage_events
@@ -101,7 +104,7 @@ func (s *Store) QueryServiceMetrics(tenantID, serviceID, period string, since, u
 		  AND recorded_at <= ?
 		GROUP BY bucket
 		ORDER BY bucket ASC
-	`, timeBucket)
+	`, timeBucket, SampleSeconds)
 
 	args := []any{tenantID, serviceID, since.Unix(), until.Unix()}
 
@@ -120,14 +123,10 @@ func (s *Store) execMetricsQuery(query string, args []any) ([]Metric, error) {
 	var metrics []Metric
 	for rows.Next() {
 		var m Metric
-		var memMBSeconds float64
-		if err := rows.Scan(&m.Timestamp, &m.ServiceID, &m.CPUSeconds, &memMBSeconds, &m.NetworkRxBytes, &m.NetworkTxBytes); err != nil {
+		if err := rows.Scan(&m.Timestamp, &m.ServiceID, &m.CPUSeconds, &m.MemoryMBAvg, &m.NetworkRxBytes, &m.NetworkTxBytes); err != nil {
 			return nil, fmt.Errorf("scan metric row: %w", err)
 		}
-		// memory_mb_seconds is a cumulative metric; average makes more sense for display.
-		// Without knowing exact event count per bucket, we report the raw sum.
-		// Callers can interpret this as total memory-MB-seconds in the bucket.
-		m.MemoryMBAvg = memMBSeconds
+		// MemoryMBAvg is computed in SQL: memory-MB-seconds divided by seconds covered.
 		metrics = append(metrics, m)
 	}
 	if err := rows.Err(); err != nil {

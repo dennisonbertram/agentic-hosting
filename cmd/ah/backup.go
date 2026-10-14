@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"time"
 
@@ -37,7 +39,10 @@ func runBackup(dbPath string) {
 	}
 
 	// Backup metering DB if it exists
-	meteringPath := dbPath[:len(dbPath)-3] + "-metering.db"
+	meteringPath := os.Getenv("AH_METER_DB_PATH")
+	if meteringPath == "" {
+		meteringPath = db.MeteringPath(dbPath)
+	}
 	if _, err := os.Stat(meteringPath); err == nil {
 		if err := backupSQLite(meteringPath, filepath.Join(backupDir, fmt.Sprintf("ah-metering-%s.db.gz", ts))); err != nil {
 			log.Printf("WARNING: backup metering db: %v", err)
@@ -50,39 +55,56 @@ func runBackup(dbPath string) {
 	log.Printf("backup complete: %s", backupDir)
 }
 
-// enforceRetention keeps only the N most recent .db.gz files in the directory.
+// enforceRetention keeps the newest `keep` backups for each of the state
+// (ah-<ts>) and metering (ah-metering-<ts>) series; they are pruned separately.
 func enforceRetention(dir string, keep int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	var backupFiles []string
+	var state, metering []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".db.gz") {
-			backupFiles = append(backupFiles, e.Name())
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".db.gz") {
+			continue
 		}
-	}
-	if len(backupFiles) <= keep {
-		return
-	}
-	// Sort ascending (oldest first) — timestamped names sort naturally
-	sort.Strings(backupFiles)
-	toDelete := backupFiles[:len(backupFiles)-keep]
-	for _, name := range toDelete {
-		path := filepath.Join(dir, name)
-		if err := os.Remove(path); err != nil {
-			log.Printf("backup: failed to remove old backup %s: %v", name, err)
+		if strings.HasPrefix(name, "ah-metering-") {
+			metering = append(metering, name)
 		} else {
-			log.Printf("backup: pruned old backup %s", name)
+			state = append(state, name)
 		}
 	}
+	for _, files := range [][]string{state, metering} {
+		if len(files) <= keep {
+			continue
+		}
+		// Sort ascending (oldest first); timestamped names sort naturally
+		sort.Strings(files)
+		for _, name := range files[:len(files)-keep] {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil {
+				log.Printf("backup: failed to remove old backup %s: %v", name, err)
+			} else {
+				log.Printf("backup: pruned old backup %s", name)
+			}
+		}
+	}
+}
+
+// backupDSN returns a read-only SQLite URI for path. The file: prefix is
+// required; without it the driver ignores mode=ro.
+func backupDSN(path string) string {
+	// A relative path would be parsed as a URI authority (file://data/ah.db).
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
 }
 
 // backupSQLite creates a consistent backup using SQLite's VACUUM INTO,
 // then gzips the result with atomic temp-file rename.
 func backupSQLite(srcDB, dstGz string) error {
 	// Open the source DB in read-only mode
-	db, err := sql.Open("sqlite3", srcDB+"?mode=ro&_journal_mode=WAL")
+	db, err := sql.Open("sqlite3", backupDSN(srcDB))
 	if err != nil {
 		return fmt.Errorf("open %s: %w", srcDB, err)
 	}

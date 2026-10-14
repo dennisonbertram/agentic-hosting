@@ -15,7 +15,9 @@ import (
 )
 
 // seedTemplates inserts the default set of environment templates into the test DB.
-func seedTemplates(t *testing.T, db interface{ ExecContext(ctx context.Context, query string, args ...any) (interface{ RowsAffected() (int64, error) }, error) }) {
+func seedTemplates(t *testing.T, db interface {
+	ExecContext(ctx context.Context, query string, args ...any) (interface{ RowsAffected() (int64, error) }, error)
+}) {
 	t.Helper()
 	// Use the raw *sql.DB from testutil since ExecContext returns (sql.Result, error).
 }
@@ -48,11 +50,55 @@ func TestPoolAcquire_Hit(t *testing.T) {
 	assert.Equal(t, "container-abc", containerID)
 	assert.Equal(t, "ah-pool-wp1", volumeName)
 
-	// Verify the row was deleted.
-	var count int
-	err = db.QueryRow(`SELECT COUNT(*) FROM warm_pool WHERE id = 'wp1'`).Scan(&count)
+	// The row is kept as 'claimed' so GC (which matches the immutable
+	// ah.type=warm-pool label against warm_pool rows) does not remove it.
+	var status string
+	err = db.QueryRow(`SELECT status FROM warm_pool WHERE id = 'wp1'`).Scan(&status)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count)
+	assert.Equal(t, "claimed", status)
+}
+
+func TestPoolAcquireDoesNotWaitForSlowRefillDockerCall(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	_, err := db.Exec(`INSERT INTO warm_pool (id, template_id, container_id, volume_name, status, created_at)
+		VALUES ('wp_ready', 'tmpl_default', 'ready-container', 'ah-pool-ready', 'ready', 1)`)
+	require.NoError(t, err)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var firstCreate atomic.Bool
+	mock := &testutil.MockDockerClient{
+		InspectContainerFn: func(context.Context, string) (*docker.ContainerInfo, error) {
+			return &docker.ContainerInfo{Status: "running"}, nil
+		},
+		RunEnvironmentFn: func(context.Context, docker.RunEnvironmentConfig) (string, error) {
+			if firstCreate.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+			}
+			return "refilled-container", nil
+		},
+	}
+	pool := NewPoolManager(db, mock, PoolConfig{PoolSize: 2, MaxTotal: 6})
+	refillDone := make(chan error, 1)
+	go func() { refillDone <- pool.refill(context.Background()) }()
+	<-entered
+	acquired := make(chan error, 1)
+	go func() {
+		id, _, err := pool.Acquire(context.Background(), "tmpl_default")
+		if err == nil && id != "ready-container" {
+			err = fmt.Errorf("acquired %q", id)
+		}
+		acquired <- err
+	}()
+	select {
+	case err := <-acquired:
+		require.NoError(t, err)
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		t.Fatal("Acquire was blocked by the refill Docker call")
+	}
+	close(release)
+	require.NoError(t, <-refillDone)
 }
 
 func TestPoolAcquire_Miss(t *testing.T) {
@@ -108,8 +154,13 @@ func TestPoolRefill_CreatesContainers(t *testing.T) {
 	db := testutil.NewStateDB(t)
 
 	var containerCount atomic.Int32
+	var poolLifecycle bool
 	mock := &testutil.MockDockerClient{
 		RunEnvironmentFn: func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
+			poolLifecycle = cfg.WarmPool
+			if _, hasTypeLabel := cfg.Labels["ah.type"]; hasTypeLabel {
+				return "", fmt.Errorf("pool lifecycle must not be selected through caller labels")
+			}
 			n := containerCount.Add(1)
 			return fmt.Sprintf("env-container-%s-%d", cfg.EnvID, n), nil
 		},
@@ -135,6 +186,7 @@ func TestPoolRefill_CreatesContainers(t *testing.T) {
 
 	// Verify the mock was called.
 	assert.Equal(t, 6, int(containerCount.Load()), "should have created 6 containers via docker")
+	assert.True(t, poolLifecycle, "pool containers must use the explicit warm-pool lifecycle")
 }
 
 func TestPoolRefill_RespectsMaxTotal(t *testing.T) {

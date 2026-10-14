@@ -2,31 +2,46 @@ package testutil
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/docker/docker/errdefs"
 )
+
+// NewNotFoundError returns an error shaped like the real Docker client's
+// missing-container error: wrapped with %w around an errdefs NotFound.
+func NewNotFoundError(containerID string) error {
+	return fmt.Errorf("inspect container: %w", errdefs.NotFound(errors.New("No such container: "+containerID)))
+}
 
 // MockDockerClient is a test double for docker.Client.
 // Set the function fields to control return values; inspect the recorded fields to verify calls.
 type MockDockerClient struct {
 	// EnsureNetwork
-	EnsureNetworkFn    func(ctx context.Context, name string) (string, error)
-	EnsureNetworkCalls []string // network names passed
+	EnsureNetworkFn           func(ctx context.Context, name string) (string, error)
+	EnsureNetworkCalls        []string // network names passed
+	EnsureIngressNetworkFn    func(ctx context.Context, name string) (string, error)
+	EnsureIngressNetworkCalls []string // dedicated routed-workload network names
 
 	// ConnectNetwork
-	ConnectNetworkFn    func(ctx context.Context, networkID, containerID string) error
-	ConnectNetworkCalls [][2]string // [networkID, containerID] pairs
+	ConnectNetworkFn         func(ctx context.Context, networkID, containerID string) error
+	ConnectNetworkCalls      [][2]string // [networkID, containerID] pairs
+	ConnectNetworkAliasFn    func(ctx context.Context, networkID, containerID, alias string) error
+	ConnectNetworkAliasCalls [][3]string // [networkID, containerID, alias]
 
 	// NetworkDisconnect
 	NetworkDisconnectFn    func(ctx context.Context, networkID, containerID string) error
 	NetworkDisconnectCalls [][2]string // [networkID, containerID] pairs
 
 	// NetworkList
-	NetworkListFn    func(ctx context.Context) ([]docker.NetworkInfo, error)
-	NetworkListCalls int
+	NetworkListFn       func(ctx context.Context) ([]docker.NetworkInfo, error)
+	NetworkListCalls    int
+	NetworkInspectFn    func(ctx context.Context, networkID string) (docker.NetworkInfo, error)
+	NetworkInspectCalls []string
 
 	// RemoveNetwork
 	RemoveNetworkFn    func(ctx context.Context, networkID string) error
@@ -44,6 +59,10 @@ type MockDockerClient struct {
 	StartContainerFn    func(ctx context.Context, containerID string) error
 	StartContainerCalls []string // containerIDs started
 
+	// RestartContainer
+	RestartContainerFn    func(ctx context.Context, containerID string) error
+	RestartContainerCalls []string // containerIDs restarted
+
 	// RemoveContainer
 	RemoveContainerFn    func(ctx context.Context, containerID string) error
 	RemoveContainerCalls []string // containerIDs removed
@@ -59,6 +78,9 @@ type MockDockerClient struct {
 	// PullImage
 	PullImageFn    func(ctx context.Context, img string) error
 	PullImageCalls []string // images pulled
+
+	// ImageExists (default: false, so deploys pull)
+	ImageExistsFn func(ctx context.Context, img string) (bool, error)
 
 	// TagImage
 	TagImageFn    func(ctx context.Context, source, target string) error
@@ -112,6 +134,13 @@ type MockDockerClient struct {
 	PruneDanglingImagesFn    func(ctx context.Context) (int, error)
 	PruneDanglingImagesCalls int
 
+	PruneAnonymousVolumesFn    func(ctx context.Context) (int, error)
+	PruneAnonymousVolumesCalls int
+	ListImagesFn               func(ctx context.Context) ([]docker.ImageInfo, error)
+	ListContainerImagesFn      func(ctx context.Context) ([]string, error)
+	// ListNetworkContainersFn returns the names of containers on a network.
+	ListNetworkContainersFn func(ctx context.Context, networkName string) ([]string, error)
+
 	// ListVolumes
 	ListVolumesFn    func(ctx context.Context, prefix string) ([]string, error)
 	ListVolumesCalls []string // prefixes queried
@@ -135,10 +164,14 @@ type MockDockerClient struct {
 	// RenameContainer
 	RenameContainerFn    func(ctx context.Context, containerID, newName string) error
 	RenameContainerCalls int
+	RenameContainerArgs  [][2]string // [containerID, newName]
 
 	// CopyToContainer
 	CopyToContainerFn    func(ctx context.Context, containerID string, dstPath string, content io.Reader) error
 	CopyToContainerCalls []string // containerIDs
+
+	// ContainerStats
+	ContainerStatsFn func(ctx context.Context, containerID string) (*docker.ContainerStats, error)
 }
 
 // Ensure MockDockerClient satisfies the docker.Client interface at compile time.
@@ -152,10 +185,26 @@ func (m *MockDockerClient) EnsureNetwork(ctx context.Context, name string) (stri
 	return "net-" + name, nil
 }
 
+func (m *MockDockerClient) EnsureIngressNetwork(ctx context.Context, name string) (string, error) {
+	m.EnsureIngressNetworkCalls = append(m.EnsureIngressNetworkCalls, name)
+	if m.EnsureIngressNetworkFn != nil {
+		return m.EnsureIngressNetworkFn(ctx, name)
+	}
+	return "ingress-" + name, nil
+}
+
 func (m *MockDockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
 	m.ConnectNetworkCalls = append(m.ConnectNetworkCalls, [2]string{networkID, containerID})
 	if m.ConnectNetworkFn != nil {
 		return m.ConnectNetworkFn(ctx, networkID, containerID)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) ConnectNetworkAlias(ctx context.Context, networkID, containerID, alias string) error {
+	m.ConnectNetworkAliasCalls = append(m.ConnectNetworkAliasCalls, [3]string{networkID, containerID, alias})
+	if m.ConnectNetworkAliasFn != nil {
+		return m.ConnectNetworkAliasFn(ctx, networkID, containerID, alias)
 	}
 	return nil
 }
@@ -174,6 +223,25 @@ func (m *MockDockerClient) NetworkList(ctx context.Context) ([]docker.NetworkInf
 		return m.NetworkListFn(ctx)
 	}
 	return nil, nil
+}
+
+func (m *MockDockerClient) NetworkInspect(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+	m.NetworkInspectCalls = append(m.NetworkInspectCalls, networkID)
+	if m.NetworkInspectFn != nil {
+		return m.NetworkInspectFn(ctx, networkID)
+	}
+	if m.NetworkListFn != nil {
+		networks, err := m.NetworkListFn(ctx)
+		if err != nil {
+			return docker.NetworkInfo{}, err
+		}
+		for _, network := range networks {
+			if network.ID == networkID {
+				return network, nil
+			}
+		}
+	}
+	return docker.NetworkInfo{}, nil
 }
 
 func (m *MockDockerClient) RemoveNetwork(ctx context.Context, networkID string) error {
@@ -208,6 +276,14 @@ func (m *MockDockerClient) StartContainer(ctx context.Context, containerID strin
 	return nil
 }
 
+func (m *MockDockerClient) RestartContainer(ctx context.Context, containerID string) error {
+	m.RestartContainerCalls = append(m.RestartContainerCalls, containerID)
+	if m.RestartContainerFn != nil {
+		return m.RestartContainerFn(ctx, containerID)
+	}
+	return nil
+}
+
 func (m *MockDockerClient) RemoveContainer(ctx context.Context, containerID string) error {
 	m.RemoveContainerCalls = append(m.RemoveContainerCalls, containerID)
 	if m.RemoveContainerFn != nil {
@@ -238,6 +314,13 @@ func (m *MockDockerClient) PullImage(ctx context.Context, img string) error {
 		return m.PullImageFn(ctx, img)
 	}
 	return nil
+}
+
+func (m *MockDockerClient) ImageExists(ctx context.Context, img string) (bool, error) {
+	if m.ImageExistsFn != nil {
+		return m.ImageExistsFn(ctx, img)
+	}
+	return false, nil
 }
 
 func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) error {
@@ -344,6 +427,35 @@ func (m *MockDockerClient) PruneDanglingImages(ctx context.Context) (int, error)
 	return 0, nil
 }
 
+func (m *MockDockerClient) PruneAnonymousVolumes(ctx context.Context) (int, error) {
+	m.PruneAnonymousVolumesCalls++
+	if m.PruneAnonymousVolumesFn != nil {
+		return m.PruneAnonymousVolumesFn(ctx)
+	}
+	return 0, nil
+}
+
+func (m *MockDockerClient) ListImages(ctx context.Context) ([]docker.ImageInfo, error) {
+	if m.ListImagesFn != nil {
+		return m.ListImagesFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockDockerClient) ListContainerImages(ctx context.Context) ([]string, error) {
+	if m.ListContainerImagesFn != nil {
+		return m.ListContainerImagesFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockDockerClient) ListNetworkContainers(ctx context.Context, networkName string) ([]string, error) {
+	if m.ListNetworkContainersFn != nil {
+		return m.ListNetworkContainersFn(ctx, networkName)
+	}
+	return nil, nil
+}
+
 func (m *MockDockerClient) ListVolumes(ctx context.Context, prefix string) ([]string, error) {
 	m.ListVolumesCalls = append(m.ListVolumesCalls, prefix)
 	if m.ListVolumesFn != nil {
@@ -386,6 +498,7 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 
 func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
 	m.RenameContainerCalls++
+	m.RenameContainerArgs = append(m.RenameContainerArgs, [2]string{containerID, newName})
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
 	}
@@ -398,4 +511,11 @@ func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID stri
 		return m.CopyToContainerFn(ctx, containerID, dstPath, content)
 	}
 	return nil
+}
+
+func (m *MockDockerClient) ContainerStats(ctx context.Context, containerID string) (*docker.ContainerStats, error) {
+	if m.ContainerStatsFn != nil {
+		return m.ContainerStatsFn(ctx, containerID)
+	}
+	return &docker.ContainerStats{}, nil
 }

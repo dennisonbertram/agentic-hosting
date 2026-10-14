@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -102,7 +103,10 @@ type CreatePreviewRequest struct {
 }
 
 // previewNamePattern matches valid preview names: 1-63 chars, alphanumeric + hyphens.
-var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
+var previewNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,49}$`)
+
+// maxPreviewsPerEnv caps previews per environment; each gets its own TLS host.
+const maxPreviewsPerEnv = 5
 
 // Manager manages environment lifecycle.
 type Manager struct {
@@ -165,46 +169,31 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, err
 	}
 
-	// Check quota inside an IMMEDIATE transaction to prevent concurrent creates
-	// from both seeing count below the tenant limit.
-	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	// Force write lock with a dummy write (SQLite IMMEDIATE)
-	_, _ = tx.ExecContext(ctx, `UPDATE environments SET updated_at = updated_at WHERE id = 'lock'`)
 	var maxEnvironments int
-	if err := tx.QueryRowContext(ctx,
+	if err := m.db.QueryRowContext(ctx,
 		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&maxEnvironments); err != nil {
-		tx.Rollback()
 		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')`, tenantID,
-	).Scan(&count); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("check quota: %w", err)
-	}
-	if count >= maxEnvironments {
-		tx.Rollback()
-		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit quota check: %w", err)
 	}
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
 
 	// Insert DB row with status=creating
-	_, err = m.db.ExecContext(ctx,
+	// The quota count is part of the INSERT so concurrent creates cannot both
+	// pass the check. Nothing is claimed from the warm pool until this succeeds.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
 		 lease_duration_seconds, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'creating', ?, ?, ?, ?)`,
-		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now,
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')) < ?`,
+		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now, tenantID, maxEnvironments,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("environment with name %q already exists", req.Name))
@@ -224,19 +213,32 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	var containerID string
 	usedPool := false
 	if m.pool != nil {
-		poolContainerID, poolVolumeName, poolErr := m.pool.Acquire(ctx, tmpl.ID)
+		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, tmpl.ID, tenantID, id)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
-			// Move the pool container from ah-pool network to the tenant network.
-			_ = m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
-			if connErr := m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID); connErr != nil {
-				log.Printf("environments: failed to connect pool container to tenant network, falling back to cold start: %v", connErr)
-				// Fall through to cold path; the pool container stays in its state.
+			transferErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
+			if transferErr == nil {
+				transferErr = m.docker.ConnectNetwork(ctx, tenantNet, poolContainerID)
+			}
+			if transferErr == nil {
+				transferErr = m.docker.RenameContainer(ctx, poolContainerID,
+					fmt.Sprintf("ah-env-%s-%s", tenantID, id))
+			}
+			if transferErr != nil {
+				log.Printf("environments: warm container transfer failed, falling back to cold start: %v", transferErr)
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				_ = m.docker.StopContainer(cleanupCtx, poolContainerID)
+				_ = m.docker.RemoveContainer(cleanupCtx, poolContainerID)
+				_ = m.docker.RemoveVolume(cleanupCtx, poolVolumeName)
+				_, _ = m.db.ExecContext(cleanupCtx, `DELETE FROM warm_pool WHERE container_id = ?`, poolContainerID)
+				_, resetErr := m.db.ExecContext(cleanupCtx,
+					`UPDATE environments SET container_id = '', volume_name = ? WHERE id = ?`, volumeName, id)
+				cancel()
+				if resetErr != nil {
+					m.updateStatus(ctx, id, "failed")
+					return nil, fmt.Errorf("reset environment after warm transfer failure: %w", resetErr)
+				}
 			} else {
-				// Update the DB volume_name to match the pool volume.
-				_, _ = m.db.ExecContext(ctx,
-					`UPDATE environments SET volume_name = ? WHERE id = ?`,
-					poolVolumeName, id)
 				volumeName = poolVolumeName
 				containerID = poolContainerID
 				usedPool = true
@@ -273,20 +275,45 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		}
 	}
 
-	// Update DB with container_id, status=running, lease
+	// Update DB with container_id, status=running, lease. The update only
+	// applies while the row is still 'creating' and the tenant is active, so a
+	// suspension that raced with this Create (StopAllForTenant skips rows with
+	// no container yet) cannot leave a running container behind.
 	leaseExpiresAt := now + int64(leaseDuration)
-	_, err = m.db.ExecContext(ctx,
+	var updateResult sql.Result
+	updateResult, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running',
 		 lease_expires_at = ?, last_activity_at = ?, updated_at = ?
-		 WHERE id = ?`,
-		containerID, leaseExpiresAt, now, now, id,
+		 WHERE id = ? AND tenant_id = ? AND status = 'creating'
+		 AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = environments.tenant_id AND tenants.status = 'active')`,
+		containerID, leaseExpiresAt, now, now, id, tenantID,
 	)
 	if err != nil {
 		log.Printf("environments: failed to update container_id for %s: %v", id, err)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
+		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("update environment: %w", err)
+	}
+	updated, err := updateResult.RowsAffected()
+	if err != nil {
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
+		m.updateStatus(ctx, id, "failed")
+		return nil, fmt.Errorf("check environment creation update: %w", err)
+	}
+	if updated != 1 {
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		// Tenant suspension marks in-flight rows 'stopped' without a container;
+		// that row is stale now that its storage is gone, so delete it. A row
+		// still 'creating' (tenant inactive, no suspension sweep) is marked failed.
+		_, deleteErr := m.db.ExecContext(cleanupCtx,
+			`DELETE FROM environments WHERE id = ? AND tenant_id = ? AND status = 'stopped'`, id, tenantID)
+		cancel()
+		if deleteErr != nil {
+			log.Printf("environments: remove interrupted creation %s: %v", id, deleteErr)
+		}
+		m.updateStatus(ctx, id, "failed")
+		return nil, apierr.Validation("environment creation was interrupted: tenant is not active")
 	}
 
 	return &Environment{
@@ -359,6 +386,9 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 
 // Delete destroys an environment: stops container, removes volume, deletes record.
 func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	e, err := m.Get(ctx, tenantID, envID)
 	if err != nil {
 		return err
@@ -379,6 +409,14 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 				log.Printf("environments: remove container %s: %v", e.ContainerID, err)
 			}
 		}
+	}
+	if err := m.removePreviewIngressNetwork(ctx, tenantID, envID, e.ContainerID); err != nil {
+		log.Printf("environments: remove preview ingress network for %s: %v", envID, err)
+	}
+
+	// A claimed pool container keeps its warm_pool row (for GC) until now.
+	if e.ContainerID != "" {
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM warm_pool WHERE container_id = ?`, e.ContainerID)
 	}
 
 	// Remove volume
@@ -410,19 +448,113 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	if e.Status != "stopped" {
 		return apierr.Validation(fmt.Sprintf("environment must be stopped to start (current: %s)", e.Status))
 	}
-
-	if err := m.docker.StartContainer(ctx, e.ContainerID); err != nil {
-		return fmt.Errorf("start container: %w", err)
+	needsIngress, err := m.hasPreviews(ctx, tenantID, envID)
+	if err != nil {
+		return err
 	}
 
+	// Tenant suspension removes the isolated tenant bridge. Recreate it for the
+	// environment container; preview ingress uses a separate per-environment net.
+	networkName := docker.TenantNetworkName(tenantID)
+	if _, err := m.docker.EnsureNetwork(ctx, networkName); err != nil {
+		return fmt.Errorf("ensure environment network: %w", err)
+	}
+
+	containerID := e.ContainerID
+	recreated := false
+	if err := m.docker.StartContainer(ctx, e.ContainerID); err != nil {
+		if !isNotFoundError(err) {
+			return fmt.Errorf("start container: %w", err)
+		}
+		// The container may have been removed while its named workspace volume
+		// survived. Recreate it from the same template and keep that volume.
+		if e.VolumeName == "" {
+			return fmt.Errorf("workspace volume is missing; refusing to recreate an empty environment")
+		}
+		volumes, volumeErr := m.docker.ListVolumes(ctx, e.VolumeName)
+		if volumeErr != nil {
+			return fmt.Errorf("check workspace volume for recovery: %w", volumeErr)
+		}
+		volumeFound := false
+		for _, name := range volumes {
+			if name == e.VolumeName {
+				volumeFound = true
+				break
+			}
+		}
+		if !volumeFound {
+			return fmt.Errorf("workspace volume %q is missing; refusing to recreate an empty environment", e.VolumeName)
+		}
+		tmpl, tmplErr := m.GetTemplate(ctx, e.TemplateID)
+		if tmplErr != nil {
+			return fmt.Errorf("load environment template for recovery: %w", tmplErr)
+		}
+		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
+			TenantID: tenantID, EnvID: envID, Image: tmpl.BaseImage,
+			MemoryMB: int64(tmpl.MemoryMB), CPUMillis: int64(tmpl.CPUMillis),
+			VolumeName: e.VolumeName, NetworkName: networkName,
+			EgressAllow: tmpl.EgressPolicy == "allow",
+		})
+		if err != nil {
+			return fmt.Errorf("recreate missing environment container: %w", err)
+		}
+		recreated = true
+	}
+	if needsIngress {
+		if err := m.ensurePreviewIngress(ctx, tenantID, envID, containerID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			_ = m.docker.StopContainer(cleanupCtx, containerID)
+			if recreated {
+				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+			}
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+			cancel()
+			return fmt.Errorf("restore preview ingress network: %w", err)
+		}
+		if err := m.restorePreviews(ctx, envID, tenantID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			m.cleanupPreviews(cleanupCtx, envID)
+			_ = m.docker.StopContainer(cleanupCtx, containerID)
+			if recreated {
+				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+			}
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+			cancel()
+			return fmt.Errorf("restore preview routes: %w", err)
+		}
+	}
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(e.LeaseDurationSeconds)
-	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'running', lease_expires_at = ?,
-		 last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		leaseExpiresAt, now, now, envID,
+	var updateResult sql.Result
+	updateResult, err = m.db.ExecContext(ctx,
+		`UPDATE environments SET container_id = ?, status = 'running', lease_expires_at = ?,
+		 last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'stopped'
+		 AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = environments.tenant_id AND tenants.status = 'active')`,
+		containerID, leaseExpiresAt, now, now, envID, tenantID,
 	)
-	return err
+	updated := int64(0)
+	if err == nil {
+		updated, err = updateResult.RowsAffected()
+	}
+	if err != nil || updated != 1 {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		if needsIngress {
+			m.cleanupPreviews(cleanupCtx, envID)
+		}
+		_ = m.docker.StopContainer(cleanupCtx, containerID)
+		if recreated {
+			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		if needsIngress {
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+		}
+		cancel()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("environment start was interrupted before ownership could be committed")
+	}
+	return nil
 }
 
 // Stop stops a running environment.
@@ -476,8 +608,12 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 		req.Timeout = 300
 	}
 
+	// Backstop: coreutils timeout kills the process inside the container a few
+	// seconds after ExecRun gives up on the connection, so it does not run forever.
+	cmd := append([]string{"timeout", "-s", "KILL", fmt.Sprintf("%d", req.Timeout+5)}, req.Command...)
+
 	// Create exec
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, req.Command, req.WorkDir)
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, cmd, req.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("exec create: %w", err)
 	}
@@ -489,10 +625,7 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 
 	durationMs := time.Since(start).Milliseconds()
 
-	timedOut := false
-	if err != nil && ctx.Err() != nil {
-		timedOut = true
-	}
+	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
 	// If the exec timed out but we still got partial output, return it
 	if err != nil && !timedOut {
 		return nil, fmt.Errorf("exec run: %w", err)
@@ -708,8 +841,8 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "No such container") ||
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such container") ||
 		strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no such volume") ||
 		strings.Contains(msg, "404")
@@ -718,6 +851,8 @@ func isNotFoundError(err error) bool {
 // ---------------------------------------------------------------------------
 // Workspace Sync
 // ---------------------------------------------------------------------------
+
+const syncTimeout = 5 * time.Minute
 
 // SyncWorkspace syncs code into an environment's /workspace directory via git.
 func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req SyncRequest) error {
@@ -749,12 +884,12 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 	)
 
 	// Create and run exec with a 5-minute timeout
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"sh", "-c", gitCmd}, "/workspace")
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())), "sh", "-c", gitCmd}, "/workspace")
 	if err != nil {
 		return fmt.Errorf("sync exec create: %w", err)
 	}
 
-	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, 5*time.Minute)
+	_, _, exitCode, err := m.docker.ExecRun(ctx, execID, syncTimeout)
 	if err != nil {
 		return fmt.Errorf("sync exec run: %w", err)
 	}
@@ -778,6 +913,9 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 
 // CreatePreview creates a preview route for an environment port.
 func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req CreatePreviewRequest) (*Preview, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	e, err := m.Get(ctx, tenantID, envID)
 	if err != nil {
 		return nil, err
@@ -788,7 +926,7 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	// Validate name
 	if !previewNamePattern.MatchString(req.Name) {
-		return nil, apierr.Validation("preview name must be 1-63 characters, alphanumeric and hyphens, starting with alphanumeric")
+		return nil, apierr.Validation("preview name must be 1-50 characters, alphanumeric and hyphens, starting with alphanumeric")
 	}
 
 	// Validate port
@@ -811,12 +949,18 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 
 	now := time.Now().Unix()
 
-	// Insert DB row
-	_, err = m.db.ExecContext(ctx,
+	// Insert DB row, enforcing the per-environment cap atomically.
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environment_previews (id, environment_id, tenant_id, name, port, dns_label, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now,
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environment_previews WHERE environment_id = ?) < ?`,
+		id, envID, tenantID, req.Name, req.Port, dnsLabel, now, now, envID, maxPreviewsPerEnv,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, apierr.QuotaExceeded(fmt.Sprintf("maximum %d previews per environment reached", maxPreviewsPerEnv))
+		}
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, apierr.Conflict(fmt.Sprintf("preview with name %q already exists for this environment", req.Name))
@@ -824,11 +968,25 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 		return nil, fmt.Errorf("insert preview: %w", err)
 	}
 
+	ingressID, err := m.docker.EnsureIngressNetwork(ctx, docker.EnvironmentIngressNetworkName(tenantID, envID))
+	if err == nil {
+		err = m.docker.ConnectNetwork(ctx, ingressID, "paas-traefik")
+	}
+	if err == nil {
+		err = m.docker.ConnectNetworkAlias(ctx, ingressID, e.ContainerID, docker.EnvironmentIngressAlias(tenantID, envID))
+	}
+	if err != nil {
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, id)
+		m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
+		return nil, fmt.Errorf("connect preview ingress network: %w", err)
+	}
+
 	// Write Traefik route
-	containerName := fmt.Sprintf("ah-env-%s-%s", tenantID, envID)
+	containerName := docker.EnvironmentIngressAlias(tenantID, envID)
 	if err := m.writePreviewTraefikRoute(id, dnsLabel, containerName, req.Port); err != nil {
 		// Rollback DB on Traefik write failure
 		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, id)
+		m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
 		return nil, fmt.Errorf("write traefik route: %w", err)
 	}
 
@@ -885,9 +1043,16 @@ func (m *Manager) ListPreviews(ctx context.Context, tenantID, envID string) ([]*
 
 // DeletePreview removes a preview route.
 func (m *Manager) DeletePreview(ctx context.Context, tenantID, envID, previewID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, err := m.Get(ctx, tenantID, envID)
+	if err != nil {
+		return err
+	}
 	// Verify the preview exists and belongs to the right tenant/env
 	var id string
-	err := m.db.QueryRowContext(ctx,
+	err = m.db.QueryRowContext(ctx,
 		`SELECT id FROM environment_previews WHERE id = ? AND environment_id = ? AND tenant_id = ?`,
 		previewID, envID, tenantID,
 	).Scan(&id)
@@ -905,6 +1070,75 @@ func (m *Manager) DeletePreview(ctx context.Context, tenantID, envID, previewID 
 	_, err = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, previewID)
 	if err != nil {
 		return fmt.Errorf("delete preview: %w", err)
+	}
+	m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
+	return nil
+}
+
+func (m *Manager) hasPreviews(ctx context.Context, tenantID, envID string) (bool, error) {
+	var count int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM environment_previews WHERE environment_id = ? AND tenant_id = ?`,
+		envID, tenantID).Scan(&count); err != nil {
+		return false, fmt.Errorf("count environment previews: %w", err)
+	}
+	return count > 0, nil
+}
+
+func (m *Manager) ensurePreviewIngress(ctx context.Context, tenantID, envID, containerID string) error {
+	networkID, err := m.docker.EnsureIngressNetwork(ctx, docker.EnvironmentIngressNetworkName(tenantID, envID))
+	if err != nil {
+		return fmt.Errorf("ensure preview ingress network: %w", err)
+	}
+	if err := m.docker.ConnectNetwork(ctx, networkID, "paas-traefik"); err != nil {
+		return fmt.Errorf("connect Traefik to preview ingress network: %w", err)
+	}
+	if err := m.docker.ConnectNetworkAlias(ctx, networkID, containerID, docker.EnvironmentIngressAlias(tenantID, envID)); err != nil {
+		return fmt.Errorf("connect environment to preview ingress network: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) cleanupUnusedPreviewIngress(ctx context.Context, tenantID, envID, containerID string) {
+	hasPreviews, err := m.hasPreviews(ctx, tenantID, envID)
+	if err != nil {
+		log.Printf("environments: check previews before ingress cleanup for %s: %v", envID, err)
+		return
+	}
+	if hasPreviews {
+		return
+	}
+	if err := m.removePreviewIngressNetwork(ctx, tenantID, envID, containerID); err != nil {
+		log.Printf("environments: remove unused preview ingress network for %s: %v", envID, err)
+	}
+}
+
+func (m *Manager) removePreviewIngressNetwork(ctx context.Context, tenantID, envID, containerID string) error {
+	name := docker.EnvironmentIngressNetworkName(tenantID, envID)
+	networks, err := m.docker.NetworkList(ctx)
+	if err != nil {
+		return fmt.Errorf("list networks: %w", err)
+	}
+	var networkID string
+	for _, network := range networks {
+		if network.Name == name {
+			networkID = network.ID
+			break
+		}
+	}
+	if networkID == "" {
+		return nil
+	}
+	for _, endpoint := range []string{containerID, "paas-traefik"} {
+		if endpoint == "" {
+			continue
+		}
+		if err := m.docker.NetworkDisconnect(ctx, networkID, endpoint); err != nil && !isNotFoundError(err) {
+			return fmt.Errorf("disconnect %s from preview ingress network: %w", endpoint, err)
+		}
+	}
+	if err := m.docker.RemoveNetwork(ctx, networkID); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("remove preview ingress network: %w", err)
 	}
 	return nil
 }

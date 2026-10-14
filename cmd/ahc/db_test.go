@@ -76,7 +76,7 @@ func TestRunDbDelete_RequiresConfirm(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}
@@ -102,7 +102,7 @@ func TestRunDbDelete_WithConfirm(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: "aabbccdd11223344aabbccdd11223344", Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}
@@ -124,7 +124,7 @@ func TestWriteDbTable_Columns(t *testing.T) {
 			ID:     "aabbccdd11223344aabbccdd11223344",
 			Name:   "my-postgres",
 			Type:   "postgres",
-			Status: "running",
+			Status: "ready",
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestWriteDbTable_Columns(t *testing.T) {
 
 	assert.Contains(t, output, "my-postgres", "table must show database name")
 	assert.Contains(t, output, "postgres", "table must show database type")
-	assert.Contains(t, output, "running", "table must show database status")
+	assert.Contains(t, output, "ready", "table must show database status")
 }
 
 func TestWriteDbTable_IDTruncated(t *testing.T) {
@@ -184,7 +184,7 @@ func TestResolveDbID_ByName(t *testing.T) {
 		if r.URL.Path == "/v1/databases" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]ahclient.Database{
-				{ID: wantID, Name: "my-db", Type: "postgres", Status: "running"},
+				{ID: wantID, Name: "my-db", Type: "postgres", Status: "ready"},
 			})
 			return
 		}
@@ -209,6 +209,64 @@ func TestResolveDbID_NotFound(t *testing.T) {
 	_, err := resolveDbID(c, "no-such-db")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no-such-db")
+}
+
+func TestPollDbUntilRunningAcceptsReadyStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/databases/db-1" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(ahclient.Database{ID: "db-1", Status: "ready"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	db, err := pollDbUntilRunning(ahclient.NewClient(srv.URL, "key"), "db-1", &bytes.Buffer{})
+	require.NoError(t, err)
+	assert.Equal(t, "ready", db.Status)
+}
+
+func TestDbProvisionJSONCompletesLinkAndRestartBeforeOutput(t *testing.T) {
+	var linked, restarted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/services":
+			json.NewEncoder(w).Encode([]ahclient.Service{{ID: "svc-1", Name: "api"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/databases":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(ahclient.Database{ID: "db-1", Name: "api-postgres", Type: "postgres", Status: "provisioning"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/databases/db-1":
+			json.NewEncoder(w).Encode(ahclient.Database{ID: "db-1", Name: "api-postgres", Type: "postgres", Status: "ready"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/databases/db-1/connection-string":
+			json.NewEncoder(w).Encode(ahclient.ConnectionStringResponse{ConnectionString: "postgres://u:p@db:5432/app"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/services/svc-1/env":
+			linked = true
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(ahclient.StatusResponse{Status: "ok"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/services/svc-1/restart":
+			restarted = true
+			json.NewEncoder(w).Encode(ahclient.Service{ID: "svc-1", Name: "api", Status: "running"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	cmd := newRootCmd()
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--url", srv.URL, "--key", "key", "--json", "db", "provision", "api", "postgres"})
+	err := cmd.Execute()
+	require.NoError(t, err)
+	require.True(t, linked, "JSON mode must set DATABASE_URL on the service")
+	require.True(t, restarted, "JSON mode must restart the service after linking")
+	var result ahclient.Database
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result), "stdout must contain only one valid JSON result")
+	assert.Equal(t, "ready", result.Status)
+	assert.Contains(t, stderr.String(), "Provisioning")
 }
 
 // ---- regression tests ----

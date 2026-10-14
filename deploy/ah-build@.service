@@ -1,0 +1,35 @@
+[Unit]
+Description=Agentic Hosting build %i
+After=ah.service ah-build-broker.service docker.service
+Requires=docker.service
+PartOf=ah.service ah-build-broker.service
+
+[Service]
+Type=exec
+RemainAfterExit=yes
+User=ah-builder
+Group=ah-builder
+SupplementaryGroups=ah-build docker
+Environment=AH_BUILD_DIR=/var/lib/ah-builds
+Environment=AH_NIXPACKS_PATH=/usr/local/bin/nixpacks
+ExecStart=/usr/local/bin/ah build-worker %i
+UMask=0007
+MemoryMax=2G
+CPUQuota=200%
+RuntimeMaxSec=20min
+TimeoutStopSec=5s
+KillMode=control-group
+Restart=no
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+ProtectKernelLogs=yes
+ReadWritePaths=/var/lib/ah-builds/%i /run/docker.sock /var/run/docker.sock

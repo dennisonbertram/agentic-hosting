@@ -138,8 +138,9 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 		args = append(args, *o.completedAt)
 	}
 
-	query += ` WHERE id = ?`
-	args = append(args, deploymentID)
+	// A cancelled deployment must stay cancelled even if the deploy goroutine finishes later.
+	query += ` WHERE id = ? AND status != ?`
+	args = append(args, deploymentID, StatusCancelled)
 
 	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -147,32 +148,51 @@ func (s *Store) UpdateStatus(ctx context.Context, deploymentID, status string, o
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
+		var cur string
+		if err := s.db.QueryRowContext(ctx, `SELECT status FROM deployments WHERE id = ?`, deploymentID).Scan(&cur); err == nil {
+			return apierr.Conflict(fmt.Sprintf("deployment is %s", cur))
+		}
 		return apierr.NotFound("deployment not found")
 	}
 	return nil
 }
 
-// Cancel transitions a deployment to cancelled status. Only deployments with
-// status "pending" or "deploying" can be cancelled. Returns a Conflict error
-// if the deployment is already in a terminal state (running, failed, crashed,
-// stopped, or cancelled).
+// cancelRow flips a pending deployment to cancelled atomically. Deploying rows
+// are excluded: their work has started and cannot be stopped, so a cancelled
+// record must always mean nothing ran.
+// It reports false when the row was not in a cancellable state.
+func (s *Store) cancelRow(ctx context.Context, deploymentID string, now int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ? AND status = ?`,
+		StatusCancelled, now, now, deploymentID, StatusPending,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// Cancel transitions a deployment to cancelled status. Only "pending"
+// deployments (before any work starts) can be cancelled. Returns a Conflict
+// error otherwise, including for "deploying", where the work cannot be stopped.
 func (s *Store) Cancel(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
 	d, err := s.Get(ctx, tenantID, deploymentID)
 	if err != nil {
 		return nil, err
 	}
 
-	if d.Status != StatusPending && d.Status != StatusDeploying {
-		return nil, apierr.Conflict(fmt.Sprintf("deployment cannot be cancelled (status: %s)", d.Status))
+	if d.Status != StatusPending {
+		return nil, apierr.Conflict(fmt.Sprintf("deployment cannot be cancelled (status: %s); only pending deployments can be cancelled", d.Status))
 	}
 
 	now := time.Now().Unix()
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE deployments SET status = ?, cancelled_at = ?, completed_at = ? WHERE id = ?`,
-		StatusCancelled, now, now, deploymentID,
-	)
+	ok, err := s.cancelRow(ctx, deploymentID, now)
 	if err != nil {
 		return nil, fmt.Errorf("cancel deployment: %w", err)
+	}
+	if !ok {
+		return nil, apierr.Conflict("deployment cannot be cancelled (status changed)")
 	}
 
 	d.Status = StatusCancelled

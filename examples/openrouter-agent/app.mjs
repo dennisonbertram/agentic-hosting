@@ -17,6 +17,7 @@ const toolSpec = [{
   function: {
     name: 'add_numbers',
     description: 'Add two finite numbers, each between -1000000 and 1000000.',
+    strict: true,
     parameters: {
       type: 'object',
       properties: {

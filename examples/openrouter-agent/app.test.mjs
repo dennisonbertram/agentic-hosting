@@ -113,6 +113,7 @@ test('runs one bounded calculator tool round-trip with the fixed model and endpo
   assert.ok(calls.every(({ body }) => body.model === 'anthropic/claude-sonnet-5.5'));
   assert.ok(calls.every(({ body }) => body.max_tokens <= 512));
   assert.ok(calls.every(({ body }) => body.reasoning.effort === 'low'));
+  assert.ok(calls.every(({ body }) => body.tools[0].function.strict === true));
   assert.equal(calls[0].body.tool_choice, 'auto');
   assert.equal(calls[1].body.tool_choice, 'none');
   assert.equal(calls[1].body.messages.at(-1).tool_call_id, 'call_test_1');
@@ -166,6 +167,7 @@ test('uses only the fixed authenticated relay endpoint when relay mode is select
   assert.ok(calls.every(({ init }) => init.headers.Authorization === `Bearer ${relayToken}`));
   assert.ok(calls.every(({ body }) => body.model === 'anthropic/claude-sonnet-5.5'));
   assert.ok(calls.every(({ body }) => body.max_tokens <= 512));
+  assert.ok(calls.every(({ body }) => body.tools[0].function.strict === true));
   assert.equal(calls[0].body.tool_choice, 'auto');
   assert.equal(calls[1].body.tool_choice, 'none');
   assert.doesNotMatch(JSON.stringify(calls), /test-openrouter-key|https:\/\/openrouter\.ai\/api/);

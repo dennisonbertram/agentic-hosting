@@ -2,6 +2,7 @@
 package databases
 
 import (
+	"bufio"
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
@@ -101,7 +102,7 @@ func (m *Manager) ReconcileStale() {
 	defer cancel()
 
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id, volume_name FROM databases WHERE status = 'provisioning'`)
+		`SELECT id, COALESCE(container_id, ''), volume_name FROM databases WHERE status = 'provisioning'`)
 	if err != nil {
 		log.Printf("databases: reconcile query failed: %v", err)
 		return
@@ -190,7 +191,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	volumeName := fmt.Sprintf("ah-db-%s", id)
-	containerName := fmt.Sprintf("ah-db-%s-%s", tenantID[:8], id[:16])
+	containerName := containerNameFor(tenantID, id)
 
 	// Encrypt password
 	passwordEnc, err := crypto.Encrypt([]byte(password), m.masterKey)
@@ -251,12 +252,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	// Run container
 	var containerID string
-	switch req.Type {
-	case "postgres":
-		containerID, err = m.runPostgres(ctx, containerName, volumeName, port, dbName, username, password)
-	case "redis":
-		containerID, err = m.runRedis(ctx, containerName, volumeName, port, password)
-	}
+	containerID, err = m.runContainer(ctx, req.Type, containerName, volumeName, port, dbName, username, password)
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
 		_ = m.docker.RemoveVolume(ctx, volumeName)
@@ -335,7 +331,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 func (m *Manager) Get(ctx context.Context, tenantID, dbID string) (*Database, error) {
 	d := &Database{}
 	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, type, status, container_id, host, port, db_name, username,
+		`SELECT id, tenant_id, name, type, status, COALESCE(container_id, ''), host, port, db_name, username,
 		 volume_name, created_at, updated_at
 		 FROM databases WHERE id = ? AND tenant_id = ?`,
 		dbID, tenantID,
@@ -465,7 +461,7 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 // but do not abort processing of remaining databases.
 func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM databases WHERE tenant_id = ? AND status NOT IN ('failed', 'stopped')`,
+		`SELECT id, COALESCE(container_id, '') FROM databases WHERE tenant_id = ? AND status NOT IN ('failed', 'stopped')`,
 		tenantID,
 	)
 	if err != nil {
@@ -578,6 +574,78 @@ func (m *Manager) findFreePort(dbType string) (int, error) {
 	return 0, fmt.Errorf("no free ports available in range %d-%d", minPort, maxPort)
 }
 
+func containerNameFor(tenantID, id string) string {
+	if len(tenantID) > 8 {
+		tenantID = tenantID[:8]
+	}
+	return fmt.Sprintf("ah-db-%s-%s", tenantID, id[:16])
+}
+
+func (m *Manager) runContainer(ctx context.Context, dbType, name, volume string, port int, dbName, user, password string) (string, error) {
+	if dbType == "redis" {
+		return m.runRedis(ctx, name, volume, port, password)
+	}
+	return m.runPostgres(ctx, name, volume, port, dbName, user, password)
+}
+
+// StartAllForTenant recreates the containers of a tenant's stopped databases
+// (see StopAllForTenant) from the stored config, reusing each database's
+// volume, port and password. Failures mark that database "failed" and are
+// logged; the remaining databases are still processed.
+func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, type, port, COALESCE(db_name, ''), COALESCE(username, ''), password_encrypted, volume_name
+		 FROM databases WHERE tenant_id = ? AND status = 'stopped'`, tenantID)
+	if err != nil {
+		log.Printf("databases: StartAllForTenant query failed for tenant %s: %v", tenantID, err)
+		return
+	}
+	type stopped struct {
+		id, typ, dbName, user, passEnc, volume string
+		port                                   int
+	}
+	var dbs []stopped
+	for rows.Next() {
+		var d stopped
+		if err := rows.Scan(&d.id, &d.typ, &d.port, &d.dbName, &d.user, &d.passEnc, &d.volume); err != nil {
+			log.Printf("databases: StartAllForTenant scan failed: %v", err)
+			continue
+		}
+		dbs = append(dbs, d)
+	}
+	rows.Close()
+
+	for _, d := range dbs {
+		pw, err := crypto.Decrypt(d.passEnc, m.masterKey)
+		if err != nil {
+			log.Printf("databases: StartAllForTenant decrypt password for %s: %v", d.id, err)
+			m.updateStatus(ctx, d.id, "failed")
+			continue
+		}
+		password := string(pw)
+		containerID, err := m.runContainer(ctx, d.typ, containerNameFor(tenantID, d.id), d.volume, d.port, d.dbName, d.user, password)
+		if err != nil {
+			log.Printf("databases: StartAllForTenant run container for %s: %v", d.id, err)
+			m.updateStatus(ctx, d.id, "failed")
+			continue
+		}
+		_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
+			containerID, time.Now().Unix(), d.id)
+		healthy := false
+		if d.typ == "redis" {
+			healthy = m.waitForRedis(d.port, password, 30*time.Second)
+		} else {
+			healthy = m.waitForPostgres(d.port, password, 30*time.Second)
+		}
+		if !healthy {
+			log.Printf("databases: StartAllForTenant health check failed for %s", d.id)
+			m.updateStatus(ctx, d.id, "failed")
+			continue
+		}
+		m.updateStatus(ctx, d.id, "ready")
+	}
+}
+
 func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password string) (string, error) {
 	return m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
 		Name:          name,
@@ -681,7 +749,7 @@ func (m *Manager) waitForRedis(port int, password string, timeout time.Duration)
 	deadline := time.Now().Add(timeout)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	for time.Now().Before(deadline) {
-		if redisReady(addr) {
+		if redisReady(addr, password) {
 			return true
 		}
 		time.Sleep(1 * time.Second)
@@ -689,9 +757,10 @@ func (m *Manager) waitForRedis(port int, password string, timeout time.Duration)
 	return false
 }
 
-// redisReady returns true when the Redis server at addr responds to a PING
-// with +PONG, indicating it is fully initialised.
-func redisReady(addr string) bool {
+// redisReady returns true when the Redis server at addr answers PING with
+// +PONG. When password is set, AUTH is sent first because the server runs
+// with --requirepass and would otherwise answer -NOAUTH.
+func redisReady(addr, password string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return false
@@ -700,18 +769,22 @@ func redisReady(addr string) bool {
 
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	// RESP inline PING: *1\r\n$4\r\nPING\r\n
-	if _, err := conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+	cmd := "*1\r\n$4\r\nPING\r\n"
+	if password != "" {
+		cmd = fmt.Sprintf("*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(password), password) + cmd
+	}
+	if _, err := conn.Write([]byte(cmd)); err != nil {
 		return false
 	}
 
-	// Read enough bytes to check for "+PONG"
-	buf := make([]byte, 7)
-	n, err := conn.Read(buf)
-	if err != nil || n < 5 {
-		return false
+	r := bufio.NewReader(conn)
+	if password != "" {
+		if line, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(line, "+OK") {
+			return false
+		}
 	}
-	return strings.HasPrefix(string(buf[:n]), "+PONG")
+	line, err := r.ReadString('\n')
+	return err == nil && strings.HasPrefix(line, "+PONG")
 }
 
 func generateID() (string, error) {
@@ -729,5 +802,3 @@ func randomHex(n int) (string, error) {
 	}
 	return fmt.Sprintf("%x", b), nil
 }
-
-func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {}

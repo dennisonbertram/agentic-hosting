@@ -161,7 +161,7 @@ func TestPostgresReady_ErrorResponseIsReady(t *testing.T) {
 func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 	port := serveSilentTCP(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a silent TCP listener should not be considered redis-ready")
 }
 
@@ -170,7 +170,7 @@ func TestRedisReady_SilentTCPIsNotReady(t *testing.T) {
 func TestRedisReady_ProperPongIsReady(t *testing.T) {
 	port := serveFakeRedis(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.True(t, got, "a fake redis server responding +PONG should be considered ready")
 }
 
@@ -199,7 +199,7 @@ func TestRedisReady_WrongResponseIsNotReady(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	addr := "127.0.0.1:" + strconv.Itoa(port)
-	got := redisReady(addr)
+	got := redisReady(addr, "")
 	assert.False(t, got, "a redis server returning a non-PONG response should not be considered ready")
 }
 

@@ -449,14 +449,34 @@ func (b *Builder) pushImage(ctx context.Context, req BuildRequest, logCb func(st
 }
 
 func streamLines(r io.Reader, logCb func(string)) {
-	scanner := bufio.NewScanner(r)
-	// Allow larger lines for build output
-	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-	for scanner.Scan() {
-		line := sanitizeLogLine(scanner.Text())
+	const maxLine = 256 * 1024
+	// Read with a bufio.Reader so an overlong line is truncated instead of
+	// ending the read loop (which would block the child on a full pipe).
+	br := bufio.NewReaderSize(r, 64*1024)
+	var buf []byte
+	truncated := false
+	for {
+		chunk, isPrefix, err := br.ReadLine()
+		if len(buf)+len(chunk) <= maxLine {
+			buf = append(buf, chunk...)
+		} else {
+			buf = append(buf, chunk[:maxLine-len(buf)]...)
+			truncated = true
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("builder: stream read error: %v", err)
+			}
+			return
+		}
+		if isPrefix {
+			continue
+		}
+		line := sanitizeLogLine(string(buf))
+		if truncated {
+			line += " [line truncated]"
+		}
 		logCb(line)
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("builder: stream scan error: %v", err)
+		buf, truncated = buf[:0], false
 	}
 }

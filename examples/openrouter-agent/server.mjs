@@ -7,8 +7,10 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
   throw new Error('PORT must be an integer between 1 and 65535');
 }
 
+const relayToken = process.env.PROVIDER_RELAY_TOKEN;
 const server = createAgentServer({
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: relayToken ? undefined : process.env.OPENROUTER_API_KEY,
+  relayToken,
   authToken: process.env.DEMO_AUTH_TOKEN,
 });
 server.listen(port, '0.0.0.0', () => {

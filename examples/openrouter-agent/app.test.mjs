@@ -122,6 +122,65 @@ test('runs one bounded calculator tool round-trip with the fixed model and endpo
   assert.doesNotMatch(JSON.stringify(calls), /test-demo-token/);
 });
 
+test('uses only the fixed authenticated relay endpoint when relay mode is selected', async () => {
+  const relayToken = 'test-relay-token-0123456789abcdef';
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    const completion = calls.length === 1
+      ? {
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              id: 'relay_call_1',
+              type: 'function',
+              function: { name: 'add_numbers', arguments: '{"a":4,"b":5}' },
+            }],
+          },
+        }
+      : { finish_reason: 'stop', message: { role: 'assistant', content: '4 plus 5 is 9.' } };
+    return new Response(JSON.stringify({ choices: [completion] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await withServer({ apiKey: undefined, relayToken, fetchImpl }, async (baseURL) => {
+    const response = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: 'Add 4 and 5.' }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      answer: '4 plus 5 is 9.',
+      tool: { name: 'add_numbers', result: 9 },
+    });
+  });
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(({ url }) => url === 'http://openrouter-demo-relay:8080/api/v1/chat/completions'));
+  assert.ok(calls.every(({ init }) => init.headers.Authorization === `Bearer ${relayToken}`));
+  assert.ok(calls.every(({ body }) => body.model === 'anthropic/claude-sonnet-5.5'));
+  assert.ok(calls.every(({ body }) => body.max_tokens <= 512));
+  assert.equal(calls[0].body.tool_choice.function.name, 'add_numbers');
+  assert.equal(calls[1].body.tool_choice, 'none');
+  assert.doesNotMatch(JSON.stringify(calls), /test-openrouter-key|https:\/\/openrouter\.ai\/api/);
+});
+
+test('rejects configurations that expose a direct key in relay mode', () => {
+  assert.throws(() => createAgentServer({
+    apiKey: API_KEY,
+    relayToken: 'test-relay-token-0123456789abcdef',
+    authToken: AUTH_TOKEN,
+  }), /OPENROUTER_API_KEY must not be set in provider relay mode/);
+});
+
 test('does not execute or loop on unsupported tool calls and hides provider errors', async () => {
   let providerCalls = 0;
   const fetchImpl = async () => {

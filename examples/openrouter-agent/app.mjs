@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 
 export const MODEL_ID = 'anthropic/claude-sonnet-5.5';
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const OPENROUTER_RELAY_URL = 'http://openrouter-demo-relay:8080/api/v1/chat/completions';
 export const MAX_BODY_BYTES = 4096;
 export const MAX_MESSAGE_LENGTH = 1000;
 export const MAX_OUTPUT_TOKENS = 512;
@@ -145,11 +146,11 @@ function validateToolCall(message) {
   return { id: call.id, args, call };
 }
 
-async function requestCompletion(fetchImpl, apiKey, messages, signal, toolChoice) {
-  const response = await fetchImpl(OPENROUTER_CHAT_URL, {
+async function requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, toolChoice) {
+  const response = await fetchImpl(providerURL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${providerToken}`,
       'Content-Type': 'application/json',
     },
     signal,
@@ -182,7 +183,7 @@ async function requestCompletion(fetchImpl, apiKey, messages, signal, toolChoice
   return data.choices[0];
 }
 
-async function runCalculatorAgent(message, { apiKey, fetchImpl, providerTimeoutMs }) {
+async function runCalculatorAgent(message, { providerURL, providerToken, fetchImpl, providerTimeoutMs }) {
   const signal = AbortSignal.timeout(providerTimeoutMs);
   const messages = [
     {
@@ -192,7 +193,7 @@ async function runCalculatorAgent(message, { apiKey, fetchImpl, providerTimeoutM
     { role: 'user', content: message },
   ];
 
-  const firstChoice = await requestCompletion(fetchImpl, apiKey, messages, signal, {
+  const firstChoice = await requestCompletion(fetchImpl, providerURL, providerToken, messages, signal, {
     type: 'function',
     function: { name: 'add_numbers' },
   });
@@ -203,14 +204,14 @@ async function runCalculatorAgent(message, { apiKey, fetchImpl, providerTimeoutM
   const result = args.a + args.b;
   if (!Number.isFinite(result)) throw new Error('tool result is out of range');
 
-  const secondChoice = await requestCompletion(fetchImpl, apiKey, [
+  const secondChoice = await requestCompletion(fetchImpl, providerURL, providerToken, [
     ...messages,
     firstChoice.message,
     { role: 'tool', tool_call_id: id, content: String(result) },
   ], signal, 'none');
   if (
     !secondChoice?.message ||
-    secondChoice.finish_reason === 'tool_calls' ||
+    secondChoice.finish_reason !== 'stop' ||
     secondChoice.message.tool_calls?.length ||
     typeof secondChoice.message.content !== 'string' ||
     secondChoice.message.content.trim().length === 0 ||
@@ -225,7 +226,13 @@ async function runCalculatorAgent(message, { apiKey, fetchImpl, providerTimeoutM
   };
 }
 
-async function handleRequest(request, response, { apiKey, authToken, fetchImpl, providerTimeoutMs }) {
+async function handleRequest(request, response, {
+  providerURL,
+  providerToken,
+  authToken,
+  fetchImpl,
+  providerTimeoutMs,
+}) {
   if (request.method === 'GET' && request.url === '/health') {
     writeJson(response, 200, { status: 'ok' });
     return;
@@ -249,7 +256,9 @@ async function handleRequest(request, response, { apiKey, authToken, fetchImpl, 
   try {
     const body = await readJsonBody(request);
     const message = validateMessage(body?.message);
-    const result = await runCalculatorAgent(message, { apiKey, fetchImpl, providerTimeoutMs });
+    const result = await runCalculatorAgent(message, {
+      providerURL, providerToken, fetchImpl, providerTimeoutMs,
+    });
     writeJson(response, 200, result);
   } catch (error) {
     if (error instanceof RequestError) {
@@ -263,16 +272,30 @@ async function handleRequest(request, response, { apiKey, authToken, fetchImpl, 
 
 export function createAgentServer({
   apiKey,
+  relayToken,
   authToken,
   fetchImpl = globalThis.fetch,
   providerTimeoutMs = PROVIDER_TIMEOUT_MS,
 } = {}) {
-  if (typeof apiKey !== 'string' || apiKey.length === 0) throw new Error('OPENROUTER_API_KEY is required');
+  const useRelay = typeof relayToken === 'string' && relayToken.length > 0;
+  if (!useRelay && (typeof apiKey !== 'string' || apiKey.length === 0)) {
+    throw new Error('OPENROUTER_API_KEY is required when PROVIDER_RELAY_TOKEN is not set');
+  }
+  if (useRelay && relayToken.length < 32) throw new Error('PROVIDER_RELAY_TOKEN must contain at least 32 characters');
+  if (useRelay && apiKey !== undefined) {
+    throw new Error('OPENROUTER_API_KEY must not be set in provider relay mode');
+  }
   if (typeof authToken !== 'string' || authToken.length < 32) throw new Error('DEMO_AUTH_TOKEN must contain at least 32 characters');
   if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
 
   const server = createServer((request, response) => {
-    void handleRequest(request, response, { apiKey, authToken, fetchImpl, providerTimeoutMs });
+    void handleRequest(request, response, {
+      providerURL: useRelay ? OPENROUTER_RELAY_URL : OPENROUTER_CHAT_URL,
+      providerToken: useRelay ? relayToken : apiKey,
+      authToken,
+      fetchImpl,
+      providerTimeoutMs,
+    });
   });
   server.headersTimeout = 15_000;
   server.requestTimeout = 15_000;

@@ -26,17 +26,17 @@ import (
 
 // Kanban represents a provisioned Vikunja kanban board instance.
 type Kanban struct {
-	ID          string          `json:"id"`
-	TenantID    string          `json:"tenant_id"`
-	Status      string          `json:"status"`
-	ContainerID string          `json:"-"`
-	Host        string          `json:"host,omitempty"`
-	Port        int             `json:"port,omitempty"`
-	URL         string          `json:"url,omitempty"`
+	ID          string             `json:"id"`
+	TenantID    string             `json:"tenant_id"`
+	Status      string             `json:"status"`
+	ContainerID string             `json:"-"`
+	Host        string             `json:"host,omitempty"`
+	Port        int                `json:"port,omitempty"`
+	URL         string             `json:"url,omitempty"`
 	Credentials *KanbanCredentials `json:"credentials,omitempty"` // only on create
-	VolumeName  string          `json:"-"`
-	CreatedAt   int64           `json:"created_at"`
-	UpdatedAt   int64           `json:"updated_at"`
+	VolumeName  string             `json:"-"`
+	CreatedAt   int64              `json:"created_at"`
+	UpdatedAt   int64              `json:"updated_at"`
 }
 
 // KanbanCredentials holds the admin credentials returned on create.
@@ -278,15 +278,15 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	go m.provision(id, tenantID, containerID, volumeName, publicURL, port, adminPassword)
 
 	return &Kanban{
-		ID:        id,
-		TenantID:  tenantID,
-		Status:    "provisioning",
-		Host:      "127.0.0.1",
-		Port:      port,
-		URL:       publicURL,
+		ID:         id,
+		TenantID:   tenantID,
+		Status:     "provisioning",
+		Host:       "127.0.0.1",
+		Port:       port,
+		URL:        publicURL,
 		VolumeName: volumeName,
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}, nil
 }
 

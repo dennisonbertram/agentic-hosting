@@ -60,8 +60,8 @@ func (m *Manager) StopAllForTenant(_ context.Context, tenantID string) {
 	}
 }
 
-func (m *Manager) removeCreatedEnvironment(containerID, volumeName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (m *Manager) removeCreatedEnvironment(parent context.Context, containerID, volumeName string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 30*time.Second)
 	defer cancel()
 	if containerID != "" {
 		_ = m.docker.StopContainer(ctx, containerID)

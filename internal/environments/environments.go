@@ -226,7 +226,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 			}
 			if transferErr != nil {
 				log.Printf("environments: warm container transfer failed, falling back to cold start: %v", transferErr)
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 				_ = m.docker.StopContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveContainer(cleanupCtx, poolContainerID)
 				_ = m.docker.RemoveVolume(cleanupCtx, poolVolumeName)
@@ -290,19 +290,19 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	)
 	if err != nil {
 		log.Printf("environments: failed to update container_id for %s: %v", id, err)
-		m.removeCreatedEnvironment(containerID, volumeName)
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("update environment: %w", err)
 	}
 	updated, err := updateResult.RowsAffected()
 	if err != nil {
-		m.removeCreatedEnvironment(containerID, volumeName)
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("check environment creation update: %w", err)
 	}
 	if updated != 1 {
-		m.removeCreatedEnvironment(containerID, volumeName)
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		m.removeCreatedEnvironment(ctx, containerID, volumeName)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		// Tenant suspension marks in-flight rows 'stopped' without a container;
 		// that row is stale now that its storage is gone, so delete it. A row
 		// still 'creating' (tenant inactive, no suspension sweep) is marked failed.
@@ -502,7 +502,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	}
 	if needsIngress {
 		if err := m.ensurePreviewIngress(ctx, tenantID, envID, containerID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			_ = m.docker.StopContainer(cleanupCtx, containerID)
 			if recreated {
 				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
@@ -512,7 +512,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 			return fmt.Errorf("restore preview ingress network: %w", err)
 		}
 		if err := m.restorePreviews(ctx, envID, tenantID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			m.cleanupPreviews(cleanupCtx, envID)
 			_ = m.docker.StopContainer(cleanupCtx, containerID)
 			if recreated {
@@ -537,7 +537,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		updated, err = updateResult.RowsAffected()
 	}
 	if err != nil || updated != 1 {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		if needsIngress {
 			m.cleanupPreviews(cleanupCtx, envID)
 		}

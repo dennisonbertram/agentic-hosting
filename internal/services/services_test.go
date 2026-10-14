@@ -382,6 +382,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 		assert.Contains(t, content, "letsencrypt")
+		assert.NotContains(t, content, "X-Forwarded-Proto")
 	})
 
 	t.Run("writes localhost route without baseDomain", func(t *testing.T) {
@@ -468,6 +469,7 @@ func TestWriteTraefikRouteExternalTLSKeepsPublicHTTPSWithoutLocalTLS(t *testing.
 	assert.NotContains(t, content, "websecure")
 	assert.NotContains(t, content, "certResolver")
 	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
 	assert.Contains(t, publicURL("svc123", "my-app", "example.com"), "https://")
 }
 
@@ -493,6 +495,7 @@ func TestStartRestoresExternalTLSRoute(t *testing.T) {
 	assert.NotContains(t, content, "websecure")
 	assert.NotContains(t, content, "certResolver")
 	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
 	assert.Contains(t, svc.URL, "https://")
 }
 

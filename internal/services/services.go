@@ -235,13 +235,20 @@ func (m *Manager) writeTraefikRoute(serviceID, tenantID, dnsLabel, baseDomain st
       rule: "Host(`+"`%s`"+`)"
       entryPoints:
         - web
+      middlewares:
+        - svc-%s-public-https
       service: svc-%s
+  middlewares:
+    svc-%s-public-https:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
   services:
     svc-%s:
       loadBalancer:
         servers:
           - url: "http://%s:%s"
-`, serviceID, host, serviceID, serviceID, containerName, portStr)
+`, serviceID, host, serviceID, serviceID, serviceID, serviceID, containerName, portStr)
 		} else {
 			content = fmt.Sprintf(`http:
   routers:
@@ -334,7 +341,9 @@ type Manager struct {
 }
 
 // SetExternalTLSTerminated configures routes for deployments where a trusted
-// upstream proxy terminates public TLS before traffic reaches Traefik.
+// upstream proxy terminates public TLS before traffic reaches Traefik. Enabling
+// it assumes public requests reach these routes only through that configured
+// proxy; the route middleware then sets X-Forwarded-Proto to https.
 func (m *Manager) SetExternalTLSTerminated(enabled bool) {
 	m.externalTLSTerminated = enabled
 }

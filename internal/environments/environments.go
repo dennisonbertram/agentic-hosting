@@ -117,6 +117,8 @@ type Manager struct {
 
 // SetExternalTLSTerminated configures preview routes for deployments where a
 // trusted upstream proxy terminates public TLS before traffic reaches Traefik.
+// Enabling it assumes public requests reach these routes only through that
+// configured proxy; the route middleware then sets X-Forwarded-Proto to https.
 func (m *Manager) SetExternalTLSTerminated(enabled bool) {
 	m.externalTLSTerminated = enabled
 }
@@ -1156,12 +1158,19 @@ func (m *Manager) writePreviewTraefikRoute(previewID, dnsLabel, containerName st
       service: "env-preview-%s"
       entryPoints:
         - web
+      middlewares:
+        - env-preview-%s-public-https
+  middlewares:
+    env-preview-%s-public-https:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
   services:
     env-preview-%s:
       loadBalancer:
         servers:
           - url: "http://%s:%d"
-`, previewID, host, previewID, previewID, containerName, port)
+`, previewID, host, previewID, previewID, previewID, previewID, containerName, port)
 		} else {
 			content = fmt.Sprintf(`http:
   routers:

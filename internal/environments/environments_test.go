@@ -511,6 +511,7 @@ func TestCreatePreview_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(route), docker.EnvironmentIngressAlias(testTenantID, env.ID),
 		"preview routes must use the ingress-only DNS alias")
+	assert.NotContains(t, string(route), "X-Forwarded-Proto", "default ACME mode must retain Traefik's forwarded-protocol behavior")
 
 	// Verify Traefik route file was written
 	files, _ := os.ReadDir(dir)
@@ -545,6 +546,7 @@ func assertExternalTLSPreviewRoute(t *testing.T, dir, previewID string) {
 	assert.NotContains(t, content, "websecure")
 	assert.NotContains(t, content, "certResolver")
 	assert.NotContains(t, content, "redirectScheme")
+	assert.Contains(t, content, "X-Forwarded-Proto: \"https\"")
 }
 
 func TestCreatePreview_DuplicateName(t *testing.T) {

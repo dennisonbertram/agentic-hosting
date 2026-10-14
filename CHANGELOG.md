@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - `ah backup`: retention now keeps the newest 10 state and 10 metering backups separately (state backups were being deleted first), the source DB is opened truly read-only, and the metering path reuses `db.MeteringPath`.
 
+- Removed server-wide 30s WriteTimeout that cut off long routes (log follow, exec, sync); `--listen-addr ::1` now works (IPv6 host:port join).
+
 ### Added
 
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)

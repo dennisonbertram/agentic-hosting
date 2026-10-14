@@ -202,38 +202,26 @@ func main() {
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
-		Store:            store,
-		MasterKey:        masterKey[:32],
-		DevMode:          *devMode,
-		BootstrapTokens:  bootstrapTokens,
-		OpenRegistration: *openRegistration,
-		Docker:           dockerClient,
-		BuildManager:     buildMgr,
-		DeploymentStore:  deployStore,
-		DatabaseManager:  dbMgr,
+		Store:              store,
+		MasterKey:          masterKey[:32],
+		DevMode:            *devMode,
+		BootstrapTokens:    bootstrapTokens,
+		OpenRegistration:   *openRegistration,
+		Docker:             dockerClient,
+		BuildManager:       buildMgr,
+		DeploymentStore:    deployStore,
+		DatabaseManager:    dbMgr,
 		KanbanManager:      kanbanMgr,
 		EnvironmentManager: envMgr,
 		MeteringStore:      meteringStore,
-		BaseDomain:       *baseDomain,
-		TraefikConfigDir: cfg.TraefikConfigDir,
+		BaseDomain:         *baseDomain,
+		TraefikConfigDir:   cfg.TraefikConfigDir,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).
 	// Must explicitly pass --listen-addr=0.0.0.0 to bind all interfaces.
-	addr := "127.0.0.1:" + *port
-	if *listenAddr != "" {
-		addr = *listenAddr + ":" + *port
-	}
-
-	httpServer := &http.Server{
-		Addr:              addr,
-		Handler:           srv,
-		ReadTimeout:       10 * time.Second,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
+	addr := listenAddress(*listenAddr, *port)
+	httpServer := newHTTPServer(addr, srv)
 
 	// Graceful shutdown
 	done := make(chan os.Signal, 1)

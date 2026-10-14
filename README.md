@@ -57,12 +57,25 @@ Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://denni
 - Go 1.25+ with CGO enabled
 - Nixpacks installed
 - Traefik running as Docker container
-- `AH_BOOTSTRAP_TOKEN` environment variable (min 32 chars)
+- `AH_BOOTSTRAP_TOKEN` environment variable (min 32 chars; authorizes tenant registration)
+- `AH_ADMIN_TOKEN` environment variable (min 32 chars per token; authorizes recover, reactivate and quota update)
 - `/var/lib/ah/master.key` — hex-encoded 32-byte key
+
+Environment variables read by `ah`:
+
+| Variable | Purpose |
+|---|---|
+| `AH_BOOTSTRAP_TOKEN` | Tenant registration token (min 32 chars, comma-separated for rotation) |
+| `AH_ADMIN_TOKEN` | Operator token for `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate` and `PATCH /v1/tenants/{id}/quotas` (min 32 chars per token, comma-separated for rotation). If unset, bootstrap tokens are accepted for those routes with a deprecation warning |
+| `AH_METER_DB_PATH` | Metering database path. Defaults to `ah-metering.db` next to the state database |
+| `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
+| `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |
 
 ## Installation
 
 For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
+
+For a fresh Ubuntu 24.04 amd64 host, `scripts/bootstrap-stack.sh` installs and configures everything below in one run, including generating the master key, bootstrap token and admin token (see the fresh-install guide). The manual steps that follow are for reference or customized setups.
 
 ### Run the OpenRouter example on the Mac mini
 
@@ -146,16 +159,18 @@ mkdir -p /var/lib/ah/builds /var/lib/ah/backups
 head -c 32 /dev/urandom | xxd -p -c 64 > /var/lib/ah/master.key
 chmod 600 /var/lib/ah/master.key
 
-# Generate bootstrap token
+# Generate the bootstrap token and the admin token (run twice; use a different value for each)
+openssl rand -hex 32
 openssl rand -hex 32
 ```
 
 ### 4. Configure and start systemd service
 
 ```bash
-# Set bootstrap token
+# Set bootstrap and admin tokens
 cat > /etc/default/ah <<'EOF'
 AH_BOOTSTRAP_TOKEN=<your-32+-char-token-here>
+AH_ADMIN_TOKEN=<a-different-32+-char-token-here>
 EOF
 chmod 600 /etc/default/ah
 
@@ -195,6 +210,25 @@ curl -X POST http://localhost:8080/v1/tenants/register \
 {
   "tenant_id": "ten_abc123",
   "api_key": "keyid.secret"
+}
+```
+
+### Key recovery
+
+Recovery needs the admin token, not the bootstrap token. The response contains a new API key in the `key` field, shown once:
+
+```bash
+curl -X POST http://localhost:8080/v1/auth/recover \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: <admin-token>' \
+  -d '{"email": "admin@example.com"}'
+
+# Response
+{
+  "id": "<key-id>",
+  "key": "keyid.secret",
+  "name": "...",
+  "created_at": <unix-seconds>
 }
 ```
 
@@ -289,7 +323,7 @@ POST /v1/databases
 GET    /v1/databases                          # List databases
 GET    /v1/databases/{dbID}                   # Get database
 GET    /v1/databases/{dbID}/connection-string # Get connection string (decrypted)
-DELETE /v1/databases/{dbID}                   # Delete database and data
+DELETE /v1/databases/{dbID}                   # Delete database and data (not limited to 30s; stops the container, wipes and removes the volume)
 ```
 
 ## Operational Details
@@ -318,7 +352,7 @@ DELETE /v1/databases/{dbID}                   # Delete database and data
 ```bash
 ah backup
 # Creates timestamped gzip backups in /var/lib/ah/backups/
-# Keeps last 10 backups
+# Keeps the newest 10 state and 10 metering backups
 # Uses VACUUM INTO for WAL-safe snapshots
 ```
 
@@ -347,7 +381,7 @@ ah backup
 make build
 
 # Run locally (requires Docker + gVisor)
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum make run
+AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum AH_ADMIN_TOKEN=dev-admin-token-32-chars-minimum make run
 
 # Run in dev mode (no HTTPS enforcement, open registration)
 ./bin/ah --dev --open-registration --port 8080

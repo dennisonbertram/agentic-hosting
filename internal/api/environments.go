@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
@@ -142,6 +143,11 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	// The process-level server WriteTimeout is 30s. Reset this response's
+	// deadline to cover this endpoint's bounded execution time and response.
+	// ResponseController preserves compatibility with ResponseWriters that do
+	// not expose deadline control; the request context still governs execution.
+	_ = http.NewResponseController(w).SetWriteDeadline(environmentExecResponseDeadline(time.Now(), req.Timeout))
 
 	resp, err := s.envManager.Exec(r.Context(), tenantID, envID, req)
 	if err != nil {
@@ -150,6 +156,16 @@ func (s *Server) handleEnvironmentExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func environmentExecResponseDeadline(start time.Time, timeoutSeconds int) time.Time {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+	if timeoutSeconds > 300 {
+		timeoutSeconds = 300
+	}
+	return start.Add(time.Duration(timeoutSeconds)*time.Second + 5*time.Second)
 }
 
 func (s *Server) handleEnvironmentLeaseExtend(w http.ResponseWriter, r *http.Request) {

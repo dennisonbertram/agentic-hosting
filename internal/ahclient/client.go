@@ -44,6 +44,10 @@ func NewClientNoTimeout(baseURL, apiKey string) *Client {
 // doJSON sends a JSON request and decodes the response body into dest.
 // For 204 No Content, dest may be nil.
 func (c *Client) doJSON(method, path string, body any, dest any, extraHeaders map[string]string) error {
+	return c.doJSONWithHTTPClient(c.HTTPClient, method, path, body, dest, extraHeaders)
+}
+
+func (c *Client) doJSONWithHTTPClient(httpClient *http.Client, method, path string, body any, dest any, extraHeaders map[string]string) error {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -68,7 +72,7 @@ func (c *Client) doJSON(method, path string, body any, dest any, extraHeaders ma
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("ahclient: do request: %w", err)
 	}
@@ -600,11 +604,26 @@ func (c *Client) EnvironmentExec(envID string, command []string, workDir string,
 	if timeoutSeconds > 0 {
 		body["timeout"] = timeoutSeconds
 	}
+	// Environment exec can run for up to five minutes. Clone the configured
+	// client so its shorter default timeout does not cut off this endpoint, and
+	// bound the request to the server's execution cap plus response allowance.
+	httpClient := *c.HTTPClient
+	httpClient.Timeout = environmentExecClientTimeout(timeoutSeconds)
 	var resp ExecResult
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp, nil); err != nil {
+	if err := c.doJSONWithHTTPClient(&httpClient, http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func environmentExecClientTimeout(timeoutSeconds int) time.Duration {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+	if timeoutSeconds > 300 {
+		timeoutSeconds = 300
+	}
+	return time.Duration(timeoutSeconds)*time.Second + 5*time.Second
 }
 
 // ExtendEnvironmentLease extends the lease on an environment.

@@ -2,12 +2,21 @@ package testutil
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
+	"github.com/docker/docker/errdefs"
 )
+
+// NewNotFoundError returns an error shaped like the real Docker client's
+// missing-container error: wrapped with %w around an errdefs NotFound.
+func NewNotFoundError(containerID string) error {
+	return fmt.Errorf("inspect container: %w", errdefs.NotFound(errors.New("No such container: "+containerID)))
+}
 
 // MockDockerClient is a test double for docker.Client.
 // Set the function fields to control return values; inspect the recorded fields to verify calls.
@@ -43,6 +52,10 @@ type MockDockerClient struct {
 	// StartContainer
 	StartContainerFn    func(ctx context.Context, containerID string) error
 	StartContainerCalls []string // containerIDs started
+
+	// RestartContainer
+	RestartContainerFn    func(ctx context.Context, containerID string) error
+	RestartContainerCalls []string // containerIDs restarted
 
 	// RemoveContainer
 	RemoveContainerFn    func(ctx context.Context, containerID string) error
@@ -204,6 +217,14 @@ func (m *MockDockerClient) StartContainer(ctx context.Context, containerID strin
 	m.StartContainerCalls = append(m.StartContainerCalls, containerID)
 	if m.StartContainerFn != nil {
 		return m.StartContainerFn(ctx, containerID)
+	}
+	return nil
+}
+
+func (m *MockDockerClient) RestartContainer(ctx context.Context, containerID string) error {
+	m.RestartContainerCalls = append(m.RestartContainerCalls, containerID)
+	if m.RestartContainerFn != nil {
+		return m.RestartContainerFn(ctx, containerID)
 	}
 	return nil
 }

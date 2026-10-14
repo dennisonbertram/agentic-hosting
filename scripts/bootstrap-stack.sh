@@ -337,7 +337,7 @@ install -o 65532 -g 65532 -m 0600 /dev/null /var/lib/traefik/certs/acme.json
 if ((skip_website == 0)); then
   grep -qx 'FROM nginx:alpine' "$repo_root/website/Dockerfile" || die 'website Dockerfile base changed; update its pinned digest before retrying'
   sed 's|^FROM nginx:alpine$|FROM nginx@'"$nginx_digest"'|' "$repo_root/website/Dockerfile" > "$tmpdir/Dockerfile.website"
-  docker build -t ah-website:bootstrap -f "$tmpdir/Dockerfile.website" "$repo_root/website"
+  docker build -t ah-website:bootstrap -f "$tmpdir/Dockerfile.website" "$repo_root"
   docker run -d --name ah-website --restart unless-stopped --network traefik-public --ip "$WEBSITE_IP" ah-website:bootstrap >/dev/null
 fi
 docker run -d --name ah-registry --restart unless-stopped --network traefik-public --ip "$REGISTRY_IP" -p 127.0.0.1:5000:5000 -v ah-registry:/var/lib/registry registry@${registry_digest} >/dev/null

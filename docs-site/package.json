@@ -1,0 +1,20 @@
+{
+  "name": "agentic-hosting-docs",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for agentic-hosting",
+  "dependencies": {
+    "@astrojs/sitemap": "^3.6.0",
+    "@tailwindcss/vite": "^4.1.16",
+    "astro": "^5.15.1",
+    "tailwindcss": "^4.1.16"
+  },
+  "scripts": {
+    "dev": "ASTRO_BASE=/ ASTRO_SITE=http://localhost:4321 astro dev --host 127.0.0.1 --port 4321",
+    "build": "astro build",
+    "build:pages": "ASTRO_BASE=/agentic-hosting/ ASTRO_SITE=https://dennisonbertram.github.io astro build",
+    "build:site": "ASTRO_BASE=/docs/ ASTRO_SITE=https://agentic.hosting astro build",
+    "preview": "astro preview --host 127.0.0.1 --port 4321",
+    "check": "astro check"
+  }
+}

@@ -3,6 +3,7 @@
 A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. Includes an optional supervisory dashboard for humans.
 
 - **Repo**: github.com/dennisonbertram/agentic-hosting
+- **Docs**: [Documentation site](https://dennisonbertram.github.io/agentic-hosting/) (source in `docs-site/`)
 - **Stack**: Go binary + Docker + gVisor + Traefik + Nixpacks + SQLite
 - **Language**: Go 1.25 (requires CGO for SQLite)
 - **Binary**: `ah`
@@ -289,7 +290,7 @@ DELETE /v1/databases/{dbID}                   # Delete database and data
 
 ### Background Processes
 
-- **Reconciler** (60s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
+- **Reconciler** (30s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
 - **GC** (5min interval): Cleans orphaned containers, volumes, images, build directories.
 - **Circuit breaker**: 5 crashes in 10 minutes stops restarting. Reset with `POST /v1/services/{id}/reset`.
 - **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%.
@@ -407,12 +408,26 @@ See [`scripts/README.md`](scripts/README.md) for full documentation.
 
 - [ah vs OpenShell / NemoClaw](docs/exploration/ah-vs-openshell.md) — where each tool fits and how they complement each other
 
+## Documentation site
+
+The public docs match the [agentic.hosting](https://agentic.hosting) landing page (Instrument Serif + Inter, stone palette) and are generated from `docs-site/` (Astro). They describe **only what the Go API actually implements** — see `internal/api/server.go`.
+
+```bash
+cd docs-site
+npm ci
+npm run dev          # http://127.0.0.1:4321/
+npm run build        # GitHub Pages defaults (base /agentic-hosting/)
+npm run build:site   # for the website container (base /docs/)
+```
+
+GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. After enabling Pages (source: GitHub Actions), the site is `https://dennisonbertram.github.io/agentic-hosting/`.
+
+To bake docs into the nginx website image, build from the **repository root**:
+
+```bash
+docker build -f website/Dockerfile -t website .
+```
+
 ## Planned Work
 
-See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) for planned enhancements including:
-
-- HKDF key separation
-- Multi-domain routing
-- Billing/metering API
-- mTLS for inter-service communication
-- Audit logging
+See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://dennisonbertram.github.io/agentic-hosting/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.

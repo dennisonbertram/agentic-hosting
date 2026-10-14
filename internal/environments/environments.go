@@ -389,6 +389,9 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 
 // Delete destroys an environment: stops container, removes volume, deletes record.
 func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	e, err := m.Get(ctx, tenantID, envID)
 	if err != nil {
 		return err
@@ -409,6 +412,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 				log.Printf("environments: remove container %s: %v", e.ContainerID, err)
 			}
 		}
+	}
+	if err := m.removePreviewIngressNetwork(ctx, tenantID, envID, e.ContainerID); err != nil {
+		log.Printf("environments: remove preview ingress network for %s: %v", envID, err)
 	}
 
 	// Remove volume
@@ -440,17 +446,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	if e.Status != "stopped" {
 		return apierr.Validation(fmt.Sprintf("environment must be stopped to start (current: %s)", e.Status))
 	}
-
-	// Tenant suspension removes the shared network and disconnects Traefik.
-	// Recreate it and restore Traefik's connection before publishing preview
-	// routes again.
-	networkName := docker.TenantNetworkName(tenantID)
-	networkID, err := m.docker.EnsureNetwork(ctx, networkName)
+	needsIngress, err := m.hasPreviews(ctx, tenantID, envID)
 	if err != nil {
-		return fmt.Errorf("ensure environment network: %w", err)
+		return err
 	}
-	if err := m.docker.ConnectNetwork(ctx, networkID, "paas-traefik"); err != nil {
-		return fmt.Errorf("connect Traefik to environment network: %w", err)
+
+	// Tenant suspension removes the isolated tenant bridge. Recreate it for the
+	// environment container; preview ingress uses a separate per-environment net.
+	networkName := docker.TenantNetworkName(tenantID)
+	if _, err := m.docker.EnsureNetwork(ctx, networkName); err != nil {
+		return fmt.Errorf("ensure environment network: %w", err)
 	}
 
 	containerID := e.ContainerID
@@ -493,16 +498,29 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		}
 		recreated = true
 	}
-	if err := m.docker.ConnectNetwork(ctx, networkID, containerID); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = m.docker.StopContainer(cleanupCtx, containerID)
-		if recreated {
-			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+	if needsIngress {
+		if err := m.ensurePreviewIngress(ctx, tenantID, envID, containerID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = m.docker.StopContainer(cleanupCtx, containerID)
+			if recreated {
+				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+			}
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+			cancel()
+			return fmt.Errorf("restore preview ingress network: %w", err)
 		}
-		cancel()
-		return fmt.Errorf("connect environment to tenant network: %w", err)
+		if err := m.restorePreviews(ctx, envID, tenantID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			m.cleanupPreviews(cleanupCtx, envID)
+			_ = m.docker.StopContainer(cleanupCtx, containerID)
+			if recreated {
+				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+			}
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+			cancel()
+			return fmt.Errorf("restore preview routes: %w", err)
+		}
 	}
-
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(e.LeaseDurationSeconds)
 	var updateResult sql.Result
@@ -518,9 +536,15 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	}
 	if err != nil || updated != 1 {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if needsIngress {
+			m.cleanupPreviews(cleanupCtx, envID)
+		}
 		_ = m.docker.StopContainer(cleanupCtx, containerID)
 		if recreated {
 			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		if needsIngress {
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
 		}
 		cancel()
 		if err != nil {
@@ -528,10 +552,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		}
 		return fmt.Errorf("environment start was interrupted before ownership could be committed")
 	}
-	if err == nil {
-		m.restorePreviews(ctx, envID, tenantID)
-	}
-	return err
+	return nil
 }
 
 // Stop stops a running environment.
@@ -887,6 +908,9 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 
 // CreatePreview creates a preview route for an environment port.
 func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req CreatePreviewRequest) (*Preview, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	e, err := m.Get(ctx, tenantID, envID)
 	if err != nil {
 		return nil, err
@@ -933,11 +957,25 @@ func (m *Manager) CreatePreview(ctx context.Context, tenantID, envID string, req
 		return nil, fmt.Errorf("insert preview: %w", err)
 	}
 
+	ingressID, err := m.docker.EnsureIngressNetwork(ctx, docker.EnvironmentIngressNetworkName(tenantID, envID))
+	if err == nil {
+		err = m.docker.ConnectNetwork(ctx, ingressID, "paas-traefik")
+	}
+	if err == nil {
+		err = m.docker.ConnectNetworkAlias(ctx, ingressID, e.ContainerID, docker.EnvironmentIngressAlias(tenantID, envID))
+	}
+	if err != nil {
+		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, id)
+		m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
+		return nil, fmt.Errorf("connect preview ingress network: %w", err)
+	}
+
 	// Write Traefik route
-	containerName := fmt.Sprintf("ah-env-%s-%s", tenantID, envID)
+	containerName := docker.EnvironmentIngressAlias(tenantID, envID)
 	if err := m.writePreviewTraefikRoute(id, dnsLabel, containerName, req.Port); err != nil {
 		// Rollback DB on Traefik write failure
 		_, _ = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, id)
+		m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
 		return nil, fmt.Errorf("write traefik route: %w", err)
 	}
 
@@ -994,9 +1032,16 @@ func (m *Manager) ListPreviews(ctx context.Context, tenantID, envID string) ([]*
 
 // DeletePreview removes a preview route.
 func (m *Manager) DeletePreview(ctx context.Context, tenantID, envID, previewID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, err := m.Get(ctx, tenantID, envID)
+	if err != nil {
+		return err
+	}
 	// Verify the preview exists and belongs to the right tenant/env
 	var id string
-	err := m.db.QueryRowContext(ctx,
+	err = m.db.QueryRowContext(ctx,
 		`SELECT id FROM environment_previews WHERE id = ? AND environment_id = ? AND tenant_id = ?`,
 		previewID, envID, tenantID,
 	).Scan(&id)
@@ -1014,6 +1059,75 @@ func (m *Manager) DeletePreview(ctx context.Context, tenantID, envID, previewID 
 	_, err = m.db.ExecContext(ctx, `DELETE FROM environment_previews WHERE id = ?`, previewID)
 	if err != nil {
 		return fmt.Errorf("delete preview: %w", err)
+	}
+	m.cleanupUnusedPreviewIngress(ctx, tenantID, envID, e.ContainerID)
+	return nil
+}
+
+func (m *Manager) hasPreviews(ctx context.Context, tenantID, envID string) (bool, error) {
+	var count int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM environment_previews WHERE environment_id = ? AND tenant_id = ?`,
+		envID, tenantID).Scan(&count); err != nil {
+		return false, fmt.Errorf("count environment previews: %w", err)
+	}
+	return count > 0, nil
+}
+
+func (m *Manager) ensurePreviewIngress(ctx context.Context, tenantID, envID, containerID string) error {
+	networkID, err := m.docker.EnsureIngressNetwork(ctx, docker.EnvironmentIngressNetworkName(tenantID, envID))
+	if err != nil {
+		return fmt.Errorf("ensure preview ingress network: %w", err)
+	}
+	if err := m.docker.ConnectNetwork(ctx, networkID, "paas-traefik"); err != nil {
+		return fmt.Errorf("connect Traefik to preview ingress network: %w", err)
+	}
+	if err := m.docker.ConnectNetworkAlias(ctx, networkID, containerID, docker.EnvironmentIngressAlias(tenantID, envID)); err != nil {
+		return fmt.Errorf("connect environment to preview ingress network: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) cleanupUnusedPreviewIngress(ctx context.Context, tenantID, envID, containerID string) {
+	hasPreviews, err := m.hasPreviews(ctx, tenantID, envID)
+	if err != nil {
+		log.Printf("environments: check previews before ingress cleanup for %s: %v", envID, err)
+		return
+	}
+	if hasPreviews {
+		return
+	}
+	if err := m.removePreviewIngressNetwork(ctx, tenantID, envID, containerID); err != nil {
+		log.Printf("environments: remove unused preview ingress network for %s: %v", envID, err)
+	}
+}
+
+func (m *Manager) removePreviewIngressNetwork(ctx context.Context, tenantID, envID, containerID string) error {
+	name := docker.EnvironmentIngressNetworkName(tenantID, envID)
+	networks, err := m.docker.NetworkList(ctx)
+	if err != nil {
+		return fmt.Errorf("list networks: %w", err)
+	}
+	var networkID string
+	for _, network := range networks {
+		if network.Name == name {
+			networkID = network.ID
+			break
+		}
+	}
+	if networkID == "" {
+		return nil
+	}
+	for _, endpoint := range []string{containerID, "paas-traefik"} {
+		if endpoint == "" {
+			continue
+		}
+		if err := m.docker.NetworkDisconnect(ctx, networkID, endpoint); err != nil && !isNotFoundError(err) {
+			return fmt.Errorf("disconnect %s from preview ingress network: %w", endpoint, err)
+		}
+	}
+	if err := m.docker.RemoveNetwork(ctx, networkID); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("remove preview ingress network: %w", err)
 	}
 	return nil
 }

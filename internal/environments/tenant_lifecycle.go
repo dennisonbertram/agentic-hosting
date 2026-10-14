@@ -2,8 +2,11 @@ package environments
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
+
+	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 )
 
 // StopAllForTenant stops active environment containers and removes their
@@ -34,6 +37,13 @@ func (m *Manager) StopAllForTenant(_ context.Context, tenantID string) {
 
 	for _, entry := range entries {
 		m.cleanupPreviews(ctx, entry.id)
+		if hasPreviews, previewErr := m.hasPreviews(ctx, tenantID, entry.id); previewErr != nil {
+			log.Printf("environments: check previews for ingress cleanup on %s: %v", entry.id, previewErr)
+		} else if hasPreviews {
+			if err := m.removePreviewIngressNetwork(ctx, tenantID, entry.id, entry.containerID); err != nil {
+				log.Printf("environments: remove preview ingress network for suspended environment %s: %v", entry.id, err)
+			}
+		}
 		if entry.status != "running" && entry.status != "creating" {
 			continue
 		}
@@ -65,13 +75,12 @@ func (m *Manager) removeCreatedEnvironment(containerID, volumeName string) {
 
 // restorePreviews re-enables persisted preview routes after an environment is
 // started again following tenant reactivation.
-func (m *Manager) restorePreviews(ctx context.Context, envID, tenantID string) {
+func (m *Manager) restorePreviews(ctx context.Context, envID, tenantID string) error {
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, dns_label, port FROM environment_previews WHERE environment_id = ? AND tenant_id = ?`,
 		envID, tenantID)
 	if err != nil {
-		log.Printf("environments: list previews to restore for %s: %v", envID, err)
-		return
+		return fmt.Errorf("list previews to restore for %s: %w", envID, err)
 	}
 	type previewRoute struct {
 		id, dnsLabel string
@@ -81,19 +90,21 @@ func (m *Manager) restorePreviews(ctx context.Context, envID, tenantID string) {
 	for rows.Next() {
 		var route previewRoute
 		if err := rows.Scan(&route.id, &route.dnsLabel, &route.port); err != nil {
-			log.Printf("environments: scan preview to restore for %s: %v", envID, err)
-			continue
+			_ = rows.Close()
+			return fmt.Errorf("scan preview to restore for %s: %w", envID, err)
 		}
 		routes = append(routes, route)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("environments: read previews to restore for %s: %v", envID, err)
+		_ = rows.Close()
+		return fmt.Errorf("read previews to restore for %s: %w", envID, err)
 	}
 	_ = rows.Close()
-	containerName := "ah-env-" + tenantID + "-" + envID
+	containerName := docker.EnvironmentIngressAlias(tenantID, envID)
 	for _, route := range routes {
 		if err := m.writePreviewTraefikRoute(route.id, route.dnsLabel, containerName, route.port); err != nil {
-			log.Printf("environments: restore preview route %s: %v", route.id, err)
+			return fmt.Errorf("restore preview route %s: %w", route.id, err)
 		}
 	}
+	return nil
 }

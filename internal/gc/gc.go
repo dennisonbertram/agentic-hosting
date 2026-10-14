@@ -4,6 +4,7 @@ package gc
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -145,13 +146,13 @@ func (g *GC) collectOnce(ctx context.Context) error {
 		removed += pruned
 	}
 
-	// 5. Orphaned tenant networks — disconnect Traefik and remove empty ah-tenant-* networks.
+	// 5. Orphaned tenant and per-workload ingress networks.
 	orphanedNets, netErr := g.findOrphanedNetworks(ctx)
 	if netErr != nil {
 		log.Printf("gc: orphaned network check failed: %v", netErr)
 	} else {
 		for _, net := range orphanedNets {
-			log.Printf("gc: removing orphaned tenant network %s", net.Name)
+			log.Printf("gc: removing orphaned network %s", net.Name)
 			// Disconnect Traefik first (by container name); idempotent if not connected.
 			if disconnErr := g.docker.NetworkDisconnect(ctx, net.Name, "paas-traefik"); disconnErr != nil {
 				log.Printf("gc: failed to disconnect Traefik from network %s: %v", net.Name, disconnErr)
@@ -427,9 +428,10 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 	return orphaned, nil
 }
 
-// findOrphanedNetworks lists Docker networks matching the tenant naming pattern
-// (ah-tenant-*) that have 0 non-Traefik containers connected. These are safe to
-// disconnect from Traefik and remove.
+// findOrphanedNetworks lists tenant and per-workload ingress networks with no
+// workload endpoint. A single Traefik endpoint is also orphaned. Tenant
+// networks contain only workloads; ingress networks contain Traefik plus one
+// workload while active.
 func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
 	networks, err := g.docker.NetworkList(ctx)
 	if err != nil {
@@ -438,18 +440,30 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 
 	var orphaned []docker.NetworkInfo
 	for _, net := range networks {
-		if !strings.HasPrefix(net.Name, "ah-tenant-") {
+		if !strings.HasPrefix(net.Name, "ah-tenant-") && !strings.HasPrefix(net.Name, "ah-ingress-") {
 			continue
 		}
-		// A network with 0 containers is clearly orphaned.
-		// A network with exactly 1 container is orphaned if that container is Traefik
-		// (the only reason Traefik is still connected is because disconnect was missed).
-		// Networks with 2+ containers have active tenant workloads — leave them alone.
-		if net.Containers <= 1 {
-			orphaned = append(orphaned, net)
+		// NetworkList may omit endpoint membership. Inspect every possible
+		// orphan before removal; on inspection failure, abort this cleanup pass.
+		if net.Containers > 1 {
+			continue
+		}
+		inspected, err := g.docker.NetworkInspect(ctx, net.ID)
+		if err != nil {
+			return nil, fmt.Errorf("inspect candidate network %s: %w", net.Name, err)
+		}
+		if inspected.Containers == 0 || (inspected.Containers == 1 && onlyTraefik(inspected.ContainerNames)) {
+			orphaned = append(orphaned, inspected)
 		}
 	}
 	return orphaned, nil
+}
+
+func onlyTraefik(containerNames []string) bool {
+	if len(containerNames) != 1 {
+		return false
+	}
+	return strings.TrimPrefix(containerNames[0], "/") == "paas-traefik"
 }
 
 func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {

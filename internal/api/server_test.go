@@ -325,10 +325,15 @@ func TestTenantDeleteStopsEnvironmentsAndDisablesPreviewRoutes(t *testing.T) {
 	_, err = stateDB.Exec(`UPDATE tenants SET status = 'active' WHERE id = 'tenant-1'`)
 	require.NoError(t, err)
 	require.NoError(t, envManager.Start(context.Background(), "tenant-1", "env-suspend"))
-	assert.Contains(t, mock.ConnectNetworkCalls, [2]string{"net-ah-tenant-tenant-1", "paas-traefik"},
-		"environment reactivation must reconnect Traefik to the recreated tenant network")
+	assert.Contains(t, mock.ConnectNetworkCalls,
+		[2]string{"ingress-" + docker.EnvironmentIngressNetworkName("tenant-1", "env-suspend"), "paas-traefik"},
+		"environment reactivation must reconnect Traefik to the preview ingress network")
 	_, err = os.Stat(routePath)
 	assert.NoError(t, err, "starting the environment after reactivation should restore its preview route")
+	route, err := os.ReadFile(routePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(route), docker.EnvironmentIngressAlias("tenant-1", "env-suspend"),
+		"restored routes must resolve through the dedicated ingress network alias")
 }
 
 // TestTenantDelete_CancelsActiveBuilds verifies that DELETE /v1/tenant cancels

@@ -350,7 +350,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.Contains(t, content, "websecure")
 		assert.Contains(t, content, "redirectScheme")
 		assert.Contains(t, content, "scheme: https")
-		assert.Contains(t, content, "ah-tenant1-svc123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 		assert.Contains(t, content, "letsencrypt")
 	})
@@ -374,7 +374,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		assert.NotContains(t, content, "websecure", "localhost mode should not use HTTPS entrypoint")
 		assert.NotContains(t, content, "redirectScheme", "localhost mode should not install HTTPS redirects")
 		assert.NotContains(t, content, "letsencrypt", "localhost mode should not use TLS")
-		assert.Contains(t, content, "ah-tenant1-svc123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc123"))
 		assert.Contains(t, content, "8080")
 	})
 
@@ -417,7 +417,7 @@ func TestWriteTraefikRoute(t *testing.T) {
 		content := string(data)
 		assert.Contains(t, content, "Host(`svc-abc-123.localhost`)")
 		assert.Contains(t, content, "3000")
-		assert.Contains(t, content, "ah-tenant1-svc-abc-123")
+		assert.Contains(t, content, docker.ServiceIngressAlias("tenant1", "svc-abc-123"))
 	})
 }
 

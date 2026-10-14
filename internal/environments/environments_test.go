@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -483,7 +484,7 @@ func TestSyncWorkspace_InvalidURL(t *testing.T) {
 
 func TestCreatePreview_Success(t *testing.T) {
 	dir := t.TempDir()
-	mgr, _ := newTestManagerWithTraefik(t, 5, "example.com", dir)
+	mgr, mock := newTestManagerWithTraefik(t, 5, "example.com", dir)
 
 	env, err := mgr.Create(context.Background(), testTenantID, CreateRequest{Name: "preview-env"})
 	require.NoError(t, err)
@@ -499,6 +500,17 @@ func TestCreatePreview_Success(t *testing.T) {
 	assert.Contains(t, preview.DNSLabel, "env-")
 	assert.Contains(t, preview.DNSLabel, "-api")
 	assert.Contains(t, preview.URL, "example.com")
+	ingressNetwork := "ingress-" + docker.EnvironmentIngressNetworkName(testTenantID, env.ID)
+	assert.Contains(t, mock.ConnectNetworkCalls,
+		[2]string{ingressNetwork, "paas-traefik"},
+		"preview creation must attach Traefik to the environment's dedicated ingress network")
+	assert.Contains(t, mock.ConnectNetworkAliasCalls,
+		[3]string{ingressNetwork, env.ContainerID, docker.EnvironmentIngressAlias(testTenantID, env.ID)},
+		"preview creation must attach the environment to its dedicated ingress network")
+	route, err := os.ReadFile(filepath.Join(dir, "env-preview-"+preview.ID+".yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(route), docker.EnvironmentIngressAlias(testTenantID, env.ID),
+		"preview routes must use the ingress-only DNS alias")
 
 	// Verify Traefik route file was written
 	files, _ := os.ReadDir(dir)

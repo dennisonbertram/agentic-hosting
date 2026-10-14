@@ -165,6 +165,38 @@ func TestTenantNetworkName(t *testing.T) {
 	}
 }
 
+func TestPerWorkloadIngressNetworkNames(t *testing.T) {
+	tenantID := "tenant-1"
+	serviceID := "svc-1"
+	environmentID := "env-1"
+	if got, want := ServiceIngressNetworkName(tenantID, serviceID), "ah-ingress-tenant-1-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressNetworkName(tenantID, environmentID), "ah-ingress-tenant-1-environment-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressNetworkName() = %q, want %q", got, want)
+	}
+	if got, want := TenantIngressNetworkPrefix(tenantID), "ah-ingress-tenant-1-"; got != want {
+		t.Fatalf("TenantIngressNetworkPrefix() = %q, want %q", got, want)
+	}
+	if got, want := ServiceIngressAlias(tenantID, serviceID), "ah-route-tenant-1-service-svc-1"; got != want {
+		t.Fatalf("ServiceIngressAlias() = %q, want %q", got, want)
+	}
+	if got, want := EnvironmentIngressAlias(tenantID, environmentID), "ah-route-tenant-1-environment-env-1"; got != want {
+		t.Fatalf("EnvironmentIngressAlias() = %q, want %q", got, want)
+	}
+}
+
+func TestBridgeNetworkCreateOptionsKeepTenantIsolationAndAllowIngressPair(t *testing.T) {
+	tenant := bridgeNetworkCreateOptions(false)
+	if !tenant.Internal || tenant.Driver != "bridge" || tenant.Options["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Fatalf("tenant/pool network options weakened isolation: %#v", tenant)
+	}
+	ingress := bridgeNetworkCreateOptions(true)
+	if !ingress.Internal || ingress.Driver != "bridge" || ingress.Options["com.docker.network.bridge.enable_icc"] != "true" {
+		t.Fatalf("ingress pair network options do not allow internal proxy traffic: %#v", ingress)
+	}
+}
+
 // TestContainerInfo_HealthStatus verifies the ContainerInfo struct correctly
 // holds health status values, including the empty string for nil Health.
 // The nil-check logic lives in InspectContainer; here we validate the struct

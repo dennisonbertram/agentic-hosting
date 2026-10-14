@@ -215,9 +215,10 @@ func TestCollectOnce_RemovesOrphanedNetworks(t *testing.T) {
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
 				{ID: "net-1", Name: "ah-tenant-orphan1", Containers: 0},
-				{ID: "net-2", Name: "ah-tenant-orphan2", Containers: 1}, // only Traefik connected
-				{ID: "net-3", Name: "ah-tenant-active", Containers: 2},  // tenant + Traefik
-				{ID: "net-4", Name: "bridge", Containers: 5},            // not a tenant network
+				{ID: "net-2", Name: "ah-tenant-orphan2", Containers: 1, ContainerNames: []string{"paas-traefik"}},             // only Traefik connected
+				{ID: "net-3", Name: "ah-tenant-active", Containers: 2},                                                        // tenant + Traefik
+				{ID: "net-4", Name: "ah-ingress-tenant-service-old", Containers: 1, ContainerNames: []string{"paas-traefik"}}, // orphan ingress net
+				{ID: "net-5", Name: "bridge", Containers: 5},                                                                  // not a tenant network
 			}, nil
 		},
 	}
@@ -227,10 +228,11 @@ func TestCollectOnce_RemovesOrphanedNetworks(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should disconnect Traefik from orphaned networks
-	assert.Len(t, mock.NetworkDisconnectCalls, 2, "should disconnect Traefik from 2 orphaned networks")
+	assert.Len(t, mock.NetworkDisconnectCalls, 3, "should disconnect Traefik from orphaned tenant and ingress networks")
 	// Should remove orphaned networks
 	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan1")
 	assert.Contains(t, mock.RemoveNetworkCalls, "ah-tenant-orphan2")
+	assert.Contains(t, mock.RemoveNetworkCalls, "ah-ingress-tenant-service-old")
 	// Should NOT remove active or non-tenant networks
 	assert.NotContains(t, mock.RemoveNetworkCalls, "ah-tenant-active")
 	assert.NotContains(t, mock.RemoveNetworkCalls, "bridge")
@@ -252,6 +254,40 @@ func TestCollectOnce_SkipsNetworksWithActiveContainers(t *testing.T) {
 
 	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect from busy networks")
 	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove busy networks")
+}
+
+func TestCollectOnce_InspectsMembershipBeforeRemovingListedEmptyNetwork(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			// Docker Engine's list response can omit the Containers map.
+			return []docker.NetworkInfo{{ID: "net-live", Name: "ah-ingress-tenant-service-live", Containers: 0}}, nil
+		},
+		NetworkInspectFn: func(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+			return docker.NetworkInfo{ID: networkID, Name: "ah-ingress-tenant-service-live", Containers: 2, ContainerNames: []string{"paas-traefik", "service"}}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	require.NoError(t, g.collectOnce(context.Background()))
+	assert.Empty(t, mock.RemoveNetworkCalls, "inspect membership must preserve an active ingress network")
+	assert.Equal(t, []string{"net-live"}, mock.NetworkInspectCalls)
+}
+
+func TestCollectOnce_FailsClosedWhenNetworkInspectFails(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{{ID: "net-unknown", Name: "ah-ingress-tenant-service-unknown"}}, nil
+		},
+		NetworkInspectFn: func(ctx context.Context, networkID string) (docker.NetworkInfo, error) {
+			return docker.NetworkInfo{}, fmt.Errorf("inspect unavailable")
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	require.NoError(t, g.collectOnce(context.Background())) // GC logs and skips cleanup on inspection error.
+	assert.Empty(t, mock.RemoveNetworkCalls)
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +328,7 @@ func TestNetworkCleanup_Regression_OrphanedTenantNetworksRemoved(t *testing.T) {
 				// 0 containers — clearly orphaned
 				{ID: "net-empty", Name: "ah-tenant-dead1", Containers: 0},
 				// 1 container — only Traefik remains
-				{ID: "net-traefik-only", Name: "ah-tenant-dead2", Containers: 1},
+				{ID: "net-traefik-only", Name: "ah-tenant-dead2", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 			}, nil
 		},
 	}
@@ -324,7 +360,7 @@ func TestNetworkCleanup_Regression_DisconnectBeforeRemove(t *testing.T) {
 	mock := &testutil.MockDockerClient{
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
-				{ID: "net-1", Name: "ah-tenant-cleanup1", Containers: 1},
+				{ID: "net-1", Name: "ah-tenant-cleanup1", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 			}, nil
 		},
 		NetworkDisconnectFn: func(ctx context.Context, networkID, containerID string) error {
@@ -354,7 +390,7 @@ func TestNetworkCleanup_Regression_DisconnectErrorContinues(t *testing.T) {
 	mock := &testutil.MockDockerClient{
 		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
 			return []docker.NetworkInfo{
-				{ID: "net-fail", Name: "ah-tenant-fail", Containers: 1},
+				{ID: "net-fail", Name: "ah-tenant-fail", Containers: 1, ContainerNames: []string{"paas-traefik"}},
 				{ID: "net-ok", Name: "ah-tenant-ok", Containers: 0},
 			}, nil
 		},

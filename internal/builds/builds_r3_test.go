@@ -70,15 +70,15 @@ func TestStreamBuildLogs_NoDuplicateForLineInSnapshotAndChannel(t *testing.T) {
 	insertBuild(t, mgr, "b-dup", "running")
 	ctx := context.Background()
 
-	mgr.appendLog(ctx, "b-dup", "X")
+	seq := mgr.appendLog(ctx, "b-dup", "X")
 	out := &syncBuf{}
 	done := make(chan error, 1)
 	go func() { done <- mgr.StreamBuildLogs(ctx, "tenant-1", "b-dup", out) }()
 	require.Eventually(t, func() bool { return out.String() == "X\n" }, 2*time.Second, 5*time.Millisecond)
 
-	mgr.notifyLogSubs("b-dup", "X") // late notification for the line already in the snapshot
-	mgr.appendLog(ctx, "b-dup", "Y")
-	mgr.notifyLogSubs("b-dup", "Y")
+	mgr.notifyLogSubs("b-dup", seq, "X") // late notification for the line already in the snapshot
+	seq = mgr.appendLog(ctx, "b-dup", "Y")
+	mgr.notifyLogSubs("b-dup", seq, "Y")
 	mgr.closeLogSubs("b-dup")
 	require.NoError(t, <-done)
 	assert.Equal(t, "X\nY\n", out.String())

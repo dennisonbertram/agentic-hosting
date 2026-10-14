@@ -678,11 +678,25 @@ func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostCo
 	}
 }
 
+// pullOrUseLocal pulls img to refresh mutable tags, but tolerates a failed pull
+// (registry down, rate limited) when the image is already in the local store.
+func pullOrUseLocal(ctx context.Context, img string, pull func(context.Context, string) error, exists func(context.Context, string) (bool, error)) error {
+	err := pull(ctx, img)
+	if err == nil {
+		return nil
+	}
+	if ok, _ := exists(ctx, img); ok {
+		log.Printf("WARNING: pull of %s failed (%v); using local image", img, err)
+		return nil
+	}
+	return err
+}
+
 // RunDatabase creates and starts a container with host port mapping and
 // persistent volume. Uses gVisor (runsc) runtime. Bound to 127.0.0.1 only.
 // Used for databases and other infrastructure containers (e.g. Vikunja kanban).
 func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (string, error) {
-	if err := c.PullImage(ctx, cfg.Image); err != nil {
+	if err := pullOrUseLocal(ctx, cfg.Image, c.PullImage, c.ImageExists); err != nil {
 		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
 	}
 

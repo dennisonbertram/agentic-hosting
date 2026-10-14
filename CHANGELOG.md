@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Usage metering collector**: samples CPU and memory of running services every 60s into the metering DB. `memory_mb_avg` is now a real average (it was a sum). `AH_METER_DB_PATH` is honored when set.
 - **`ahc` CLI client** — cross-platform command-line tool for managing agentic-hosting (install: `curl -fsSL https://agentic.hosting/install-cli.sh | bash`)
   - `ahc deploy` — deploy from Docker images or git repos with build log streaming
   - `ahc service` — full service lifecycle management with env var support

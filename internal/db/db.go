@@ -17,13 +17,22 @@ type Store struct {
 	MeteringDB *sql.DB
 }
 
+// Open opens the state DB and a metering DB derived from it (<db>-metering.db).
 func Open(dbPath string) (*Store, error) {
+	return OpenWithMetering(dbPath, "")
+}
+
+// OpenWithMetering is Open with an explicit metering DB path; empty means derived.
+func OpenWithMetering(dbPath, meteringPath string) (*Store, error) {
 	stateDB, err := openDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open state db: %w", err)
 	}
 
-	meteringDB, err := openDB(MeteringPath(dbPath))
+	if meteringPath == "" {
+		meteringPath = MeteringPath(dbPath)
+	}
+	meteringDB, err := openDB(meteringPath)
 	if err != nil {
 		stateDB.Close()
 		return nil, fmt.Errorf("open metering db: %w", err)

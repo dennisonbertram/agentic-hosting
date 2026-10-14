@@ -83,7 +83,7 @@ func TestQueryTenantMetrics_DailyAggregation(t *testing.T) {
 	// Day 1: aggregated
 	assert.Equal(t, "2026-03-20T00:00:00Z", metrics[0].Timestamp)
 	assert.InDelta(t, 16.0, metrics[0].CPUSeconds, 0.01, "day 1 CPU should sum to 16.0")
-	assert.InDelta(t, 150.0, metrics[0].MemoryMBAvg, 0.01)
+	assert.InDelta(t, 150.0/120, metrics[0].MemoryMBAvg, 0.01)
 	assert.Equal(t, int64(1500), metrics[0].NetworkRxBytes)
 	assert.Equal(t, int64(3000), metrics[0].NetworkTxBytes)
 
@@ -192,7 +192,7 @@ func TestQueryServiceMetrics_ReturnsData(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, metrics, 1)
 	assert.InDelta(t, 8.0, metrics[0].CPUSeconds, 0.01)
-	assert.InDelta(t, 80.0, metrics[0].MemoryMBAvg, 0.01)
+	assert.InDelta(t, 80.0/120, metrics[0].MemoryMBAvg, 0.01)
 	assert.Equal(t, int64(150), metrics[0].NetworkRxBytes)
 	assert.Equal(t, int64(300), metrics[0].NetworkTxBytes)
 }
@@ -256,7 +256,7 @@ func TestMeteringStore_Regression_HourlyGrouping(t *testing.T) {
 
 	assert.Equal(t, "2026-03-20T14:00:00Z", metrics[0].Timestamp)
 	assert.InDelta(t, 3.0, metrics[0].CPUSeconds, 0.01, "hour-14 should sum 1.0+2.0")
-	assert.InDelta(t, 30.0, metrics[0].MemoryMBAvg, 0.01)
+	assert.InDelta(t, 30.0/120, metrics[0].MemoryMBAvg, 0.01)
 	assert.Equal(t, int64(400), metrics[0].NetworkRxBytes)
 	assert.Equal(t, int64(600), metrics[0].NetworkTxBytes)
 
@@ -386,7 +386,7 @@ func TestMeteringStore_Regression_MultiServiceOverlappingTimestamps(t *testing.T
 	for _, m := range metrics {
 		if m.ServiceID == "svc-A" {
 			assert.InDelta(t, 15.0, m.CPUSeconds, 0.01, "svc-A events should sum to 15")
-			assert.InDelta(t, 150.0, m.MemoryMBAvg, 0.01)
+			assert.InDelta(t, 150.0/120, m.MemoryMBAvg, 0.01)
 			assert.Equal(t, int64(1500), m.NetworkRxBytes)
 		}
 	}

@@ -139,8 +139,10 @@ func main() {
 		log.Fatalf("master key file %s contains invalid hex characters: %v\n%s", *masterKeyPath, err, keyErrMsg)
 	}
 
+	// AH_METER_DB_PATH is honored only when set explicitly; otherwise the metering
+	// DB stays at <db>-metering.db so existing data is not orphaned.
 	// Open databases
-	store, err := db.Open(*dbPath)
+	store, err := db.OpenWithMetering(*dbPath, os.Getenv("AH_METER_DB_PATH"))
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
@@ -195,6 +197,11 @@ func main() {
 	})
 	envMgr.SetPool(envPool)
 	go envPool.Run(context.Background())
+
+	// Usage metering collector (60s samples of running services)
+	meterCtx, meterCancel := context.WithCancel(context.Background())
+	defer meterCancel()
+	go metering.NewCollector(store.StateDB, store.MeteringDB, dockerClient).Run(meterCtx)
 
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
@@ -260,6 +267,7 @@ func main() {
 	log.Println("shutting down...")
 	reconcilerCancel()
 	gcCancel()
+	meterCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

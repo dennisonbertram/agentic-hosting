@@ -17,8 +17,8 @@ import (
 func insertBuild(t *testing.T, mgr *Manager, id, status string) {
 	t.Helper()
 	_, err := mgr.db.Exec(
-		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_ref, image, log, created_at)
-		 VALUES (?, 'svc-1', 'tenant-1', ?, 'git', 'main', 'img:latest', '', 1)`, id, status)
+		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, log, created_at)
+		 VALUES (?, 'svc-1', 'tenant-1', ?, 'git', 'https://github.com/example/repo.git', 'main', 'img:latest', '', 1)`, id, status)
 	require.NoError(t, err)
 }
 

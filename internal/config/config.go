@@ -26,6 +26,10 @@ type Config struct {
 
 	AdminToken string // AH_ADMIN_TOKEN: operator token for recover/reactivate/quota (comma-separated for rotation; empty = fall back to bootstrap tokens)
 
+	// CORSOrigins is the browser Origin allowlist for the dashboard.
+	// Empty AH_CORS_ORIGINS uses DefaultCORSOrigins. "*" is ignored.
+	CORSOrigins []string
+
 	// Snapshot retention
 	SnapshotMaxPerService int           // max snapshots kept per service (default: 10, 0 = unlimited)
 	SnapshotMaxAge        time.Duration // max age before a snapshot is eligible for cleanup (default: 30d, 0 = unlimited)
@@ -60,6 +64,7 @@ func Default() Config {
 		KanbanPortEnd:         DefaultKanbanPortEnd,
 		SnapshotMaxPerService: DefaultSnapshotMaxPerService,
 		SnapshotMaxAge:        DefaultSnapshotMaxAge,
+		CORSOrigins:           DefaultCORSOrigins(),
 	}
 }
 
@@ -85,7 +90,39 @@ func FromEnv() Config {
 		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),
 		SnapshotMaxPerService: envOrInt("AH_SNAPSHOT_MAX_PER_SERVICE", DefaultSnapshotMaxPerService),
 		SnapshotMaxAge:        envOrDuration("AH_SNAPSHOT_MAX_AGE", DefaultSnapshotMaxAge),
+		CORSOrigins:           ParseCORSOrigins(os.Getenv("AH_CORS_ORIGINS")),
 	}
+}
+
+// DefaultCORSOrigins is the public dashboard allowlist.
+func DefaultCORSOrigins() []string {
+	return []string{
+		"https://agentic.hosting",
+		"https://www.agentic.hosting",
+		"https://dennisonbertram.github.io",
+	}
+}
+
+// ParseCORSOrigins splits a comma-separated Origin allowlist. Empty input
+// returns DefaultCORSOrigins. "*" is dropped (never allow-all).
+func ParseCORSOrigins(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return DefaultCORSOrigins()
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "*" {
+			continue
+		}
+		if _, dup := seen[part]; dup {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
 }
 
 // DiskCheckPaths returns the paths that should be checked for disk space.

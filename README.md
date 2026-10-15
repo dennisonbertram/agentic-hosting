@@ -9,7 +9,7 @@ Real `ah --dev` loop (not a mock): register a tenant, Nixpacks-build from git, t
 A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. Includes an optional supervisory dashboard for humans.
 
 - **Repo**: github.com/dennisonbertram/agentic-hosting
-- **Docs**: [Documentation site](https://dennisonbertram.github.io/agentic-hosting/) (source in `docs-site/`)
+- **Docs**: [Documentation site](https://agentic.hosting/docs/) (source in `docs-site/`)
 - **Stack**: Go binary + Docker + gVisor + Traefik + Nixpacks + SQLite
 - **Language**: Go 1.25 (requires CGO for SQLite)
 - **Binary**: `ah`
@@ -26,7 +26,7 @@ One shareable link is enough for an agent to install the control plane, register
 | **llms-full.txt** (all docs) | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms-full.txt |
 | **Operator skill** | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md |
 
-Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://dennisonbertram.github.io/agentic-hosting/llms.txt`). The Claude Code skill and `/ah-*` slash commands in `.claude/` are the same API, split for interactive use. Details: [Give this to your agent](https://dennisonbertram.github.io/agentic-hosting/for-agents/).
+Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://agentic.hosting/docs/llms.txt`). The Claude Code skill and `/ah-*` slash commands in `.claude/` are the same API, split for interactive use. Details: [Give this to your agent](https://agentic.hosting/docs/for-agents/).
 
 ## Design Principles
 
@@ -77,6 +77,7 @@ Environment variables read by `ah`:
 | `AH_METER_DB_PATH` | Metering database path. Defaults to `ah-metering.db` next to the state database |
 | `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
 | `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |
+| `AH_CORS_ORIGINS` | Comma-separated browser Origin allowlist for the dashboard. Default: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`. `*` is ignored |
 
 ## Installation
 
@@ -474,13 +475,12 @@ The public docs match the [agentic.hosting](https://agentic.hosting) landing pag
 cd docs-site
 npm ci
 npm run dev          # http://127.0.0.1:4321/
-npm run build        # GitHub Pages defaults (base /agentic-hosting/)
-npm run build:site   # for the website container (base /docs/)
+npm run build        # GitHub Pages + agentic.hosting (base /docs/)
 ```
 
-GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. After enabling Pages (source: GitHub Actions), the site is `https://dennisonbertram.github.io/agentic-hosting/`.
+GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. The combined artifact serves the homepage from `website/` at `https://agentic.hosting/` and the Astro docs at `https://agentic.hosting/docs/`. Custom domain and DNS steps: [`docs/website/github-pages.md`](docs/website/github-pages.md). The static dashboard at `/dashboard/` defaults its API base to `https://api.agentic.hosting` on that host (`?api=` overrides). The API reflects `Access-Control-Allow-Origin` for that allowlist (`AH_CORS_ORIGINS` / `--cors-origins`); it never uses `*` and does not set credentials.
 
-To bake docs into the nginx website image, build from the **repository root**:
+The Hetzner website container still builds from the **repository root** (used for `www.agentic.hosting`, which 301s to the GitHub repo):
 
 ```bash
 docker build -f website/Dockerfile -t website .
@@ -488,7 +488,7 @@ docker build -f website/Dockerfile -t website .
 
 ## Planned Work
 
-See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://dennisonbertram.github.io/agentic-hosting/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.
+See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://agentic.hosting/docs/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.
 
 ## License
 

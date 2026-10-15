@@ -11,6 +11,7 @@ Canonical routes live in `internal/api/server.go`. If this skill and a blog post
 
 Companion files (same repo):
 
+- Docs: https://agentic.hosting/docs/
 - `llms.txt` — llmstxt.org index
 - `llms-full.txt` — full docs dump
 - `.claude/skills/agentic-hosting/SKILL.md` — Claude Code operator skill (same API)

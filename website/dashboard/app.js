@@ -204,8 +204,7 @@ function bindEvents() {
 function restoreSession() {
   const saved = localStorage.getItem(STORAGE_KEY);
   const parsed = saved ? safeJsonParse(saved) : null;
-  const defaultBase = window.location.origin;
-  state.apiBase = normalizeBaseUrl(parsed?.apiBase || defaultBase);
+  state.apiBase = normalizeBaseUrl(parsed?.apiBase || defaultApiBase());
   state.apiKey = parsed?.apiKey || "";
   state.activeView = sanitizeView(window.location.hash.slice(1) || parsed?.activeView || "overview");
   elements.apiBase.value = state.apiBase;
@@ -247,7 +246,7 @@ function clearSession() {
 }
 
 async function connectAndLoad(silent) {
-  state.apiBase = normalizeBaseUrl(elements.apiBase.value || window.location.origin);
+  state.apiBase = normalizeBaseUrl(elements.apiBase.value || defaultApiBase());
   state.apiKey = elements.apiKey.value.trim();
   if (!state.apiKey) {
     showNotice("Enter an API key first.", "error");
@@ -1252,6 +1251,21 @@ function showNotice(message, type) {
 
 function normalizeBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
+}
+
+// Pages serves this UI at https://agentic.hosting/dashboard/. The API is not
+// on that origin (it lives at https://api.agentic.hosting). Prefer an explicit
+// ?api= URL, then a known public API host, then same-origin for self-hosted copies.
+function defaultApiBase() {
+  const fromQuery = new URLSearchParams(window.location.search).get("api");
+  if (fromQuery) {
+    return normalizeBaseUrl(fromQuery);
+  }
+  const host = window.location.hostname;
+  if (host === "agentic.hosting" || host === "www.agentic.hosting" || host.endsWith(".github.io")) {
+    return "https://api.agentic.hosting";
+  }
+  return window.location.origin;
 }
 
 function toneForStatus(status) {

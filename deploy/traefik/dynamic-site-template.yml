@@ -5,18 +5,22 @@
 # Use the container name (not IP) so routing survives container restarts.
 # Docker DNS resolves container names on the same network, so Traefik can reach
 # the container by name regardless of what IP Docker assigns after a restart.
+#
+# Production (agentic.hosting): apex is GitHub Pages. Only keep www on this
+# host so Traefik can still issue/serve TLS and nginx can 301 to GitHub.
+# See deploy/traefik/10-website-www.yml.
 
 http:
   routers:
     ah-site-root-http:
-      rule: "Host(`DOMAIN`) || Host(`www.DOMAIN`)"
+      rule: "Host(`www.DOMAIN`)"
       entryPoints:
         - web
       middlewares:
         - ah-site-redirect-https
       service: ah-site-svc
     ah-site-root:
-      rule: "Host(`DOMAIN`) || Host(`www.DOMAIN`)"
+      rule: "Host(`www.DOMAIN`)"
       entryPoints:
         - websecure
       service: ah-site-svc

@@ -1,0 +1,24 @@
+# Production overlay for Hetzner after GitHub Pages owns the apex.
+# Copy to /etc/traefik/dynamic/10-website.yml (replace the bootstrap file
+# that matches both agentic.hosting and www.agentic.hosting).
+#
+# TLS stays on www via Let's Encrypt. nginx inside ah-website 301s
+# Host(www.agentic.hosting) to https://github.com/dennisonbertram/agentic-hosting.
+# Leave the www A record at 178.104.44.25.
+
+http:
+  routers:
+    website-https:
+      rule: "Host(`www.agentic.hosting`)"
+      entryPoints: [websecure]
+      service: ah-website
+      tls: {certResolver: letsencrypt}
+    website-http:
+      rule: "Host(`www.agentic.hosting`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: ah-website
+  services:
+    ah-website:
+      loadBalancer:
+        servers: [{url: "http://ah-website:80"}]

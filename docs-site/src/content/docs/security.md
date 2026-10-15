@@ -59,6 +59,7 @@ Tenant containers are not given a path to the Docker socket.
 - Body 1 MB; idempotency hash cap matches
 - Chi logger logs method/path/status/latency — not headers or bodies
 - Registration errors are generic 422 to reduce email enumeration
+- CORS is an origin allowlist (`AH_CORS_ORIGINS`). `*` is dropped. `Access-Control-Allow-Credentials` is not set. OPTIONS is handled before auth.
 
 ## systemd (`deploy/ah.service`)
 

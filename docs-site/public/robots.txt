@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://dennisonbertram.github.io/agentic-hosting/sitemap-index.xml
+Sitemap: https://agentic.hosting/docs/sitemap-index.xml

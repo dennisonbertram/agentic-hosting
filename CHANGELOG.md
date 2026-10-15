@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Public site on GitHub Pages.** `https://agentic.hosting/` is the `website/` homepage; Astro docs are at `https://agentic.hosting/docs/`. `www.agentic.hosting` stays on Hetzner and 301s to the GitHub repo (TLS kept). Docs links that used `dennisonbertram.github.io/agentic-hosting/` now point at `/docs/`. The dashboard no longer defaults its API base to the Pages origin.
+
 ## [0.6.0] - 2026-10-15
 
 ### Added

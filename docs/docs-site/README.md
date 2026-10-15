@@ -16,13 +16,12 @@ The landing page is hand-written HTML + Tailwind CDN. Docs need markdown, a side
 cd docs-site
 npm ci
 ASTRO_BASE=/ ASTRO_SITE=http://localhost:4321 npm run dev
-npm run build          # base /agentic-hosting/ for GitHub Pages
-npm run build:site     # base /docs/ for agentic.hosting
+npm run build          # base /docs/ for https://agentic.hosting/docs/
 ```
 
-CI: `.github/workflows/docs.yml` (Pages source must be GitHub Actions).
+CI: `.github/workflows/docs.yml` builds docs with `ASTRO_BASE=/docs/` and assembles `website/` at the Pages root. Pages source must be GitHub Actions. Domain split: [`docs/website/github-pages.md`](../website/github-pages.md).
 
-Website image (repo root context):
+Website image (repo root context; `www` 301s to GitHub):
 
 ```bash
 docker build -f website/Dockerfile -t website .

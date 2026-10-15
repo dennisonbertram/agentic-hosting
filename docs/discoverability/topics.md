@@ -4,7 +4,7 @@ Requested repository About settings:
 
 | Field | Target |
 |-------|--------|
-| Homepage | `https://dennisonbertram.github.io/agentic-hosting/` |
+| Homepage | `https://agentic.hosting/` |
 | Topics | `self-hosted`, `paas`, `ai-agents`, `gvisor`, `docker`, `claude-code`, `golang`, `heroku-alternative`, `devops`, `llm` |
 | Description | Keep the existing one if present |
 
@@ -28,7 +28,7 @@ Setting topics and homepage needs the GitHub UI (Settings → General → About)
 
 ```bash
 gh api -X PATCH repos/dennisonbertram/agentic-hosting \
-  -f homepage='https://dennisonbertram.github.io/agentic-hosting/' \
+  -f homepage='https://agentic.hosting/' \
   -f description='Agentic-first self-hosted PaaS — Docker + gVisor + Traefik + Nixpacks + SQLite, operated by AI agents'
 
 gh api -X PUT repos/dennisonbertram/agentic-hosting/topics \

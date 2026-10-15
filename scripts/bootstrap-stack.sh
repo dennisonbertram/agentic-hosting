@@ -295,6 +295,9 @@ http:
         servers: [{url: "http://ah-api-relay:8081"}]
 EOF
 fi
+# Generic installs route $domain and www.$domain to the website container.
+# Production agentic.hosting then replaces this file with
+# deploy/traefik/10-website-www.yml (www only; apex is GitHub Pages).
 if ((skip_website == 0)); then
   if ((external_tls_terminated)); then
     cat > /etc/traefik/dynamic/10-website.yml <<EOF

@@ -26,7 +26,7 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 
 - `ah` requires CGO (`go-sqlite3`). Do not cross-compile with `CGO_ENABLED=0`.
 - Website Docker context is now the **repo root** (`-f website/Dockerfile .`) so the docs stage can `COPY docs-site`.
-- GitHub project Pages needs `base: /agentic-hosting/`. Same origin `/docs/` uses `ASTRO_BASE=/docs/`.
+- GitHub Pages on the `agentic.hosting` custom domain uses `ASTRO_BASE=/docs/` (homepage from `website/` at `/`). The old project-pages base `/agentic-hosting/` is retired.
 
 ## Homepage location
 
@@ -38,6 +38,12 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **Signup is human-gated** (GitHub/Google or device code). `ibk_` keys cannot register accounts. Do not plan unattended “agent spins up InstaBox then installs ah” without an existing key.
 - **gVisor does not need KVM.** Default platform is `systrap` (seccomp `SECCOMP_RET_TRAP`). Official guidance: systrap inside VMs; KVM on bare metal. In this nested/containerized VM, systrap `docker run --runtime=runsc` worked; `--platform=kvm` hung and `/dev/kvm` was unusable even as root. Prefer systrap on InstaBox; do not require nested virt.
 - **`--dev` does not disable the runsc runtime**, only the startup check. Containers still set `Runtime: "runsc"`.
+
+## 2026-10-15 — Pages custom domain
+
+- **Apex Pages and www-on-Hetzner cannot share one A record.** Namecheap `@` must be the four GitHub Pages IPv4s; `www` stays on `178.104.44.25`. GitHub cannot 301 `www` if that name never reaches Pages.
+- **Dashboard same-origin is wrong on Pages.** `window.location.origin` would be `https://agentic.hosting`, which no longer has `/v1/`. Default to `https://api.agentic.hosting` and say CORS is missing; do not add API CORS in a hosting-only PR.
+- **Astro `base` is URL prefix, not output nesting.** `ASTRO_BASE=/docs/` still writes `dist/index.html`. The assemble step must copy `dist/` into `pages-dist/docs/`.
 
 ## 2026-10-15 — Discoverability
 

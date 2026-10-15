@@ -1,6 +1,7 @@
 docs-site/node_modules/
 docs-site/dist/
 docs-site/.astro/
+pages-dist/
 
 bin/
 *.db

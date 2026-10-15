@@ -6,10 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-- `scripts/bootstrap-stack.sh` builds the website image from the repository root. The website Dockerfile copies `docs-site/` and `llms*.txt` from the root, so building with `website/` as the context failed. The website container now serves the docs site at `https://agentic.hosting/docs/`.
-
-## [0.6.0] - 2026-10-14
+## [0.6.0] - 2026-10-15
 
 ### Added
 
@@ -20,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Documentation site**: Astro docs in `docs-site/` covering the live `/v1/` API and operations, with a GitHub Pages workflow at `.github/workflows/docs.yml`. InstaBox compatibility findings are in `docs/investigations/`.
 - **Agent onboarding**: `llms.txt` and `llms-full.txt` at the repo root (also served at `/llms.txt` on the docs site) and a standalone skill at `skills/agentic-hosting/SKILL.md`.
 - **Usage metering collector**: samples CPU and memory of running services every 60s into the metering database. `AH_METER_DB_PATH` is honored when set.
+- **MIT license** at the repository root (Copyright 2026 Dennison Bertram), with a license badge and License section in the README.
+- **README demo GIF** of the local `ah --dev` loop: register a tenant, deploy from git, tail logs, and see the service running (`docs/assets/demo.gif`).
 
 ### Changed
 
@@ -36,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `scripts/bootstrap-stack.sh` builds the website image from the repository root. The website Dockerfile copies `docs-site/` and `llms*.txt` from the root, so building with `website/` as the context failed. The website container now serves the docs site at `https://agentic.hosting/docs/`.
 - **Database delete no longer has a 30s limit.** Postgres deletes returned 500 under gVisor because container stop and volume wipe exceeded the request timeout. Delete cleanup now runs detached from the request, with a 1 minute budget for container stop and remove, 5 minutes for the volume wipe and 1 minute for volume removal.
 - **`POST /v1/auth/recover` honors `X-Bootstrap-Token`.** Previously only the body field was read, so a bootstrap token sent in the header got 401. All three token slots now go through the same check, and bootstrap tokens get 403 consistently when `AH_ADMIN_TOKEN` is set.
 - Reconciler: crashes are counted from Docker `RestartCount` across ticks so the circuit breaker trips; crashed services stay watched and return to running; unhealthy containers are restarted instead of stopped; status updates are compare-and-swap; not-found detection uses typed errors instead of matching "404"; failed environment lease stops are retried.

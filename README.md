@@ -1,5 +1,11 @@
 # agentic-hosting
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![Register an agent, deploy from git, tail logs, and see it running](docs/assets/demo.gif)
+
+Real `ah --dev` loop (not a mock): register a tenant, Nixpacks-build from git, tail logs, service `running`. Source recording: [`docs/assets/demo.cast`](docs/assets/demo.cast).
+
 A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. Includes an optional supervisory dashboard for humans.
 
 - **Repo**: github.com/dennisonbertram/agentic-hosting
@@ -8,6 +14,7 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 - **Language**: Go 1.25 (requires CGO for SQLite)
 - **Binary**: `ah`
 - **Default port**: 8080 (loopback only, behind Traefik)
+- **License**: [MIT](LICENSE)
 
 ## Give this to your agent
 
@@ -482,3 +489,7 @@ docker build -f website/Dockerfile -t website .
 ## Planned Work
 
 See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://dennisonbertram.github.io/agentic-hosting/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). Copyright © 2026 Dennison Bertram.

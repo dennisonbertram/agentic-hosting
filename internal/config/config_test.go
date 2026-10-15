@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,7 +29,7 @@ func TestFromEnv_Defaults(t *testing.T) {
 		"AH_DATA_DIR", "AH_DB_PATH", "AH_METER_DB_PATH",
 		"AH_MASTER_KEY_PATH", "AH_BUILD_DIR", "AH_NIXPACKS_PATH",
 		"AH_DOCKER_DATA_DIR", "AH_KANBAN_PORT_START", "AH_KANBAN_PORT_END",
-		"AH_EXTERNAL_TLS_TERMINATED",
+		"AH_EXTERNAL_TLS_TERMINATED", "AH_CORS_ORIGINS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -101,6 +102,27 @@ func TestFromEnv_AllOverrides(t *testing.T) {
 	assert.Equal(t, "/d/builds", cfg.BuildDir)
 	assert.Equal(t, "/e/nixpacks", cfg.NixpacksPath)
 	assert.Equal(t, "/mnt/docker", cfg.DockerDataDir)
+}
+
+func TestDefaultCORSOriginsMatchMiddleware(t *testing.T) {
+	assert.Equal(t, middleware.DefaultCORSOrigins, DefaultCORSOrigins())
+}
+
+func TestParseCORSOrigins_DefaultsAndAllowlist(t *testing.T) {
+	assert.Equal(t, DefaultCORSOrigins(), ParseCORSOrigins(""))
+	assert.Equal(t, DefaultCORSOrigins(), ParseCORSOrigins("   "))
+	assert.Equal(t, []string{"https://dash.example.com"}, ParseCORSOrigins("https://dash.example.com"))
+	assert.Equal(t, []string{"https://a.example", "https://b.example"}, ParseCORSOrigins(" https://a.example, https://b.example "))
+	assert.Empty(t, ParseCORSOrigins("*"))
+	assert.Equal(t, []string{"https://dash.example.com"}, ParseCORSOrigins("*,https://dash.example.com,*"))
+}
+
+func TestFromEnv_CORSOrigins(t *testing.T) {
+	t.Setenv("AH_CORS_ORIGINS", "")
+	assert.Equal(t, DefaultCORSOrigins(), FromEnv().CORSOrigins)
+
+	t.Setenv("AH_CORS_ORIGINS", "https://dash.example.com")
+	assert.Equal(t, []string{"https://dash.example.com"}, FromEnv().CORSOrigins)
 }
 
 func TestDiskCheckPaths(t *testing.T) {

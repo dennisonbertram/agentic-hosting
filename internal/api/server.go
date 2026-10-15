@@ -1,10 +1,10 @@
 package api
 
 import (
-	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"net"
 	"net/http"
 	"strconv"
@@ -45,6 +45,7 @@ type ServerConfig struct {
 	TraefikConfigDir      string
 	DataDir               string // data dir for health disk checks (default /var/lib/ah)
 	ExternalTLSTerminated bool
+	CORSOrigins           []string // nil = middleware defaults; empty = disable CORS
 }
 
 type kanbanManager interface {
@@ -93,6 +94,7 @@ type Server struct {
 	globalRateLimiter *middleware.GlobalRateLimiter
 	idempotencyStore  *middleware.IdempotencyStore
 	longInflight      *middleware.InflightLimiter
+	corsOrigins       []string
 }
 
 const (
@@ -156,6 +158,7 @@ func NewServer(cfg ServerConfig) *Server {
 		globalRateLimiter: globalRL,
 		idempotencyStore:  idem,
 		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
+		corsOrigins:       cfg.CORSOrigins,
 	}
 	s.setupRoutes()
 	return s
@@ -169,6 +172,8 @@ func (s *Server) setupRoutes() {
 	// Authorization and bootstrap tokens are never logged.
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
+	// CORS is before auth so OPTIONS preflight never requires a Bearer token.
+	r.Use(middleware.CORS(s.corsOrigins))
 	r.Use(maxBodySize(1 << 20))
 	// Strip forwarded headers from non-loopback requests to prevent spoofing.
 	// This runs unconditionally (including dev mode) as a defense-in-depth measure.

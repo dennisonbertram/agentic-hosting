@@ -38,6 +38,8 @@ Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (met
 | `Content-Type: application/json` | Bodies |
 | `X-Forwarded-Proto: https` | Required in production from loopback Traefik |
 
+CORS (browser dashboard on another origin): `AH_CORS_ORIGINS` / `--cors-origins` is an allowlist. Defaults are `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`. Allowed origins get `Access-Control-Allow-Origin` set to that origin (never `*`), `Allow-Headers: Authorization, Content-Type, Idempotency-Key`, and `Vary: Origin`. `OPTIONS` is answered before auth. Credentials are not enabled.
+
 Public health is constant-time and does not touch SQLite.
 
 ---

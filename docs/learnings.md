@@ -42,7 +42,7 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 ## 2026-10-15 — Pages custom domain
 
 - **Apex Pages and www-on-Hetzner cannot share one A record.** Namecheap `@` must be the four GitHub Pages IPv4s; `www` stays on `178.104.44.25`. GitHub cannot 301 `www` if that name never reaches Pages.
-- **Dashboard same-origin is wrong on Pages.** `window.location.origin` would be `https://agentic.hosting`, which no longer has `/v1/`. Default to `https://api.agentic.hosting` and say CORS is missing; do not add API CORS in a hosting-only PR.
+- **Dashboard same-origin is wrong on Pages.** `window.location.origin` would be `https://agentic.hosting`, which no longer has `/v1/`. Default to `https://api.agentic.hosting`. CORS must be an origin allowlist (never `*` with credentials); OPTIONS must run before auth.
 - **Astro `base` is URL prefix, not output nesting.** `ASTRO_BASE=/docs/` still writes `dist/index.html`. The assemble step must copy `dist/` into `pages-dist/docs/`.
 
 ## 2026-10-15 — Discoverability

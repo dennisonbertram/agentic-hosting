@@ -77,6 +77,7 @@ Environment variables read by `ah`:
 | `AH_METER_DB_PATH` | Metering database path. Defaults to `ah-metering.db` next to the state database |
 | `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
 | `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |
+| `AH_CORS_ORIGINS` | Comma-separated browser Origin allowlist for the dashboard. Default: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`. `*` is ignored |
 
 ## Installation
 
@@ -477,7 +478,7 @@ npm run dev          # http://127.0.0.1:4321/
 npm run build        # GitHub Pages + agentic.hosting (base /docs/)
 ```
 
-GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. The combined artifact serves the homepage from `website/` at `https://agentic.hosting/` and the Astro docs at `https://agentic.hosting/docs/`. Custom domain and DNS steps: [`docs/website/github-pages.md`](docs/website/github-pages.md). The static dashboard at `/dashboard/` defaults its API base to `https://api.agentic.hosting` on that host (`?api=` overrides). It does not assume same-origin with `/v1/`; `ah` does not send CORS headers today.
+GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. The combined artifact serves the homepage from `website/` at `https://agentic.hosting/` and the Astro docs at `https://agentic.hosting/docs/`. Custom domain and DNS steps: [`docs/website/github-pages.md`](docs/website/github-pages.md). The static dashboard at `/dashboard/` defaults its API base to `https://api.agentic.hosting` on that host (`?api=` overrides). The API reflects `Access-Control-Allow-Origin` for that allowlist (`AH_CORS_ORIGINS` / `--cors-origins`); it never uses `*` and does not set credentials.
 
 The Hetzner website container still builds from the **repository root** (used for `www.agentic.hosting`, which 301s to the GitHub repo):
 

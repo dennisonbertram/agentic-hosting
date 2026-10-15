@@ -41,7 +41,7 @@ python3 -m http.server --directory ../pages-dist 4173
 2. On `agentic.hosting`, `www.agentic.hosting`, or `*.github.io` it defaults to `https://api.agentic.hosting`
 3. Elsewhere it falls back to `window.location.origin` (self-hosted copies)
 
-`ah` does not send CORS headers. Browser calls from `https://agentic.hosting/dashboard/` to `https://api.agentic.hosting` will fail until CORS is added or you point the form at a same-origin API.
+The API allowlists those dashboard origins (`AH_CORS_ORIGINS` / `--cors-origins`, defaulting to `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`). Preflight `OPTIONS` is answered before auth. `Access-Control-Allow-Origin` echoes the request origin (never `*`); `Authorization`, `Content-Type`, and `Idempotency-Key` are allowed; `Vary: Origin` is always set; credentials are not enabled. Other dashboard hosts must be added to the allowlist.
 
 ## Manual cutover
 
@@ -57,4 +57,5 @@ Do these in order. Do not merge this PR until they are ready; the PR only ships 
    - Leave `www` A at `178.104.44.25`
    - Leave `api` and `*.apps` on the Hetzner address
 4. After apex resolves to Pages, replace `/etc/traefik/dynamic/10-website.yml` with `deploy/traefik/10-website-www.yml` (Host `www.agentic.hosting` only).
-5. Confirm `https://agentic.hosting/` (homepage), `/docs/`, `/changelog/`, `/install.sh`, and `https://www.agentic.hosting/` → 301 GitHub with a valid cert.
+5. Deploy this `ah` binary on Hetzner (CORS lives in the API process, not the website container). Defaults cover the Pages dashboard; override with `AH_CORS_ORIGINS` in `/etc/default/ah` if needed, then `systemctl restart ah`.
+6. Confirm `https://agentic.hosting/` (homepage), `/docs/`, `/changelog/`, `/install.sh`, and `https://www.agentic.hosting/` → 301 GitHub with a valid cert. From a browser on the dashboard, `GET https://api.agentic.hosting/v1/system/health` should include `Access-Control-Allow-Origin: https://agentic.hosting`.

@@ -32,7 +32,7 @@
           <button class="primary-button" type="submit">Connect</button>
           <button class="ghost-button" id="disconnect-button" type="button">Clear</button>
         </div>
-        <p class="field-hint">This page is static. On agentic.hosting it defaults to https://api.agentic.hosting (override with ?api=). Same-origin is only assumed for self-hosted copies. Cross-origin calls need CORS on the API; ah does not send CORS headers today.</p>
+        <p class="field-hint">This page is static. On agentic.hosting it defaults to https://api.agentic.hosting (override with ?api=). Same-origin is only assumed for self-hosted copies. The API allowlists this origin (and www / github.io) via CORS; other hosts need AH_CORS_ORIGINS.</p>
       </form>
 
       <nav class="nav-list" id="nav-list">

@@ -38,6 +38,17 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **Signup is human-gated** (GitHub/Google or device code). `ibk_` keys cannot register accounts. Do not plan unattended “agent spins up InstaBox then installs ah” without an existing key.
 - **gVisor does not need KVM.** Default platform is `systrap` (seccomp `SECCOMP_RET_TRAP`). Official guidance: systrap inside VMs; KVM on bare metal. In this nested/containerized VM, systrap `docker run --runtime=runsc` worked; `--platform=kvm` hung and `/dev/kvm` was unusable even as root. Prefer systrap on InstaBox; do not require nested virt.
 - **`--dev` does not disable the runsc runtime**, only the startup check. Containers still set `Runtime: "runsc"`.
+
+## 2026-10-15 — Discoverability
+
+- **The website already said MIT; there was no `LICENSE` file.** Adding the file is what GitHub’s license classifier and the README badge need.
+- **Cursor `gh` cannot set repo topics/homepage** on this repo (`403 Resource not accessible by integration`). The owner-authenticated GitHub MCP (`admin: true`) has no `update_repository` / topics tool. Use the UI or a PAT with Administration.
+- **gVisor 2026 release tarballs are not a single `runsc` binary.** `runsc` looks for `/usr/local/bin/gvisor-bin/gvisor_sentry` (STRICT sidecar policy). Installing only `runsc` fails container create.
+- **Git deploys still need a build broker.** `Builder.Build` talks JSON to `AH_BUILD_BROKER_SOCKET` (default `/run/ah-build-broker/broker.sock`) and expects a worker that runs `ah build-worker`. PID 1 `tini` has `systemctl` but it does not start `ah-build@` units.
+- **`setBuildGroup` requires the process to be in group `ah-build`.** A shell that started before `usermod -aG ah-build` will fail with `chown: operation not permitted` even after the group exists.
+- **Docker `vfs` + BuildKit cache mounts** can fail Nixpacks `COPY` with `invalid argument`. `overlay2` worked. Container DNS needed `iptables: true` and `dns: [host resolver]`.
+- **`ahc deploy` git ref defaults to `main`.** `traefik/whoami` is still `master`; `hashicorp/http-echo` is `main`.
+- **http-echo without `-text` / `ECHO_TEXT` logs an error.** It is still a valid tiny Go git deploy for a demo; choose a Procfile/PORT app if you want friendlier runtime logs.
 - **Git deploys assume systemd.** `internal/builder` always uses `systemd-run --scope` and `runuser -u ah-builder`. If PID 1 is not systemd (tini, s6, some microVM images), clone/build/push cannot start. Need a fallback before calling a platform “git-deploy ready.”
 - **Warm pool is hardcoded on** (2×3 templates, max 6). On a 4 vCPU / 8 GB / 20 GB InstaBox that will dominate disk and RAM before any tenant workload. Need a flag before recommending ah on small VMs.
 - **ReadonlyRootfs breaks stock nginx.** ah tmpfs covers `/tmp` `/var/run` `/var/tmp` `/run` but not `/var/cache/nginx`. `nginx:alpine` crash-loops under the default security profile. Use a writable-cache image or extra tmpfs; this is independent of InstaBox.

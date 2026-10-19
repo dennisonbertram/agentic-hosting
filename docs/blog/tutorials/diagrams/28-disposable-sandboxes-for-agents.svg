@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="60" y="64" font-size="28" font-weight="700" fill="#1c1917">Sandbox lifecycle</text>
+  <text x="60" y="94" font-size="18" fill="#57534e">One environment, from template to cleanup</text>
+
+  <!-- row 1 -->
+  <rect x="60" y="140" width="260" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="190" y="184" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">Template</text>
+  <text x="190" y="214" font-size="18" fill="#57534e" text-anchor="middle">base image, memory, CPU</text>
+  <text x="190" y="240" font-size="18" fill="#57534e" text-anchor="middle">default, node, python, go</text>
+
+  <rect x="470" y="140" width="260" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="600" y="184" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">Warm pool</text>
+  <text x="600" y="214" font-size="18" fill="#57534e" text-anchor="middle">2 per template, 6 max</text>
+  <text x="600" y="240" font-size="18" fill="#57534e" text-anchor="middle">refilled every 60s</text>
+
+  <rect x="880" y="140" width="260" height="130" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="1010" y="184" font-size="22" font-weight="700" fill="#fafaf9" text-anchor="middle">POST /v1/environments</text>
+  <text x="1010" y="214" font-size="18" fill="#fafaf9" text-anchor="middle">name, template_id,</text>
+  <text x="1010" y="240" font-size="18" fill="#fafaf9" text-anchor="middle">lease_duration_seconds</text>
+
+  <line x1="320" y1="205" x2="466" y2="205" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="730" y1="205" x2="876" y2="205" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="600" y="126" font-size="18" fill="#57534e" text-anchor="middle">empty pool: cold start</text>
+
+  <!-- down arrow -->
+  <line x1="1010" y1="270" x2="1010" y2="336" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- row 2 -->
+  <rect x="880" y="340" width="260" height="130" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="1010" y="384" font-size="22" font-weight="700" fill="#fafaf9" text-anchor="middle">status: running</text>
+  <text x="1010" y="414" font-size="18" fill="#fafaf9" text-anchor="middle">lease timer counting down</text>
+  <text x="1010" y="440" font-size="18" fill="#fafaf9" text-anchor="middle">POST .../lease extends it</text>
+
+  <rect x="470" y="340" width="300" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="620" y="378" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">POST .../exec</text>
+  <text x="620" y="408" font-size="18" fill="#57534e" text-anchor="middle">{"command": ["node","-v"],</text>
+  <text x="620" y="432" font-size="18" fill="#57534e" text-anchor="middle">"timeout": 60}</text>
+  <text x="620" y="458" font-size="18" fill="#57534e" text-anchor="middle">default 60s, max 300s</text>
+
+  <line x1="876" y1="390" x2="774" y2="390" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="774" y1="425" x2="876" y2="425" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="60" y="340" width="300" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="210" y="378" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">JSON result</text>
+  <text x="210" y="408" font-size="18" fill="#57534e" text-anchor="middle">exit_code, stdout, stderr</text>
+  <text x="210" y="432" font-size="18" fill="#57534e" text-anchor="middle">truncated, timed_out</text>
+  <text x="210" y="458" font-size="18" fill="#57534e" text-anchor="middle">duration_ms</text>
+  <line x1="466" y1="405" x2="364" y2="405" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- row 3 -->
+  <line x1="1010" y1="470" x2="1010" y2="536" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="780" y="540" width="360" height="100" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="960" y="580" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">Lease expires</text>
+  <text x="960" y="610" font-size="18" fill="#57534e" text-anchor="middle">reconciler stops it, status: stopped</text>
+
+  <line x1="776" y1="590" x2="654" y2="590" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="320" y="540" width="330" height="100" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="485" y="580" font-size="22" font-weight="700" fill="#fafaf9" text-anchor="middle">DELETE .../{id}</text>
+  <text x="485" y="610" font-size="18" fill="#fafaf9" text-anchor="middle">container and volume removed</text>
+</svg>

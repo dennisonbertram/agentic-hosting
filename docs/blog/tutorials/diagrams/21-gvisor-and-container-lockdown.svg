@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="50" font-size="26" font-weight="700" fill="#1c1917">Layers around one service container</text>
+<text x="660" y="50" font-size="26" font-weight="700" fill="#1c1917">Network per tenant</text>
+<rect x="40" y="75" width="560" height="565" rx="16" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="64" y="112" font-size="20" font-weight="600" fill="#1c1917">Host kernel</text>
+<rect x="70" y="130" width="500" height="490" rx="14" fill="none" stroke="#57534e" stroke-width="1.5"/>
+<text x="94" y="165" font-size="20" font-weight="600" fill="#1c1917">Docker</text>
+<rect x="100" y="185" width="440" height="415" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="124" y="220" font-size="20" font-weight="600" fill="#1c1917">gVisor sentry (runsc)</text>
+<text x="124" y="246" font-size="18" fill="#57534e">user-space kernel, intercepts syscalls</text>
+<rect x="130" y="270" width="380" height="315" rx="10" fill="#1c1917"/>
+<text x="154" y="305" font-size="20" font-weight="600" fill="#fafaf9">Service container process</text>
+<text x="154" y="345" font-size="18" fill="#fafaf9">CapDrop ALL</text>
+<text x="154" y="378" font-size="18" fill="#fafaf9">no-new-privileges</text>
+<text x="154" y="411" font-size="18" fill="#fafaf9">ReadonlyRootfs + tmpfs</text>
+<text x="154" y="438" font-size="18" fill="#fafaf9">/tmp /var/run /var/tmp /run</text>
+<text x="154" y="478" font-size="18" fill="#fafaf9">PidsLimit 256</text>
+<text x="154" y="511" font-size="18" fill="#fafaf9">Memory limit, swap = memory</text>
+<text x="154" y="544" font-size="18" fill="#fafaf9">label traefik.enable=false</text>
+<rect x="660" y="85" width="500" height="110" rx="12" fill="#1c1917"/>
+<text x="680" y="130" font-size="20" font-weight="600" fill="#fafaf9">paas-traefik</text>
+<text x="680" y="162" font-size="18" fill="#fafaf9">attached to each ingress bridge</text>
+<rect x="660" y="290" width="230" height="170" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="676" y="325" font-size="18" font-weight="600" fill="#1c1917">ah-tenant-A</text>
+<text x="676" y="353" font-size="18" fill="#57534e">internal, ICC off</text>
+<rect x="680" y="380" width="190" height="60" rx="8" fill="#1c1917"/>
+<text x="700" y="417" font-size="18" fill="#fafaf9">service A</text>
+<rect x="930" y="290" width="230" height="170" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="946" y="325" font-size="18" font-weight="600" fill="#1c1917">ah-tenant-B</text>
+<text x="946" y="353" font-size="18" fill="#57534e">internal, ICC off</text>
+<rect x="950" y="380" width="190" height="60" rx="8" fill="#1c1917"/>
+<text x="970" y="417" font-size="18" fill="#fafaf9">service B</text>
+<path d="M775 195 L775 288" stroke="#1c1917" stroke-width="2" marker-end="url(#a)" fill="none"/>
+<path d="M1045 195 L1045 288" stroke="#1c1917" stroke-width="2" marker-end="url(#a)" fill="none"/>
+<text x="800" y="248" font-size="18" fill="#57534e">ah-ingress-* bridges</text>
+<text x="660" y="520" font-size="20" font-weight="600" fill="#1c1917">No direct path between A and B</text>
+<text x="660" y="552" font-size="18" fill="#57534e">Not covered: shared master key, Traefik Host header,</text>
+<text x="660" y="578" font-size="18" fill="#57534e">stolen tenant key, sandbox egress policy</text>
+</svg>

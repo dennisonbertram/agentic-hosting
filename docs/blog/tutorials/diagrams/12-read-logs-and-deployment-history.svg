@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="60" y="64" font-size="30" font-weight="700" fill="#1c1917">Service not running: where to look</text>
+
+  <rect x="60" y="100" width="400" height="76" rx="12" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="260" y="147" font-size="22" font-weight="600" fill="#fafaf9" text-anchor="middle">Service stuck or failed</text>
+
+  <rect x="560" y="100" width="580" height="76" rx="12" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="850" y="132" font-size="21" font-weight="600" fill="#fafaf9" text-anchor="middle">GET /v1/services/{id}</text>
+  <text x="850" y="159" font-size="19" fill="#fafaf9" text-anchor="middle">ahc service get: status, last_error</text>
+  <line x1="460" y1="138" x2="556" y2="138" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <line x1="850" y1="176" x2="850" y2="214" stroke="#1c1917" stroke-width="2"/>
+  <line x1="190" y1="214" x2="1010" y2="214" stroke="#1c1917" stroke-width="2"/>
+  <line x1="190" y1="214" x2="190" y2="262" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="600" y1="214" x2="600" y2="262" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="1010" y1="214" x2="1010" y2="262" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <g fill="#fafaf9" stroke="#1c1917" stroke-width="1.5">
+    <rect x="40" y="262" width="300" height="230" rx="12"/>
+    <rect x="450" y="262" width="300" height="230" rx="12"/>
+    <rect x="860" y="262" width="300" height="230" rx="12"/>
+  </g>
+
+  <g font-size="20" fill="#1c1917" font-weight="600">
+    <text x="58" y="296">Build never finished</text>
+    <text x="468" y="296">Container exited</text>
+    <text x="878" y="296">Flapping</text>
+  </g>
+  <g font-size="18" fill="#57534e">
+    <text x="58" y="328">ahc build list &lt;service&gt;</text>
+    <text x="58" y="358">ahc build logs &lt;service&gt;</text>
+    <text x="58" y="388">   [build-id]</text>
+    <text x="58" y="424">GET /v1/services/{id}</text>
+    <text x="58" y="448">  /builds/{buildID}/logs</text>
+    <text x="58" y="472">  ?follow=true</text>
+
+    <text x="468" y="328">ahc logs &lt;service&gt;</text>
+    <text x="468" y="358">  --tail 100 --follow</text>
+    <text x="468" y="394">GET /v1/services/{id}/logs</text>
+    <text x="468" y="430">409 "service has no</text>
+    <text x="468" y="454">container": read</text>
+    <text x="468" y="478">deployments instead</text>
+
+    <text x="878" y="328">ahc service deployments</text>
+    <text x="878" y="352">  &lt;service&gt;</text>
+    <text x="878" y="388">GET /v1/services/{id}</text>
+    <text x="878" y="412">  /deployments</text>
+    <text x="878" y="448">Read crash_count and</text>
+    <text x="878" y="472">each error_message</text>
+  </g>
+
+  <line x1="190" y1="492" x2="190" y2="540" stroke="#1c1917" stroke-width="2"/>
+  <line x1="600" y1="492" x2="600" y2="540" stroke="#1c1917" stroke-width="2"/>
+  <line x1="1010" y1="492" x2="1010" y2="540" stroke="#1c1917" stroke-width="2"/>
+  <line x1="190" y1="540" x2="1010" y2="540" stroke="#1c1917" stroke-width="2"/>
+  <line x1="600" y1="540" x2="600" y2="560" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="160" y="560" width="880" height="76" rx="12" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="600" y="592" font-size="21" font-weight="600" fill="#fafaf9" text-anchor="middle">Fix, then retry</text>
+  <text x="600" y="621" font-size="19" fill="#fafaf9" text-anchor="middle">ahc build cancel &lt;service&gt; &lt;build-id&gt;  |  ahc service redeploy &lt;service&gt;</text>
+</svg>

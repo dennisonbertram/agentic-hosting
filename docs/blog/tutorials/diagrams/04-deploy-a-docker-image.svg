@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#1c1917">Create a service, then what the container can write</text>
+  <text x="40" y="84" font-size="18" fill="#57534e">Left: request flow. Right: the container filesystem.</text>
+
+  <g stroke-width="2" stroke="#1c1917">
+    <rect x="40" y="112" width="560" height="64" rx="12" fill="#fafaf9"/>
+    <rect x="40" y="206" width="560" height="64" rx="12" fill="#1c1917"/>
+    <rect x="40" y="300" width="560" height="64" rx="12" fill="#fafaf9"/>
+    <rect x="40" y="394" width="560" height="64" rx="12" fill="#1c1917"/>
+    <rect x="40" y="488" width="560" height="64" rx="12" fill="#fafaf9"/>
+  </g>
+  <g font-size="20" text-anchor="middle">
+    <text x="320" y="151" fill="#1c1917">Client (curl or ahc deploy)</text>
+    <text x="320" y="245" fill="#fafaf9" font-weight="600">POST /v1/services</text>
+    <text x="320" y="339" fill="#1c1917">services row in SQLite, returns 201</text>
+    <text x="320" y="433" fill="#fafaf9" font-weight="600">async Deploy goroutine (10 min limit)</text>
+    <text x="320" y="527" fill="#1c1917">status running, url set</text>
+  </g>
+  <g font-size="18" fill="#57534e">
+    <text x="60" y="590">Deploy: pull image, create container with runsc,</text>
+    <text x="60" y="616">read-only rootfs, tmpfs mounts, start it.</text>
+  </g>
+  <g stroke="#1c1917" stroke-width="2" marker-end="url(#a)" fill="none">
+    <path d="M320,176 L320,204"/><path d="M320,270 L320,298"/><path d="M320,364 L320,392"/><path d="M320,458 L320,486"/>
+  </g>
+
+  <rect x="660" y="112" width="500" height="520" rx="14" fill="none" stroke="#1c1917" stroke-width="2"/>
+  <text x="680" y="146" font-size="20" font-weight="700" fill="#1c1917">Container (runsc, all caps dropped)</text>
+  <rect x="680" y="166" width="460" height="64" rx="10" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="910" y="205" font-size="20" font-weight="600" text-anchor="middle" fill="#fafaf9">/  root filesystem: read-only</text>
+
+  <g stroke="#1c1917" stroke-width="1.5" fill="#fafaf9">
+    <rect x="680" y="256" width="460" height="46" rx="10"/>
+    <rect x="680" y="312" width="460" height="46" rx="10"/>
+    <rect x="680" y="368" width="460" height="46" rx="10"/>
+    <rect x="680" y="424" width="460" height="46" rx="10"/>
+  </g>
+  <g font-size="20" fill="#1c1917">
+    <text x="700" y="286">/tmp  (tmpfs, 64m)</text>
+    <text x="700" y="342">/var/run  (tmpfs, 16m)</text>
+    <text x="700" y="398">/var/tmp  (tmpfs, 16m)</text>
+    <text x="700" y="454">/run  (tmpfs, 16m)</text>
+  </g>
+
+  <rect x="680" y="510" width="460" height="96" rx="10" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="8 6"/>
+  <text x="700" y="542" font-size="20" font-weight="600" fill="#1c1917">stock nginx: mkdir /var/cache/nginx</text>
+  <text x="700" y="572" font-size="20" font-weight="700" fill="#1c1917">BLOCKED: read-only root</text>
+  <text x="700" y="598" font-size="18" fill="#57534e">container exits and restarts (crash-loop)</text>
+</svg>

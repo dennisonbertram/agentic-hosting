@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="52" font-size="28" font-weight="700" fill="#1c1917">Same Idempotency-Key, same answer</text>
+<text x="40" y="82" font-size="18" fill="#57534e">POST /v1/databases</text>
+<!-- lane 1 -->
+<text x="40" y="135" font-size="20" font-weight="600" fill="#1c1917">Attempt 1</text>
+<rect x="40" y="150" width="200" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="140" y="183" font-size="20" text-anchor="middle" fill="#1c1917">client</text>
+<text x="140" y="210" font-size="18" text-anchor="middle" fill="#57534e">key = K, body B</text>
+<rect x="400" y="150" width="240" height="80" rx="12" fill="#1c1917"/>
+<text x="520" y="183" font-size="20" text-anchor="middle" fill="#fafaf9">idempotency</text>
+<text x="520" y="210" font-size="18" text-anchor="middle" fill="#fafaf9">no entry: reserve</text>
+<rect x="800" y="150" width="360" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="980" y="183" font-size="20" text-anchor="middle" fill="#1c1917">handleDatabaseCreate runs</text>
+<text x="980" y="210" font-size="18" text-anchor="middle" fill="#57534e">2xx stored under K</text>
+<line x1="240" y1="190" x2="398" y2="190" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<line x1="640" y1="190" x2="798" y2="190" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<!-- lane 2 -->
+<text x="40" y="295" font-size="20" font-weight="600" fill="#1c1917">Attempt 2 (after timeout)</text>
+<rect x="40" y="310" width="200" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="140" y="343" font-size="20" text-anchor="middle" fill="#1c1917">client</text>
+<text x="140" y="370" font-size="18" text-anchor="middle" fill="#57534e">key = K, body B</text>
+<rect x="400" y="310" width="240" height="80" rx="12" fill="#1c1917"/>
+<text x="520" y="343" font-size="20" text-anchor="middle" fill="#fafaf9">idempotency</text>
+<text x="520" y="370" font-size="18" text-anchor="middle" fill="#fafaf9">cache hit</text>
+<rect x="800" y="310" width="360" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="980" y="343" font-size="20" text-anchor="middle" fill="#1c1917">Idempotency-Replayed: true</text>
+<text x="980" y="370" font-size="18" text-anchor="middle" fill="#57534e">same 201, handler not run</text>
+<line x1="240" y1="350" x2="398" y2="350" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<line x1="640" y1="350" x2="798" y2="350" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<!-- lane 3 -->
+<text x="40" y="455" font-size="20" font-weight="600" fill="#1c1917">Same key, different body</text>
+<rect x="40" y="470" width="200" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="140" y="503" font-size="20" text-anchor="middle" fill="#1c1917">client</text>
+<text x="140" y="530" font-size="18" text-anchor="middle" fill="#57534e">key = K, body C</text>
+<rect x="400" y="470" width="240" height="80" rx="12" fill="#1c1917"/>
+<text x="520" y="503" font-size="20" text-anchor="middle" fill="#fafaf9">idempotency</text>
+<text x="520" y="530" font-size="18" text-anchor="middle" fill="#fafaf9">body hash differs</text>
+<rect x="800" y="470" width="360" height="80" rx="12" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="980" y="503" font-size="20" text-anchor="middle" fill="#1c1917">409 Conflict</text>
+<text x="980" y="530" font-size="18" text-anchor="middle" fill="#57534e">handler not run</text>
+<line x1="240" y1="510" x2="398" y2="510" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<line x1="640" y1="510" x2="798" y2="510" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<text x="40" y="620" font-size="18" fill="#57534e">Scope: tenant + method + path + key. TTL 10 min. 8 KB stored response. 50 keys per tenant. In memory.</text>
+</svg>

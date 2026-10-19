@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1c1917">Three credentials, three jobs</text>
+
+<text x="40" y="104" font-size="18" fill="#57534e">LANE 1: REGISTER (once)</text>
+<rect x="40" y="120" width="240" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="160" y="158" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Operator</text>
+<text x="160" y="186" font-size="18" fill="#57534e" text-anchor="middle">bootstrap token</text>
+<path d="M280 165H340" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="340" y="120" width="250" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="465" y="158" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Rate limiter</text>
+<text x="465" y="186" font-size="18" fill="#57534e" text-anchor="middle">5 per IP, 20 global / hour</text>
+<path d="M590 165H650" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="650" y="120" width="280" height="90" rx="12" fill="#1c1917"/>
+<text x="790" y="158" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">POST /v1/tenants/register</text>
+<text x="790" y="186" font-size="18" fill="#fafaf9" text-anchor="middle">X-Bootstrap-Token header</text>
+<path d="M930 165H970" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="970" y="120" width="190" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="1065" y="148" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">tenant row</text>
+<text x="1065" y="172" font-size="18" fill="#57534e" text-anchor="middle">+ api_keys row</text>
+<text x="1065" y="194" font-size="18" fill="#57534e" text-anchor="middle">HMAC-SHA256</text>
+<text x="1160" y="250" font-size="18" fill="#57534e" text-anchor="end">Response: tenant_id + api_key (keyID.secret), secret shown once</text>
+
+<text x="40" y="330" font-size="18" fill="#57534e">LANE 2: EVERYTHING ELSE</text>
+<rect x="40" y="346" width="240" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="160" y="384" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Tenant API key</text>
+<text x="160" y="412" font-size="18" fill="#57534e" text-anchor="middle">keyID.secret</text>
+<path d="M280 391H340" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="340" y="346" width="250" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="465" y="384" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Authorization</text>
+<text x="465" y="412" font-size="18" fill="#57534e" text-anchor="middle">Bearer keyID.secret</text>
+<path d="M590 391H650" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="650" y="346" width="280" height="90" rx="12" fill="#1c1917"/>
+<text x="790" y="384" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">auth middleware</text>
+<text x="790" y="412" font-size="18" fill="#fafaf9" text-anchor="middle">30 s cache + HMAC check</text>
+<path d="M930 391H970" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="970" y="346" width="190" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="1065" y="384" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">/v1/* handlers</text>
+<text x="1065" y="412" font-size="18" fill="#57534e" text-anchor="middle">GET /v1/tenant</text>
+
+<text x="40" y="500" font-size="18" fill="#57534e">LANE 3: OPERATOR ONLY</text>
+<rect x="40" y="516" width="240" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="160" y="554" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Admin token</text>
+<text x="160" y="582" font-size="18" fill="#57534e" text-anchor="middle">X-Admin-Token</text>
+<path d="M280 561H340" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="340" y="516" width="590" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="635" y="554" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">recover, reactivate, quota update</text>
+<text x="635" y="582" font-size="18" fill="#57534e" text-anchor="middle">same rate limiter as registration</text>
+</svg>

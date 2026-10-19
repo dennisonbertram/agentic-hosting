@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="40" y="52" font-size="28" font-weight="700" fill="#1c1917">Two background loops and a disk guard in ah</text>
+
+  <!-- Reconciler lane -->
+  <text x="40" y="110" font-size="20" fill="#57534e">Reconciler: every 30s</text>
+  <rect x="40" y="130" width="250" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="165" y="168" font-size="20" font-weight="600" text-anchor="middle" fill="#1c1917">SQLite rows</text>
+  <text x="165" y="196" font-size="18" text-anchor="middle" fill="#57534e">services, databases</text>
+  <rect x="470" y="130" width="250" height="90" rx="12" fill="#1c1917"/>
+  <text x="595" y="168" font-size="20" font-weight="600" text-anchor="middle" fill="#fafaf9">reconciler.go</text>
+  <text x="595" y="196" font-size="18" text-anchor="middle" fill="#fafaf9">compare and correct</text>
+  <rect x="900" y="130" width="260" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="1030" y="168" font-size="20" font-weight="600" text-anchor="middle" fill="#1c1917">Docker containers</text>
+  <text x="1030" y="196" font-size="18" text-anchor="middle" fill="#57534e">label ah.tenant</text>
+  <line x1="290" y1="175" x2="468" y2="175" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="900" y1="175" x2="722" y2="175" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="595" y="250" font-size="18" text-anchor="middle" fill="#57534e">exited: crashed  |  unhealthy: restart  |  deploying over 10 min: failed</text>
+
+  <!-- GC lane -->
+  <text x="40" y="320" font-size="20" fill="#57534e">Garbage collector: every 5 min, first run after 2 min</text>
+  <rect x="40" y="340" width="250" height="90" rx="12" fill="#1c1917"/>
+  <text x="165" y="378" font-size="20" font-weight="600" text-anchor="middle" fill="#fafaf9">gc.go</text>
+  <text x="165" y="406" font-size="18" text-anchor="middle" fill="#fafaf9">age gate: 10 min</text>
+  <rect x="470" y="340" width="690" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="815" y="378" font-size="20" font-weight="600" text-anchor="middle" fill="#1c1917">Deletes what SQLite does not know about</text>
+  <text x="815" y="406" font-size="18" text-anchor="middle" fill="#57534e">orphan containers, ah-db-* volumes, build dirs over 1h, images, snapshots</text>
+  <line x1="290" y1="385" x2="468" y2="385" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- Disk lane -->
+  <text x="40" y="500" font-size="20" fill="#57534e">Disk guard: checked before each call</text>
+  <rect x="40" y="520" width="360" height="40" rx="8" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <rect x="40" y="520" width="288" height="40" rx="8" fill="#e7e5e4" stroke="#1c1917" stroke-width="2"/>
+  <line x1="328" y1="510" x2="328" y2="572" stroke="#1c1917" stroke-width="2"/>
+  <line x1="364" y1="510" x2="364" y2="572" stroke="#1c1917" stroke-width="2"/>
+  <text x="328" y="600" font-size="18" text-anchor="middle" fill="#1c1917">80% warn</text>
+  <text x="372" y="626" font-size="18" text-anchor="middle" fill="#1c1917">90% block</text>
+  <text x="40" y="600" font-size="18" fill="#57534e">/var/lib/ah + /var/lib/docker</text>
+  <line x1="400" y1="540" x2="548" y2="540" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="550" y="500" width="610" height="130" rx="12" fill="#1c1917"/>
+  <text x="855" y="540" font-size="20" font-weight="600" text-anchor="middle" fill="#fafaf9">diskcheck.CheckAll refuses at 90%</text>
+  <text x="855" y="574" font-size="18" text-anchor="middle" fill="#fafaf9">service deploy, build, database create, kanban create</text>
+  <text x="855" y="604" font-size="18" text-anchor="middle" fill="#fafaf9">ah backup  |  500 "internal error" on sync paths</text>
+</svg>

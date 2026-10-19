@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="48" y="60" font-size="28" font-weight="700" fill="#1c1917">One command, one exit code</text>
+  <text x="48" y="92" font-size="18" fill="#57534e">ahc status reads three endpoints and exits 0 or 1</text>
+
+  <!-- left: loop -->
+  <rect x="48" y="130" width="250" height="80" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="173" y="178" font-size="20" text-anchor="middle" fill="#1c1917">cron / CI</text>
+
+  <rect x="48" y="270" width="250" height="80" rx="12" fill="#1c1917"/>
+  <text x="173" y="318" font-size="22" font-weight="700" text-anchor="middle" fill="#fafaf9">ahc status</text>
+  <line x1="173" y1="210" x2="173" y2="268" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="340" y="130" width="270" height="130" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="1.5"/>
+  <text x="360" y="168" font-size="18" fill="#1c1917">GET /v1/system/</text>
+  <text x="360" y="194" font-size="18" fill="#1c1917">health/detailed</text>
+  <text x="360" y="230" font-size="18" fill="#57534e">cached 30s</text>
+  <rect x="340" y="280" width="270" height="56" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="1.5"/>
+  <text x="360" y="315" font-size="18" fill="#1c1917">GET /v1/services</text>
+  <rect x="340" y="356" width="270" height="56" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="1.5"/>
+  <text x="360" y="391" font-size="18" fill="#1c1917">GET /v1/databases</text>
+  <line x1="298" y1="300" x2="338" y2="200" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="298" y1="310" x2="338" y2="308" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="298" y1="325" x2="338" y2="384" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="48" y="460" width="250" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="173" y="498" font-size="20" text-anchor="middle" fill="#1c1917">exit code</text>
+  <text x="173" y="528" font-size="18" text-anchor="middle" fill="#57534e">0 healthy, 1 not</text>
+  <line x1="173" y1="350" x2="173" y2="458" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="340" y="460" width="270" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="475" y="498" font-size="20" text-anchor="middle" fill="#1c1917">webhook / alert</text>
+  <text x="475" y="528" font-size="18" text-anchor="middle" fill="#57534e">your job's next step</text>
+  <line x1="298" y1="505" x2="338" y2="505" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- right: response -->
+  <rect x="680" y="130" width="472" height="420" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="704" y="170" font-size="20" font-weight="700" fill="#1c1917">health/detailed response</text>
+  <text x="704" y="216" font-size="18" fill="#1c1917">status</text>
+  <text x="900" y="216" font-size="18" fill="#57534e">"ok" or "degraded"</text>
+  <line x1="704" y1="236" x2="1128" y2="236" stroke="#57534e" stroke-width="1.5"/>
+  <text x="704" y="272" font-size="18" fill="#1c1917">docker</text>
+  <text x="900" y="272" font-size="18" fill="#57534e">available, version</text>
+  <text x="704" y="318" font-size="18" fill="#1c1917">gvisor</text>
+  <text x="900" y="318" font-size="18" fill="#57534e">available, version</text>
+  <text x="704" y="364" font-size="18" fill="#1c1917">disk</text>
+  <text x="900" y="364" font-size="18" fill="#57534e">/var/lib/ah, used_percent</text>
+  <text x="704" y="410" font-size="18" fill="#1c1917">docker_disk</text>
+  <text x="900" y="410" font-size="18" fill="#57534e">/var/lib/docker</text>
+  <line x1="704" y1="436" x2="1128" y2="436" stroke="#57534e" stroke-width="1.5"/>
+  <text x="704" y="474" font-size="18" fill="#57534e">Exit 1 if status is not ok, Docker is</text>
+  <text x="704" y="500" font-size="18" fill="#57534e">down, gVisor is down, or a disk is over 90%.</text>
+  <text x="704" y="526" font-size="18" fill="#57534e">Also on a failed or crashed service.</text>
+  <line x1="610" y1="195" x2="678" y2="195" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+</svg>

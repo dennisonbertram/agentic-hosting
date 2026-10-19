@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="40" y="52" font-size="28" font-weight="700" fill="#1c1917">What ah backup covers, and what it does not</text>
+
+  <!-- left: covered -->
+  <text x="40" y="106" font-size="20" font-weight="600" fill="#57534e">Covered by ah backup</text>
+  <rect x="40" y="124" width="250" height="84" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="165" y="160" font-size="22" font-weight="600" fill="#1c1917" text-anchor="middle">ah.db</text>
+  <text x="165" y="188" font-size="18" fill="#57534e" text-anchor="middle">state (WAL mode)</text>
+  <rect x="40" y="232" width="250" height="84" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="165" y="268" font-size="22" font-weight="600" fill="#1c1917" text-anchor="middle">ah-metering.db</text>
+  <text x="165" y="296" font-size="18" fill="#57534e" text-anchor="middle">metering (WAL mode)</text>
+
+  <rect x="400" y="150" width="300" height="140" rx="12" fill="#1c1917"/>
+  <text x="550" y="190" font-size="22" font-weight="600" fill="#fafaf9" text-anchor="middle">ah backup</text>
+  <text x="550" y="224" font-size="18" fill="#fafaf9" text-anchor="middle">VACUUM INTO, gzip,</text>
+  <text x="550" y="250" font-size="18" fill="#fafaf9" text-anchor="middle">atomic rename, keep 10</text>
+  <path d="M290,166 L400,200" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <path d="M290,274 L400,240" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+
+  <rect x="400" y="326" width="300" height="84" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="550" y="360" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">/var/lib/ah/backups</text>
+  <text x="550" y="388" font-size="18" fill="#57534e" text-anchor="middle">ah-*.db.gz, ah-metering-*.db.gz</text>
+  <path d="M550,290 L550,326" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+
+  <!-- right: warning -->
+  <rect x="800" y="106" width="360" height="304" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="8 6"/>
+  <text x="820" y="144" font-size="22" font-weight="700" fill="#1c1917">Copy these separately</text>
+  <text x="820" y="188" font-size="20" fill="#1c1917">master.key</text>
+  <text x="820" y="228" font-size="20" fill="#1c1917">/etc/default/ah</text>
+  <text x="820" y="268" font-size="20" fill="#1c1917">Docker volumes (ah-db-*)</text>
+  <text x="820" y="308" font-size="20" fill="#1c1917">Registry images</text>
+  <text x="820" y="372" font-size="18" fill="#57534e">Without master.key, encrypted</text>
+  <text x="820" y="396" font-size="18" fill="#57534e">fields cannot be decrypted.</text>
+
+  <!-- bottom -->
+  <line x1="40" y1="450" x2="1160" y2="450" stroke="#57534e" stroke-width="1.5"/>
+  <text x="40" y="486" font-size="20" font-weight="600" fill="#57534e">Restore on a new host</text>
+
+  <rect x="40" y="510" width="300" height="100" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="190" y="546" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">gunzip + master.key</text>
+  <text x="190" y="576" font-size="18" fill="#57534e" text-anchor="middle">into /var/lib/ah</text>
+
+  <rect x="440" y="510" width="300" height="100" rx="12" fill="#1c1917"/>
+  <text x="590" y="546" font-size="22" font-weight="600" fill="#fafaf9" text-anchor="middle">ah serve</text>
+  <text x="590" y="576" font-size="18" fill="#fafaf9" text-anchor="middle">reconciler, every 30s</text>
+
+  <rect x="840" y="510" width="320" height="100" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="1000" y="546" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Docker</text>
+  <text x="1000" y="576" font-size="18" fill="#57534e" text-anchor="middle">container missing: crashed</text>
+
+  <path d="M340,560 L440,560" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <path d="M740,560 L840,560" stroke="#1c1917" stroke-width="2" fill="none" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="790" y="548" font-size="18" fill="#57534e" text-anchor="middle">compare</text>
+</svg>

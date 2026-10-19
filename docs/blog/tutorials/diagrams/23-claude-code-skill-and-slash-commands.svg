@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="50" y="56" font-size="30" font-weight="700" fill="#1c1917">Chat to API: what each /ah-* command calls</text>
+
+  <rect x="50" y="110" width="230" height="130" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="165" y="165" font-size="22" font-weight="600" fill="#1c1917" text-anchor="middle">Your prompt</text>
+  <text x="165" y="196" font-size="19" fill="#57534e" text-anchor="middle">in Claude Code</text>
+
+  <rect x="340" y="110" width="270" height="130" rx="12" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="475" y="150" font-size="21" font-weight="600" fill="#fafaf9" text-anchor="middle">ah-*.md command</text>
+  <text x="475" y="180" font-size="19" fill="#fafaf9" text-anchor="middle">.claude/commands/</text>
+  <text x="475" y="210" font-size="19" fill="#fafaf9" text-anchor="middle">+ SKILL.md</text>
+  <line x1="280" y1="175" x2="336" y2="175" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="340" y="320" width="270" height="110" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="475" y="365" font-size="21" font-weight="600" fill="#1c1917" text-anchor="middle">AH_URL + AH_KEY</text>
+  <text x="475" y="396" font-size="19" fill="#57534e" text-anchor="middle">env vars for curl</text>
+  <line x1="475" y1="240" x2="475" y2="316" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="670" y="100" width="510" height="330" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="690" y="138" font-size="21" font-weight="600" fill="#1c1917">curl to /v1 endpoints</text>
+  <g font-size="18" fill="#1c1917">
+    <text x="690" y="180" font-weight="600">/ah-deploy</text>
+    <text x="820" y="180" fill="#57534e">POST /v1/services, POST .../builds</text>
+    <text x="690" y="224" font-weight="600">/ah-status</text>
+    <text x="820" y="224" fill="#57534e">GET /v1/system/health/detailed</text>
+    <text x="690" y="268" font-weight="600">/ah-db</text>
+    <text x="820" y="268" fill="#57534e">POST /v1/databases + .../connection-string</text>
+    <text x="690" y="312" font-weight="600">/ah-logs</text>
+    <text x="820" y="312" fill="#57534e">GET .../logs, GET .../builds/{id}/logs</text>
+    <text x="690" y="356" font-weight="600">/ah-register</text>
+    <text x="820" y="356" fill="#57534e">POST /v1/tenants/register</text>
+    <text x="690" y="400" font-weight="600">/ah-snapshot</text>
+    <text x="820" y="400" fill="#57534e">POST .../snapshots, GET /v1/snapshots</text>
+  </g>
+  <line x1="610" y1="175" x2="666" y2="175" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="610" y1="375" x2="666" y2="375" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="670" y="500" width="510" height="110" rx="12" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="925" y="548" font-size="22" font-weight="600" fill="#fafaf9" text-anchor="middle">ah on your server</text>
+  <text x="925" y="580" font-size="19" fill="#fafaf9" text-anchor="middle">Docker + gVisor, SQLite, Traefik</text>
+  <line x1="925" y1="430" x2="925" y2="496" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <text x="50" y="560" font-size="19" fill="#57534e">Only /v1/tenants/register and /v1/system/health skip the API key.</text>
+  <text x="50" y="590" font-size="19" fill="#57534e">It needs the bootstrap token instead.</text>
+</svg>

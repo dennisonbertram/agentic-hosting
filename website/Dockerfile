@@ -10,6 +10,7 @@ RUN npm run build
 FROM nginx:alpine
 COPY website/nginx.conf /etc/nginx/nginx.conf
 COPY website/index.html /usr/share/nginx/html/index.html
+COPY website/og.png /usr/share/nginx/html/og.png
 COPY website/install.sh /usr/share/nginx/html/install.sh
 COPY website/install-cli.sh /usr/share/nginx/html/install-cli.sh
 COPY website/install-skill.sh /usr/share/nginx/html/install-skill.sh

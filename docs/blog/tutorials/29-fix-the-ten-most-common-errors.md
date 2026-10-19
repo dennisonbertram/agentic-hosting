@@ -95,7 +95,7 @@ echo "$AH_API_KEY" | grep -c '\.'      # expect 1
 curl -s -H "Authorization: Bearer $AH_API_KEY" "$AH_URL/v1/tenant"
 ```
 
-If the format is right, the key was revoked or the tenant was suspended. Auth results are cached for 30 seconds, so a brand-new key works right away. If a key is not accepted, get a new one: registration returns `api_key`, and the recovery route is `POST /v1/auth/recover` with a bootstrap token.
+If the format is right, the key was revoked or the tenant was suspended. Auth results are cached for 30 seconds, so a brand-new key works right away. If a key is not accepted, get a new one: registration returns `api_key`, and the recovery route is `POST /v1/auth/recover` with the admin token in the `X-Admin-Token` header. The installer sets one; once an admin token exists, a bootstrap token gets 403. Only a legacy install with no admin token accepts `X-Bootstrap-Token`.
 
 ## 4. 422 on register
 

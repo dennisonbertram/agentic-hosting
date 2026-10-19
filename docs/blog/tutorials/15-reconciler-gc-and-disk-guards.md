@@ -102,7 +102,7 @@ The garbage collector runs every 5 minutes. The first run happens 2 minutes afte
 
 A container must be at least 10 minutes old before it can be removed, so a deploy in flight is not mistaken for an orphan. If the database query fails, the collector skips that item rather than guessing.
 
-So a stray container you start by hand with an `ah.service` label will survive about 10 to 15 minutes, then disappear. Anything without an `ah` label is never touched.
+So a stray container you start by hand with an `ah.service` label will survive about 10 to 15 minutes, then disappear. Most of the sweep is limited to `ah` labels and names, but two steps are not. The dangling-image prune and the unused anonymous volume prune run host-wide, with no ownership filter. If you share the Docker host with other workloads, GC can remove their dangling images and any anonymous volumes that no container is using. Named volumes are kept. I would run `ah` on a host it owns.
 
 ## Step 4: know what a full disk does
 

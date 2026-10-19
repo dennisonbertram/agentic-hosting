@@ -141,7 +141,7 @@ The error message names the key exactly as you sent it: `env var "path" is not a
 
 ## 5. Hit the limits
 
-- An empty body returns 400, "no environment variables provided".
+- An empty JSON object (`{}`) returns 400, "no environment variables provided". A zero-byte body fails JSON decoding first and returns a different 400.
 - More than 100 keys in one request returns 400, "too many environment variables (max 100)".
 - The tenant quota `max_env_vars_per_service` defaults to 50 and can be changed with `PATCH /v1/tenants/{tenantID}/quotas` (1 to 500).
 

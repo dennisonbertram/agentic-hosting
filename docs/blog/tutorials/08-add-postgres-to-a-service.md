@@ -20,6 +20,8 @@ sources:
   - docs-site/src/content/docs/databases.md
   - skills/agentic-hosting/SKILL.md
   - README.md
+publish: false
+hold_reason: "Services cannot reach managed databases yet: https://github.com/dennisonbertram/agentic-hosting/issues/164"
 ---
 
 # Add a Postgres database to your service
@@ -28,7 +30,9 @@ Your app works until it needs to remember something. Then it needs a real databa
 
 By the end of this tutorial you will have a managed Postgres container, its connection string stored as `DATABASE_URL` on your service, and the service restarted so it picks that variable up. I show it three ways: raw API calls so you can see each step, one `ahc` command, and one slash command in Claude Code.
 
-Note: the commands below were checked against the agentic-hosting source, not run end to end for this post. The last section lists one thing the code does not settle.
+Limitation: this does not work yet. The connection string uses `127.0.0.1`, and the database port is bound to the host's loopback interface only, so a service container cannot reach its database. This is tracked in [issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164). The steps below create the database and set the variable correctly, but the service will not connect.
+
+Note: the commands below were checked against the agentic-hosting source, not run end to end for this post. The last section covers the connectivity problem in more detail.
 
 ![Sequence diagram: agent creates the database through the ah API, Docker runs Postgres under gVisor, the API stores the encrypted connection string, then the agent sets the env var and restarts the service](diagrams/08-add-postgres-to-a-service.png)
 
@@ -159,13 +163,13 @@ Follow the diagram top to bottom.
 
 ## Cleanup, limits, and handling the string
 
-- **Deleting.** `ahc db delete my-app-postgres --confirm` (or `DELETE /v1/databases/{id}`, which returns `204`) removes the container and wipes and removes the volume. There is no undo. Deleting does not touch the service's `DATABASE_URL`, so remove or replace it before the service restarts again.
+- **Deleting.** `ahc db delete my-app-postgres --confirm` (or `DELETE /v1/databases/{id}`, which returns `204`) removes the container and removes the volume. It first tries to overwrite the volume's files, but that wipe is best effort: if it fails, the error is logged and deletion continues, so a successful response does not prove the data was overwritten. There is no undo. Deleting does not touch the service's `DATABASE_URL`, so remove or replace it before the service restarts again.
 - **Quota.** The default is 3 databases per tenant. Rows with status `failed` do not count. The fourth create returns `409` with `quota exceeded: maximum 3 databases reached`.
 - **Secrets.** Only echo the host and port back to a user, a log, or another agent. Treat the full string like a password. Each read is audit-logged, so fetch it when you need it and avoid caching it in chat transcripts.
 
 ## One thing to check on your deployment
 
-The connection string host is `127.0.0.1`, and the database port is bound to the host's loopback interface. Service containers run on a per-tenant Docker network. I could not confirm from the code that a service container can reach that address, so verify it on your deployment: after the restart, check your service logs for a successful database connection before you rely on it. If it cannot connect, the [troubleshooting page](https://agentic.hosting/docs/troubleshooting/) is the place to start.
+The connection string host is `127.0.0.1`, and the database port is bound to the host's loopback interface. Service containers run on a per-tenant Docker network, and inside a container `127.0.0.1` is the container itself. A service therefore cannot reach its database today ([issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164)). After the restart, a connection from your service will fail. If you want to look at the failure, the [troubleshooting page](https://agentic.hosting/docs/troubleshooting/) is the place to start.
 
 ## What to try next
 

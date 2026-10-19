@@ -154,7 +154,7 @@ curl -s -H "Authorization: Bearer $AH_API_KEY" \
   "$AH_API/services/$SERVICE_ID/metrics?period=daily" | jq .
 ```
 
-Each row has `timestamp`, `cpu_seconds`, `memory_mb_avg`, `network_rx_bytes` and `network_tx_bytes` (plus `service_id` on the tenant view). A bad `period` or timestamp returns 400, and a service that is not yours returns 404.
+Each row has `timestamp`, `cpu_seconds`, `memory_mb_avg`, `network_rx_bytes` and `network_tx_bytes` (plus `service_id` on the tenant view). Today the collector records only CPU and memory, so the two network fields are always 0. A bad `period` or timestamp returns 400, and a service that is not yours returns 404.
 
 ## 6. Raise quotas as the operator
 
@@ -166,11 +166,11 @@ curl -s -X PATCH $AH_API/tenants/$TENANT_ID/quotas \
   -d '{"max_services": 10, "max_databases": 5}'
 ```
 
-You can set `max_services` (cap 100), `max_databases` (cap 50), `max_builds_concurrent` (cap 10) and `max_env_vars_per_service` (cap 500). Fields you leave out stay unchanged. The response echoes all quotas, including `max_memory_mb`, `max_cpu_cores`, `max_disk_gb` and `api_rate_limit`. This route shares the 5-per-IP-per-hour limiter, so batch your changes.
+You can set `max_services` (cap 100), `max_databases` (cap 50), `max_builds_concurrent` (cap 10) and `max_env_vars_per_service` (cap 500). Fields you leave out stay unchanged. Two of these are stored and returned but not enforced yet: `max_builds_concurrent` and `max_env_vars_per_service`. The builder allows one active build per tenant, and env updates are limited to 100 keys per request, whatever those values say. Raising them does not add capacity. The response echoes all quotas, including `max_memory_mb`, `max_cpu_cores`, `max_disk_gb` and `api_rate_limit`. This route shares the 5-per-IP-per-hour limiter, so batch your changes.
 
 ## 7. Know the defaults
 
-The schema gives a new tenant these quotas: 5 services, 3 databases, 3 concurrent builds, 50 env vars per service, 2048 MB memory, 2 CPUs, 20 GB disk, and an API rate of 100 requests per second. The PATCH route does not accept memory, CPU, disk or rate limit, so those change only by editing the database directly.
+The schema gives a new tenant these quotas: 5 services, 3 databases, 3 concurrent builds and 50 env vars per service (stored, not enforced, as above), 2048 MB memory, 2 CPUs, 20 GB disk, and an API rate of 100 requests per second. The PATCH route does not accept memory, CPU, disk or rate limit, so those change only by editing the database directly.
 
 ## How it works
 

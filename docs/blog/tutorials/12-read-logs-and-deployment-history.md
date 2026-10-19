@@ -85,7 +85,7 @@ The same data over the API:
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/services/$SERVICE_ID"
 ```
 
-Two fields matter: `status` and `last_error`. Valid statuses in the code are `created`, `running`, `stopped`, `deploying`, `failed`, `error` and `crashed`. When the pull fails, `last_error` starts with `image pull failed:`. A failed network setup says `network setup failed:`. If the message is clear, you may be done here.
+Two fields matter: `status` and `last_error`. Valid statuses in the code are `created`, `running`, `stopped`, `deploying`, `failed`, `error`, `crashed` and `restarting` (set during a restart). Do not treat this list as exhaustive. When the pull fails, `last_error` starts with `image pull failed:`. A failed network setup says `network setup failed:`. If the message is clear, you may be done here.
 
 The CLI accepts a service name or the 32-character hex ID. The API paths take the ID.
 

@@ -145,7 +145,9 @@ git commit -am "second version" && git push
 ahc deploy https://github.com/YOU/node-demo node-demo --port 3000
 ```
 
-The second `deploy` tries to create `node-demo`, which already exists. The CLI then looks the service up by name, prints `Using existing service "node-demo"`, and starts a fresh build from the latest commit. When the build succeeds, the old container is stopped and removed and a new one starts from the new image.
+The second `deploy` tries to create `node-demo`, which already exists. When the server has a base domain, the create fails because the name maps to a DNS label that is already taken, so the CLI looks the service up by name prints `Using existing service "node-demo"`, and starts a fresh build from the latest commit. When the build succeeds, the old container is stopped and removed and a new one starts from the new image.
+
+This reuse depends on the create call failing. If the server has no base domain (the localhost setup), duplicate service names are allowed, the create succeeds, and `ahc deploy` makes a second service called `node-demo` instead of updating the first. In that case, delete the old service or rebuild it by id with the API.
 
 Do not use `ahc deploy --redeploy node-demo` for this. It calls the same endpoint as `ahc service redeploy` and restarts the container without a new build, so your push would not appear. (The docs page on deploys describes `POST /v1/services/{id}/redeploy` as starting a new build. The handler in the code only restarts, and I went with the code.)
 

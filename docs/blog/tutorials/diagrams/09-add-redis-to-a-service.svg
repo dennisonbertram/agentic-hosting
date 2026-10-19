@@ -34,7 +34,7 @@
   <rect x="860" y="400" width="280" height="150" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="8 6"/>
   <text x="1000" y="446" font-size="22" font-weight="700" fill="#1c1917" text-anchor="middle">ah-db-&lt;id&gt; volume</text>
   <text x="1000" y="482" font-size="18" fill="#57534e" text-anchor="middle">survives restart</text>
-  <text x="1000" y="508" font-size="18" fill="#57534e" text-anchor="middle">wiped on DELETE</text>
+  <text x="1000" y="508" font-size="18" fill="#57534e" text-anchor="middle">wipe attempted on DELETE</text>
 
   <!-- arrows -->
   <line x1="360" y1="215" x2="858" y2="215" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
@@ -52,7 +52,7 @@
 
   <path d="M770 450 C 820 450, 820 330, 858 270" fill="none" stroke="#57534e" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#g)"/>
   <text x="640" y="345" font-size="18" fill="#57534e" text-anchor="middle">REDIS_URL = redis://:***@127.0.0.1:port</text>
-  <text x="640" y="371" font-size="18" fill="#57534e" text-anchor="middle">reachability from this container: unverified</text>
+  <text x="640" y="371" font-size="18" fill="#57534e" text-anchor="middle">cannot reach 127.0.0.1 port: issue #164</text>
 
   <text x="60" y="650" font-size="18" fill="#57534e">Sources: internal/databases/databases.go, internal/docker/client.go, internal/api/services.go</text>
 </svg>

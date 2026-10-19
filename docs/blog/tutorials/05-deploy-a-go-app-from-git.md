@@ -50,7 +50,7 @@ ahc deploy https://github.com/hashicorp/http-echo my-go-app --port 5678
 
 `ahc` treats any source that starts with `http://` or `https://` as a git URL. Anything else is treated as a Docker image. Here is what it does for a git URL:
 
-1. Creates a service named `my-go-app` with the placeholder image `pending`. The create call requires an image, and the build replaces it later. If a service with that name already exists, `ahc` reuses it.
+1. Creates a service named `my-go-app` with the placeholder image `pending`. The create call requires an image, and the build replaces it later. If the create call fails because a service with that name already exists, `ahc` looks it up by name and reuses it. A server without a base domain allows duplicate names, so there the create succeeds and you get a second service.
 2. Starts a build with `source_type: "git"` and your URL.
 3. Opens the build log stream and prints each line with a `[build]` prefix.
 4. Polls the build until it is `succeeded`, `failed` or `cancelled`.
@@ -167,7 +167,7 @@ ahc deploy --redeploy my-go-app
 ahc build list my-go-app   # same id, no new row
 ```
 
-To build new code, start a new build. Re-running `ahc deploy https://github.com/hashicorp/http-echo my-go-app --port 5678` reuses the existing service, starts a build with a new id, and replaces the running image when that build succeeds. Use redeploy when you changed environment variables and just need a restart.
+To build new code, start a new build. Re-running `ahc deploy https://github.com/hashicorp/http-echo my-go-app --port 5678` reuses the existing service (on a server with a base domain; without one it creates a second service), starts a build with a new id, and replaces the running image when that build succeeds. Use redeploy when you changed environment variables and just need a restart.
 
 ## How it works
 

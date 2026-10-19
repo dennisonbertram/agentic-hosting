@@ -122,11 +122,13 @@ def call(method, path, body=None, idem=None, text=False):
             time.sleep(2 ** attempt)  # same Idempotency-Key, so a POST retry is safe
     raise Stop(f"{method} {path}: gave up after 6 attempts")
 
-def deploy(name, repo, ref, port, service_id=None, timeout=600):
+def deploy(name, repo, ref, port, service_id=None, timeout=600, state=None):
+    state = state if state is not None else {}
     run = uuid.uuid4().hex  # reuse this value to retry the whole run safely
     if not service_id:
         svc = call("POST", "/services", {"name": name, "image": "pending", "port": port}, f"create-{run}")
         service_id = svc["id"]
+    state["service_id"] = service_id
     b = call("POST", f"/services/{service_id}/builds",
              {"source_type": "git", "source_url": repo, "source_ref": ref}, f"build-{run}")
     bid, deadline = b["build_id"], time.time() + timeout
@@ -156,18 +158,23 @@ if __name__ == "__main__":
     p.add_argument("--service", help="rebuild an existing service id instead of creating one")
     p.add_argument("--cleanup", action="store_true", help="delete the service if the deploy fails")
     a = p.parse_args()
+    state = {}  # deploy() records the service id here as soon as it exists
     try:
-        res = deploy(a.name, a.repo, a.ref, a.port, a.service)
-        if not res["ok"] and a.cleanup:
-            call("DELETE", f"/services/{res['service_id']}")
-            res["deleted"] = True
-    except Stop as e:
+        res = deploy(a.name, a.repo, a.ref, a.port, a.service, state=state)
+    except Exception as e:  # Stop, or a bad response shape after the service exists
         res = {"ok": False, "reason": str(e)}
+    sid = state.get("service_id")
+    if not res["ok"] and a.cleanup and sid and not a.service:
+        try:
+            call("DELETE", f"/services/{sid}")
+            res["deleted"] = True
+        except Stop as e:
+            res["cleanup_error"] = str(e)
     print(json.dumps(res, indent=2))
     sys.exit(0 if res["ok"] else 1)
 ```
 
-The `--service` flag is the redeploy path. Pass an existing service id and the script skips create and starts a new build on it. The `--cleanup` flag deletes the service if the deploy fails, which returns 204 with no body.
+The `--service` flag is the redeploy path. Pass an existing service id and the script skips create and starts a new build on it. The `--cleanup` flag deletes a service the script created if the deploy fails, including when the failure is an error raised after the create call. It never deletes a service you passed with `--service`. The delete returns 204 with no body.
 
 ## Step 6: Run it
 

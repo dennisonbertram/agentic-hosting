@@ -46,6 +46,7 @@
   <text x="925" y="580" font-size="19" fill="#fafaf9" text-anchor="middle">Docker + gVisor, SQLite, Traefik</text>
   <line x1="925" y1="430" x2="925" y2="496" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
 
-  <text x="50" y="560" font-size="19" fill="#57534e">Only /v1/tenants/register and /v1/system/health skip the API key.</text>
-  <text x="50" y="590" font-size="19" fill="#57534e">It needs the bootstrap token instead.</text>
+  <text x="50" y="545" font-size="19" fill="#57534e">Register and health skip the API key.</text>
+  <text x="50" y="575" font-size="19" fill="#57534e">So do four operator routes (recover, reactivate,</text>
+  <text x="50" y="605" font-size="19" fill="#57534e">token validate, quotas), which use operator tokens.</text>
 </svg>

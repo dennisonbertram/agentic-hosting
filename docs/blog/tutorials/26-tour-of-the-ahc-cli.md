@@ -80,7 +80,7 @@ ahc service list
 ## 3. Deploy
 
 ```bash
-ahc deploy nginx:alpine my-site --port 80
+ahc deploy nginxinc/nginx-unprivileged my-site --port 8080
 ahc deploy https://github.com/org/repo my-app --port 3000
 ```
 
@@ -183,7 +183,7 @@ The diagram groups the commands by purpose. Most commands load the URL and key (
 - No way to set env vars from a file. `service env set` takes `KEY=VALUE` arguments.
 - No `--json` on `deploy`, `logs`, `snapshot take` and the lifecycle commands.
 - `db list` shows `-` in its SERVICE column, because the CLI does not receive that field.
-- Deploying from git waits at most 5 minutes for a build. A slower build needs `ahc build logs` to follow.
+- The 5-minute limit applies to the polling that follows the build, not the whole command. `ahc` first streams the build log with no timeout, so a long build can keep the command running past 5 minutes.
 
 ## What to try next
 

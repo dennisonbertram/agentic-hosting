@@ -133,7 +133,7 @@ Routing works differently. For a routed service, the server creates a separate n
 
 I would read this part slowly. I think a short, honest list of gaps is worth more than a long list of features.
 
-- **One master key.** Service env vars, database passwords, and API key hashes all use the same 32-byte master key on the server. HKDF key separation is a written plan (`docs/security/hkdf-key-separation-plan.md`), not running code. There is no per-tenant key.
+- **One master key.** Service env vars and database passwords are encrypted with the same 32-byte master key on the server. API keys are hashed with a separate HMAC key kept in the `server_secrets` table. It was seeded from the master key on first start and does not change when the master key is rotated. HKDF key separation is a written plan (`docs/security/hkdf-key-separation-plan.md`), not running code. There is no per-tenant key.
 - **A stolen tenant key is a stolen tenant.** It can deploy, delete, read revealed env values, fetch database connection strings, create more keys, and delete the tenant. Give each agent its own key with `POST /v1/auth/keys` and revoke it when done.
 - **Sandbox environments do not enforce outbound policy.** Environment templates have an `egress_policy` field and the server copies it into an `EgressAllow` setting. I searched the code and nothing reads that value to change networking. Do not rely on it.
 - **Traefik is reachable from a workload.** A workload can reach its own ingress bridge and send a Host header for another public route. That is the same as calling the public hostname, so the target app's own authentication still has to hold.

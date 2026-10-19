@@ -17,13 +17,17 @@ sources:
   - docs-site/src/content/docs/env.md
   - docs/ops/fresh-install.md
   - CHANGELOG.md
+publish: false
+hold_reason: "Services cannot reach managed databases yet: https://github.com/dennisonbertram/agentic-hosting/issues/164"
 ---
 
 # Add Redis as a cache or job queue
 
-A cache, a rate limiter, and a job queue all want Redis, and I think an agent should be able to add one to a service with a single command. That is what this post shows. You have a web service running on agentic-hosting. By the end you will have a Redis container with a password, its connection string stored encrypted as `REDIS_URL` on your service, and a small route that does a SET and GET through that URL.
+A cache, a rate limiter, and a job queue all want Redis, and I think an agent should be able to add one to a service with a single command. That is what this post shows. You have a web service running on agentic-hosting. By the end you will have a Redis container with a password and its connection string stored encrypted as `REDIS_URL` on your service.
 
-Here is a caveat that changes how you should read the rest. The code gives your service the connection string, but I could not confirm from the code that a service container can reach that address. The "How it works" section explains why and gives you a check you can run. I did not run the commands in this post. I checked them against the source.
+Limitation: this does not work yet. The connection string uses `127.0.0.1`, and the database port is bound to the host's loopback interface only, so a service container cannot reach its database. This is tracked in [issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164). The steps below create Redis and set the variable correctly, but the SET and GET route in Step 3 will fail with a connection error until that issue is fixed.
+
+The "How it works" section explains why. I did not run the commands in this post. I checked them against the source.
 
 ## Prerequisites
 
@@ -82,6 +86,16 @@ curl -s -X POST "$AH_URL/v1/databases" \
 
 The response is HTTP 201 with the database record, including `id`, `status: "ready"`, `host`, `port` and a `connection_string`. Fetch the string again later from `GET /v1/databases/{dbID}/connection-string`. That call is written to the server log as an audit event.
 
+Look up the service ID and the connection string first. The list response is JSON; copy the `id` of `my-app` and the `connection_string` of the Redis database (use `python3` or `jq` to extract them; do not echo the string, it contains the password):
+
+```bash
+curl -s -H "Authorization: Bearer $AH_API_KEY" "$AH_URL/v1/services"
+export SERVICE_ID="<id-of-my-app>"
+export DB_ID="<id-from-the-create-response>"
+CONN=$(curl -s -H "Authorization: Bearer $AH_API_KEY" \
+  "$AH_URL/v1/databases/$DB_ID/connection-string" | python3 -c 'import sys,json; print(json.load(sys.stdin)["connection_string"])')
+```
+
 Set the env var. This merges into the existing env and does not replace it:
 
 ```bash
@@ -129,7 +143,7 @@ Deploy it the same way you deployed `my-app`. The [deploy guide](https://agentic
 curl https://<your-service-host>/redis-check
 ```
 
-If everything is reachable you will see `{"roundTrip":"world"}`. If the service cannot reach Redis, the log will show a connection error instead. Read it with `GET /v1/services/{id}/logs`. Treat that result as the real test of your setup. I have not seen either outcome.
+Once the service can reach Redis you should see `{"roundTrip":"world"}`. Until issue #164 is fixed, the log shows a connection error instead. Read it with `GET /v1/services/{id}/logs`. I have not run this route.
 
 ## Step 4: How readiness is checked
 
@@ -154,13 +168,13 @@ The server logs an `AUDIT: action=env.revealed` line with your tenant, the servi
 
 The diagram shows the pieces.
 
-![Architecture diagram: ah probes a Redis container with AUTH and PING; REDIS_URL is stored encrypted in service_env and injected into the app container when it is created; the Redis data lives on an ah-db volume that survives restart and is wiped on delete.](diagrams/09-add-redis-to-a-service.png)
+![Architecture diagram: ah probes a Redis container with AUTH and PING; REDIS_URL is stored encrypted in service_env and injected into the app container when it is created; the Redis data lives on an ah-db volume that survives restart and gets a best-effort wipe on delete.](diagrams/09-add-redis-to-a-service.png)
 
 - `ah` creates a volume named `ah-db-<id>`, starts `redis:7-alpine` under gVisor (`runsc`) with `--requirepass`, and probes it with AUTH and PING.
 - The password is random, and the connection string is encrypted with the server master key before it is stored.
 - `REDIS_URL` goes into the service's encrypted env. It is injected when the container is created, which is why a restart is needed.
 
-Now the part I could not confirm. The Redis container is published on `127.0.0.1:<port>` on the host, and that is the address inside the connection string. In the code, service containers are attached to the tenant network `ah-tenant-<tenant id>`. I found no code that attaches the Redis container to that network, and none that rewrites the host in the connection string. Inside a container, `127.0.0.1` normally means the container itself, so a connection from your service may fail with "connection refused". The `/redis-check` route is how you find out on your install.
+Here is why the connection fails. The Redis container is published on `127.0.0.1:<port>` on the host, and that is the address inside the connection string. In the code, service containers are attached to the tenant network `ah-tenant-<tenant id>`. I found no code that attaches the Redis container to that network, and none that rewrites the host in the connection string. Inside a container, `127.0.0.1` normally means the container itself, so a connection from your service fails with "connection refused" ([issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164)). The `/redis-check` route shows that error in your logs.
 
 If you only need to confirm that the Redis itself works, you can do it on the host where `ah` runs. Reveal the connection string through the audited endpoint and use `redis-cli -u "$CONN" PING`. You should get `PONG`.
 
@@ -170,7 +184,7 @@ If you only need to confirm that the Redis itself works, you can do it on the ho
 - **Tenant quota.** The default is 3 databases per tenant, counting every database that is not `failed`. Going over returns a quota error.
 - **Limits.** Database containers get 512 MB of memory, no swap, and a 256-process limit.
 - **Names.** 1 to 63 characters, starting with a letter, with letters, digits, hyphens and underscores, and no trailing hyphen.
-- **Delete wipes the volume.** `DELETE /v1/databases/{dbID}` stops the container, overwrites the volume's files with zeros, and removes the volume. It returns 204. With the CLI you must pass `--confirm`.
+- **Delete attempts a wipe.** `DELETE /v1/databases/{dbID}` stops the container, tries to overwrite the volume's files with zeros, and removes the volume. The wipe is best effort: if it fails, the error is logged and deletion continues, so a 204 does not prove the data was overwritten. With the CLI you must pass `--confirm`.
 - **A restart keeps data.** Restarting your service does not touch the Redis volume. Deleting the database does.
 
 Before you delete, change or remove `REDIS_URL` on any service that uses it. Deleting does not do that for you.
@@ -181,4 +195,4 @@ Before you delete, change or remove `REDIS_URL` on any service that uses it. Del
 - Read [Env vars and secrets](https://agentic.hosting/docs/env/) for key limits and validation rules.
 - Check [Troubleshooting](https://agentic.hosting/docs/troubleshooting/) if provisioning fails.
 - Look at the [security model](https://agentic.hosting/docs/security/) for how secrets are encrypted.
-- The source is on [GitHub](https://github.com/dennisonbertram/agentic-hosting). If your service cannot reach Redis, an issue with your log output helps.
+- The source is on [GitHub](https://github.com/dennisonbertram/agentic-hosting). The reachability problem is tracked in [issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164).

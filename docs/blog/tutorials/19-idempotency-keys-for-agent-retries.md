@@ -1,6 +1,6 @@
 ---
 title: "Make agent retries safe with idempotency keys"
-description: "Add an Idempotency-Key header so an agent that retries POST /v1/databases after a timeout never creates two databases."
+description: "Add an Idempotency-Key header so an agent that retries POST /v1/databases after a timeout does not create a second database when the first attempt succeeded."
 slug: idempotency-keys-for-agent-retries
 tags: [idempotency, agents, reliability, api, curl]
 cover_diagram: diagrams/19-idempotency-keys-for-agent-retries.png
@@ -24,7 +24,7 @@ sources:
 
 Agents retry. I think that is the right behavior, and it is also how they end up creating things twice.
 
-Your agent calls `POST /v1/databases`. Provisioning a database takes a while, because the server may have to pull an image first. Your HTTP client gives up after 30 seconds and the agent retries. But the first request never stopped. The server is still building the database. Now you may have two.
+Your agent calls `POST /v1/databases`. Provisioning a database takes a while, because the server may have to pull an image first. Your HTTP client gives up after 30 seconds and the agent retries. The first request may still be running, or it may have been cancelled when the connection dropped, since database creation uses the request's context. Either way, a plain retry can leave you with two databases, or with one half-created.
 
 By the end of this post you will have a create call you can retry as many times as you like, and you will know which routes the protection covers and which it does not.
 
@@ -75,6 +75,8 @@ If it times out, send the exact same command again, same `$KEY`, same body. The 
 
 - If the first request already finished with a 2xx, you get the stored response back, with the header `Idempotency-Replayed: true`. The handler does not run again.
 - If the first request is still running, your retry waits for it and then gets that response (see step 5).
+
+Only 2xx responses are stored. If the first attempt fails or is cancelled, the key is released and your retry runs the handler again, which can happen after a provisioning row was already inserted. The key protects against duplicate successes, not against every partial failure, so check `GET /v1/databases` after an error.
 
 A replayed create looks like this:
 

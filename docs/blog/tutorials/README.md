@@ -5,11 +5,12 @@
 ## How these were checked
 
 - Every command, endpoint, field and flag was checked against the code on `main` (commit 330ff4f). The commands were **not executed** against a live server; each post says so.
-- Each post was checked for accuracy by Muse (`meta/muse-spark-1.3` via OpenRouter) against the files in its `sources` list. A Sonnet agent then verified each Muse finding in the code and fixed only the confirmed ones.
+- Each post was checked for accuracy by Muse (`meta/muse-spark-1.3` via OpenRouter) against the files in its `sources` list. A Sonnet agent then verified each Muse finding in the code and fixed only the confirmed ones. An Astra (gpt-6-astra) review of the full set found 20 more problems; all were confirmed in the code and fixed.
 - A final pass edited for a plain, first-person voice and removed AI-slop phrasing. Posts contain no invented anecdotes, metrics or transcripts.
 
 ## Notes for the publishing agent
 
+- **Do not publish posts with `publish: false` in their front matter.** Posts 08 (Postgres) and 09 (Redis) are on hold: services cannot reach managed databases yet ([#164](https://github.com/dennisonbertram/agentic-hosting/issues/164)).
 - Image paths are relative (`diagrams/NN-slug.png`). Upload the PNG and rewrite the path for the target platform.
 - `sources` is for reviewers. Drop it from the published front matter if the platform rejects unknown keys.
 - Posts 01-04 on dev.to already used covers `docs-site/public/blog/cover-0[1-4]*.jpg`; these tutorials are new topics.

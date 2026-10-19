@@ -41,4 +41,5 @@
 
   <text x="60" y="610" font-size="20" fill="#57534e">ahc service redeploy only restarts the container with current env. It does not rebuild.</text>
   <text x="60" y="640" font-size="20" fill="#57534e">The build always uses the repo root. No subdirectory option.</text>
+  <text x="60" y="664" font-size="20" fill="#57534e">Same name updates the service only on a server with a base domain; without one, ahc makes a second service.</text>
 </svg>

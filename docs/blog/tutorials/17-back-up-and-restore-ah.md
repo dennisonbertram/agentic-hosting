@@ -117,10 +117,10 @@ sudo chown ah:ah /var/lib/ah/ah.db /var/lib/ah/ah-metering.db /var/lib/ah/master
 sudo chmod 600 /var/lib/ah/ah.db /var/lib/ah/ah-metering.db
 
 sudo systemctl start ah
-curl -s http://127.0.0.1:8080/v1/system/health
+curl -s -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 ```
 
-There is no `ah restore` command. The restore is these file operations. Stop ah first, because it holds the database open. Moving the old `-wal` and `-shm` files out of the way matters: a stale WAL file next to a restored database is a bad combination. The `ah:ah` ownership matches `User=ah` in the unit file. The health route is public, so it needs no API key.
+There is no `ah restore` command. The restore is these file operations. Stop ah first, because it holds the database open. Moving the old `-wal` and `-shm` files out of the way matters: a stale WAL file next to a restored database is a bad combination. The `ah:ah` ownership matches `User=ah` in the unit file. The health route needs no API key, but the server still requires HTTPS. A request from loopback must carry `X-Forwarded-Proto: https`, as Traefik adds in production, or it gets a 403.
 
 If you skip the metering file, ah creates a fresh metering database and you lose usage history.
 

@@ -80,7 +80,7 @@ Keep the goal concrete and give the agent the host. Don't paste the token into t
 
 Here is the path the skill describes. Check each fact. These are the places where an agent trained on older docs or other PaaS products goes wrong.
 
-**Register.** Validate the token with a JSON body, then register. Validate always returns HTTP 200.
+**Register.** Validate the token with a JSON body, then register. Validate returns HTTP 200 with `valid` true or false once it has checked the token. It returns 429 when you are rate limited and an error for malformed JSON.
 
 ```bash
 curl -s -X POST "$AH_URL/v1/system/bootstrap-token/validate" \

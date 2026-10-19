@@ -198,7 +198,7 @@ So the recovery plan is short. Revoke the stolen key, check the list for keys yo
 
 ## How it works
 
-The diagram shows the flow in two rows. A key is `keyID.secret`. On create, the server hashes the full key with HMAC-SHA256 using a server-side secret and stores only the hash and an eight-character prefix. On each request, the auth middleware looks the key up by ID, checks that it is not revoked or expired and that the tenant is `active`, then compares the hash in constant time.
+The diagram shows the flow in two rows. A key is `keyID.secret`. On create, the server hashes the secret part (after the dot) with HMAC-SHA256 using a server-side secret and stores only the hash and an eight-character prefix. On each request, the auth middleware looks the key up by ID, checks that it is not revoked or expired and that the tenant is `active`, then compares the hash in constant time.
 
 The lookup result is cached for 30 seconds, up to 5000 entries. That is why revocation has a stated 30 second ceiling. Suspending a tenant evicts every cached key for that tenant, and reactivating issues a fresh key rather than un-revoking the old ones.
 

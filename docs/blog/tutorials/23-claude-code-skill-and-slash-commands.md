@@ -124,6 +124,8 @@ redis    -> REDIS_URL
 
 Last, it calls `POST /v1/services/{id}/restart` and polls until the service is `running`. Your app reads `DATABASE_URL` from its environment on the next start.
 
+Limitation: the connection string uses `127.0.0.1` and the database port is bound to the host's loopback only, so the service cannot connect to the database yet ([issue #164](https://github.com/dennisonbertram/agentic-hosting/issues/164)). The command sets the variable, but I would not rely on this workflow until that is fixed.
+
 ## Step 6: Read logs and check status
 
 ```text
@@ -155,7 +157,7 @@ When Claude proposes a call that returns `400` or `422`, ask it to check the end
 
 ## How it works
 
-The diagram reads left to right. Your prompt reaches a command file in `~/.claude/commands/`. That file is a short instruction to Claude with `$1`, `$2` and `$3` filled from your arguments. `SKILL.md` adds the broader API knowledge, such as error meanings and the circuit breaker. Claude turns both into `curl` calls using `$AH_URL` and `$AH_KEY`, and the `ah` server on your host does the work. Registration and the basic health check (`GET /v1/system/health`) skip the API key.
+The diagram reads left to right. Your prompt reaches a command file in `~/.claude/commands/`. That file is a short instruction to Claude with `$1`, `$2` and `$3` filled from your arguments. `SKILL.md` adds the broader API knowledge, such as error meanings and the circuit breaker. Claude turns both into `curl` calls using `$AH_URL` and `$AH_KEY`, and the `ah` server on your host does the work. Registration, the basic health check (`GET /v1/system/health`), and a few operator routes (key recovery, tenant reactivation, bootstrap token validation, quota updates) skip the API key. Bootstrap token validation takes the bootstrap token; the other three take the admin token (`X-Admin-Token`) on current installs.
 
 ## What to try next
 

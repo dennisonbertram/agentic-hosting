@@ -50,8 +50,9 @@ Flags (serve):
 | `--base-domain` | `AH_BASE_DOMAIN` or empty | Public URLs become `https://{dns_label}.{base}` |
 | `--dev` | false | Disables HTTPS enforcement; gVisor missing is a warning, not fatal |
 | `--open-registration` | false | Requires `--dev`. Skips bootstrap token |
+| `--cors-origins` | Pages dashboard hosts | Comma-separated Origin allowlist (`AH_CORS_ORIGINS`) |
 
-Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_PATH`, `AH_MASTER_KEY_PATH`, `AH_BUILD_DIR`, `AH_NIXPACKS_PATH`, `AH_DOCKER_DATA_DIR`, `AH_BASE_DOMAIN`, `AH_TRAEFIK_CONFIG_DIR`, `AH_KANBAN_PORT_START` / `END` (7100–9100), `AH_SNAPSHOT_MAX_PER_SERVICE` (10), `AH_SNAPSHOT_MAX_AGE` (30 days), `AH_BOOTSTRAP_TOKEN` (comma-separated, each ≥32 chars).
+Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_PATH`, `AH_MASTER_KEY_PATH`, `AH_BUILD_DIR`, `AH_NIXPACKS_PATH`, `AH_DOCKER_DATA_DIR`, `AH_BASE_DOMAIN`, `AH_CORS_ORIGINS`, `AH_TRAEFIK_CONFIG_DIR`, `AH_KANBAN_PORT_START` / `END` (7100–9100), `AH_SNAPSHOT_MAX_PER_SERVICE` (10), `AH_SNAPSHOT_MAX_AGE` (30 days), `AH_BOOTSTRAP_TOKEN` (comma-separated, each ≥32 chars).
 
 `AH_BOOTSTRAP_TOKEN` is required unless `--dev --open-registration`.
 
@@ -62,7 +63,7 @@ Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_P
 - `Runtime: "runsc"`
 - `PidsLimit: 256`
 - `MemorySwap = Memory` (no extra swap)
-- Default 512 MB / 1 CPU unless tenant limits say otherwise
+- Memory / CPU from `tenant_quotas` (new tenants: **2048 MB / 2 CPUs**). Fallback **512 MB / 1 CPU** only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 - `CapDrop: ALL`, `SecurityOpt: no-new-privileges`, `ReadonlyRootfs: true`
 - tmpfs on `/tmp` (64m), `/var/run`, `/var/tmp`, `/run` (16m each), `noexec,nosuid`
 - `RestartPolicy: unless-stopped`
@@ -114,7 +115,7 @@ Migrations live in `internal/db/migrations/` (`state_001` … `state_019`, `mete
 4. HTTPS check (unless `--dev`)
 5. Auth (Bearer `keyID.secret` → HMAC-SHA256 verify against stored hash)
 6. Per-tenant + global token buckets
-7. Idempotency (mutating authenticated routes; **not** `POST /v1/environments/{id}/exec`)
+7. Idempotency (**POST and PUT** only; **not** DELETE/PATCH, **not** `POST /v1/auth/keys` or `POST /v1/environments/{id}/exec`; no PUT routes exist)
 8. 30s timeout on short routes; logs, DB create, kanban create, environment create/sync skip that timeout
 
 ## Packages that matter

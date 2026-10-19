@@ -2,7 +2,7 @@
 
 ## Current restore deployment
 
-The fresh-host installer was run on Hetzner host `170337926` (CX33, Ubuntu 24.04, IPv4 `178.104.44.25`). DNS `@`, `www`, and wildcard records point to this host. The permanent SSH Ed25519 host key was verified independently against pinned cloud-init data and rotated; its fingerprint is `SHA256:PeDsaS5dEfMAjVePNjnFn8ZTGDXW8oyHKfL9UqFWbKc`. Verify this fingerprint through the trusted provisioning channel before SSH access. Do not reuse the former host's address or identity.
+The fresh-host installer was run on Hetzner host `170337926` (CX33, Ubuntu 24.04, IPv4 `178.104.44.25`). After the Pages cutover, apex `agentic.hosting` A records point at GitHub Pages; `www`, `api`, and `*.apps` stay on this host. The permanent SSH Ed25519 host key was verified independently against pinned cloud-init data and rotated; its fingerprint is `SHA256:PeDsaS5dEfMAjVePNjnFn8ZTGDXW8oyHKfL9UqFWbKc`. Verify this fingerprint through the trusted provisioning channel before SSH access. Do not reuse the former host's address or identity.
 
 The lead reports all stack services active and API health successful. Public HTTPS health and the homepage were observed in a browser. The relay accepted Traefik traffic, rejected a different container source, and TCP 8081 was blocked from an external client. The per-workload ingress fix in `c43a4f2` enabled the pinned Git deployment at [https://smoke-node-build-3b43eaa101.apps.agentic.hosting](https://smoke-node-build-3b43eaa101.apps.agentic.hosting), which returned HTTP 200 over verified HTTPS. The Git-built service ran under runsc; environment execution returned exit codes 0 and 7; tests from one workload to other workloads' private IPs were blocked. PostgreSQL provisioned as ready under runsc and `SELECT 1` returned 1. Commit `20d30b1` included the Redis readiness/auth correction and stop/start phase: Redis provisioning returned HTTP 201 with ready status, and its authenticated protocol probe returned `PONG`; a service stop/start returned `running` and its public HTTPS route returned HTTP 200. Recovery fix `bdd1f48` normalized missing container IDs in database lookup. The three failed smoke database records then returned HTTP 200 from Get and HTTP 204 from Delete; final inventory showed one Git demo service and no smoke databases or environments. The retained Git demo still returned HTTP 200 with the expected response after cleanup. The stop/start observation followed a cleanup wait window, but does not prove that a garbage-collection callback ran. The first service certificate check had an issuance race (certificate arrived after about seven seconds); commit `b042177` made the verifier wait up to 120 seconds for a TLS-verified result.
 
@@ -22,14 +22,16 @@ sudo scripts/bootstrap-stack.sh --domain agentic.hosting --acme-email ops@exampl
 
 Replace the example email with the mailbox used for ACME notices. `--domain` must be a lowercase DNS domain. Use `--skip-website` to install only the API and service ingress. `--dry-run` checks host prerequisites and subnet collisions without changing the host. Running the installer again is intentionally refused after it has created persistent state. Do not delete `/var/lib/ah`, keys, tokens, registry data, Docker networks, or units to make a rerun pass.
 
-The website hostnames are `agentic.hosting` and `www.agentic.hosting`. The public API remains available at `https://agentic.hosting/v1/...` for existing website clients and also at `https://api.agentic.hosting/v1/...`; tenant services use `apps.agentic.hosting`. The API route has explicit higher priority for `/v1/` paths, leaving the homepage and other website paths unchanged. Replace the example domain in the command and configure these DNS records at the DNS provider after provisioning:
+After the Pages cutover, `https://agentic.hosting` is GitHub Pages (homepage + `/docs/`). `www.agentic.hosting` stays on this host and nginx 301s it to the GitHub repo (TLS still terminates on Traefik). The public API is `https://api.agentic.hosting/v1/...` only — apex `/v1/` is gone once the apex A records point at Pages. Tenant services use `apps.agentic.hosting`. Replace the example domain in the command and configure these DNS records at the DNS provider after provisioning:
 
 | Name | Type | Value |
 | --- | --- | --- |
-| `@` | A | New server IPv4 address |
-| `www` | A | New server IPv4 address |
-| `api` | A | New server IPv4 address |
-| `*.apps` | A | New server IPv4 address |
+| `@` | A | GitHub Pages (`185.199.108.153`, `185.199.109.153`, `185.199.110.153`, `185.199.111.153`) |
+| `www` | A | This server IPv4 (`178.104.44.25` on the current restore host) |
+| `api` | A | This server IPv4 address |
+| `*.apps` | A | This server IPv4 address |
+
+Generic bootstrap still installs a website container for `$domain` and `www.$domain`. Production `agentic.hosting` should then switch Traefik to `deploy/traefik/10-website-www.yml`. See [`docs/website/github-pages.md`](../website/github-pages.md).
 
 If the host has a working public IPv6 address and firewall policy, add matching AAAA records. Do not publish AAAA records for an address the host cannot serve. ACME HTTP-01 issuance needs public DNS to resolve to this host and inbound TCP 80 to reach Traefik. Until then, Traefik serves its default certificate; the API health endpoint on loopback remains available. On the current restore host, public HTTPS health and homepage have already been observed with valid TLS.
 

@@ -17,13 +17,7 @@ Paste one of these URLs into an agent chat. The agent can fetch the file and ope
 https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt
 ```
 
-On this docs site (after GitHub Pages is enabled):
-
-```
-https://dennisonbertram.github.io/agentic-hosting/llms.txt
-```
-
-On the production website (baked into the nginx image):
+On the public site (GitHub Pages at the apex):
 
 ```
 https://agentic.hosting/llms.txt

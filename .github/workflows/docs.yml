@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'docs-site/**'
+      - 'website/**'
       - 'llms.txt'
       - 'llms-full.txt'
       - 'skills/**'
       - '.github/workflows/docs.yml'
+      - 'scripts/assemble-github-pages.sh'
   workflow_dispatch:
 
 permissions:
@@ -30,17 +32,19 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: docs-site/package-lock.json
-      - name: Install and build
+      - name: Install and build docs
         working-directory: docs-site
         env:
-          ASTRO_BASE: /agentic-hosting/
-          ASTRO_SITE: https://dennisonbertram.github.io
+          ASTRO_BASE: /docs/
+          ASTRO_SITE: https://agentic.hosting
         run: |
           npm ci
           npm run build
+      - name: Assemble Pages artifact
+        run: scripts/assemble-github-pages.sh pages-dist
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs-site/dist
+          path: pages-dist
 
   deploy:
     needs: build

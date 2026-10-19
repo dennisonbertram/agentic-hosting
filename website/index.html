@@ -227,7 +227,7 @@
           <div class="text-stone-500"># Deploy a Docker image</div>
           <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -X POST https://agentic.hosting/v1/services \</span></div>
           <div class="pl-4 text-stone-400">-H "Authorization: Bearer $AH_KEY" \</div>
-          <div class="pl-4 text-stone-400">-d '{"name":"web","image":"nginx:alpine","port":80}'</div>
+          <div class="pl-4 text-stone-400">-d '{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080}'</div>
           <div class="mt-2 text-stone-500">{"id":"<span class="text-green-400">svc_01jn...</span>","status":"deploying"}</div>
           <div class="mt-3 text-stone-500"># Provision a database — one call</div>
           <div><span class="text-green-400">$</span> <span class="text-stone-200">curl -X POST https://agentic.hosting/v1/databases \</span></div>

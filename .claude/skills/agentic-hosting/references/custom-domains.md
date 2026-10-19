@@ -118,26 +118,26 @@ Container names are stable across restarts (ah uses deterministic naming), so th
 
 ---
 
-## Example: Expose the agentic.hosting website
+## Example: Keep TLS on www after Pages owns the apex
 
-This is how the main website container is configured:
+`https://agentic.hosting` is GitHub Pages. Only `www.agentic.hosting` stays on Hetzner so Traefik can keep a certificate and nginx can 301 to the GitHub repo. Production file: `deploy/traefik/10-website-www.yml`.
 
 ```yaml
 http:
   routers:
-    website:
-      rule: "Host(`agentic.hosting`)"
+    website-https:
+      rule: "Host(`www.agentic.hosting`)"
       entryPoints:
         - websecure
-      service: website-svc
+      service: ah-website
       tls:
         certResolver: letsencrypt
 
   services:
-    website-svc:
+    ah-website:
       loadBalancer:
         servers:
-          - url: "http://paas-website:80"
+          - url: "http://ah-website:80"
 ```
 
 ---

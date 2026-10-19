@@ -1,13 +1,20 @@
 # agentic-hosting
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![Register an agent, deploy from git, tail logs, and see it running](docs/assets/demo.gif)
+
+Real `ah --dev` loop (not a mock): register a tenant, Nixpacks-build from git, tail logs, service `running`. Source recording: [`docs/assets/demo.cast`](docs/assets/demo.cast).
+
 A self-hosted PaaS for bare metal servers, designed to be operated by AI agents via REST API. Includes an optional supervisory dashboard for humans.
 
 - **Repo**: github.com/dennisonbertram/agentic-hosting
-- **Docs**: [Documentation site](https://dennisonbertram.github.io/agentic-hosting/) (source in `docs-site/`)
+- **Docs**: [Documentation site](https://agentic.hosting/docs/) (source in `docs-site/`)
 - **Stack**: Go binary + Docker + gVisor + Traefik + Nixpacks + SQLite
 - **Language**: Go 1.25 (requires CGO for SQLite)
 - **Binary**: `ah`
 - **Default port**: 8080 (loopback only, behind Traefik)
+- **License**: [MIT](LICENSE)
 
 ## Give this to your agent
 
@@ -19,7 +26,7 @@ One shareable link is enough for an agent to install the control plane, register
 | **llms-full.txt** (all docs) | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms-full.txt |
 | **Operator skill** | https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md |
 
-Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://dennisonbertram.github.io/agentic-hosting/llms.txt`). The Claude Code skill and `/ah-*` slash commands in `.claude/` are the same API, split for interactive use. Details: [Give this to your agent](https://dennisonbertram.github.io/agentic-hosting/for-agents/).
+Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://agentic.hosting/docs/llms.txt`). The Claude Code skill and `/ah-*` slash commands in `.claude/` are the same API, split for interactive use. Details: [Give this to your agent](https://agentic.hosting/docs/for-agents/).
 
 ## Design Principles
 
@@ -70,6 +77,7 @@ Environment variables read by `ah`:
 | `AH_METER_DB_PATH` | Metering database path. Defaults to `ah-metering.db` next to the state database |
 | `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
 | `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |
+| `AH_CORS_ORIGINS` | Comma-separated browser Origin allowlist for the dashboard. Default: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`. `*` is ignored |
 
 ## Installation
 
@@ -344,8 +352,9 @@ DELETE /v1/databases/{dbID}                   # Delete database and data (not li
 
 - **Reconciler** (30s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
 - **GC** (5min interval): Cleans orphaned containers, volumes, images, build directories.
-- **Circuit breaker**: 5 crashes in 10 minutes stops restarting. Reset with `POST /v1/services/{id}/reset`.
-- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%.
+- **Circuit breaker**: 5 crashes in 10 minutes stops the container **and removes it**. Reset with `POST /v1/services/{id}/reset`, then `POST .../redeploy` (`/start` returns 409 because there is no container).
+- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Sync paths return **500** `{"error":"internal error"}` (not 503); service create returns 201 then fails async.
+- **Tenant resource defaults**: New tenants get **2048 MB / 2 CPUs** from `tenant_quotas`. Fallback 512 MB / 1 CPU only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 
 ### Backups
 
@@ -362,10 +371,10 @@ ah backup
 - **ReadonlyRootfs**: Container root filesystem is read-only; tmpfs mounts for `/tmp`, `/var/run`, `/var/tmp`, `/run`
 - **CapDrop=ALL**: No Linux capabilities
 - **no-new-privileges**: Containers cannot escalate privileges
-- **Encrypted secrets**: Env vars and database credentials encrypted with AES-256-GCM using tenant-derived keys
+- **Encrypted secrets**: Env vars and database credentials encrypted with AES-256-GCM using the **server master key**. There is no per-tenant key separation yet.
 - **API keys**: HMAC-SHA256 of `keyID.secret` using the master key (constant-time compare). bcrypt is used for passwords, not API keys.
-- **Rate limiting**: Per-tenant (100 req/s burst 200) + global (500 req/s burst 1000)
-- **Idempotency**: Authenticated mutating routes accept `Idempotency-Key` (tenant + method + path + body hash). TTL is **10 minutes**. `POST /v1/environments/{id}/exec` is excluded.
+- **Rate limiting**: Per-tenant (default 100 req/s burst 200, from `tenant_quotas.api_rate_limit`) + global (500 req/s burst 1000)
+- **Idempotency**: `Idempotency-Key` applies to **POST and PUT only** (not DELETE/PATCH; no PUT routes exist). Scoped tenant + method + path + body hash. TTL is **10 minutes**. `POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.
 
 ### Networking
 
@@ -446,7 +455,7 @@ For deploys, status, build logs and databases, use the `ahc` CLI:
 
 ```bash
 ahc deploy https://github.com/org/repo my-app
-ahc deploy nginx:alpine my-site
+ahc deploy nginxinc/nginx-unprivileged my-site --port 8080
 ahc status
 ahc db provision my-app postgres
 ahc build logs my-app
@@ -467,13 +476,12 @@ The public docs match the [agentic.hosting](https://agentic.hosting) landing pag
 cd docs-site
 npm ci
 npm run dev          # http://127.0.0.1:4321/
-npm run build        # GitHub Pages defaults (base /agentic-hosting/)
-npm run build:site   # for the website container (base /docs/)
+npm run build        # GitHub Pages + agentic.hosting (base /docs/)
 ```
 
-GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. After enabling Pages (source: GitHub Actions), the site is `https://dennisonbertram.github.io/agentic-hosting/`.
+GitHub Pages deploys on push to `main` via `.github/workflows/docs.yml`. The combined artifact serves the homepage from `website/` at `https://agentic.hosting/` and the Astro docs at `https://agentic.hosting/docs/`. Custom domain and DNS steps: [`docs/website/github-pages.md`](docs/website/github-pages.md). The static dashboard at `/dashboard/` defaults its API base to `https://api.agentic.hosting` on that host (`?api=` overrides). The API reflects `Access-Control-Allow-Origin` for that allowlist (`AH_CORS_ORIGINS` / `--cors-origins`); it never uses `*` and does not set credentials.
 
-To bake docs into the nginx website image, build from the **repository root**:
+The Hetzner website container still builds from the **repository root** (used for `www.agentic.hosting`, which 301s to the GitHub repo):
 
 ```bash
 docker build -f website/Dockerfile -t website .
@@ -481,4 +489,8 @@ docker build -f website/Dockerfile -t website .
 
 ## Planned Work
 
-See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://dennisonbertram.github.io/agentic-hosting/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.
+See [GitHub Issues](https://github.com/dennisonbertram/agentic-hosting/issues) and the [docs roadmap](https://agentic.hosting/docs/roadmap/). Known gaps include HKDF key separation, billing (metering is query-only), Prometheus export, and multi-node SQLite. Audit log lines already exist for sensitive reads.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). Copyright © 2026 Dennison Bertram.

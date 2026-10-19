@@ -10,34 +10,34 @@ Start here: fetch this file, then the operator skill, then `llms-full.txt` if yo
 
 ## Onboarding
 
-- [Give this to your agent](https://dennisonbertram.github.io/agentic-hosting/for-agents/): shareable URLs for llms.txt and the skill
+- [Give this to your agent](https://agentic.hosting/docs/for-agents/): shareable URLs for llms.txt and the skill
 - [Operator skill](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md): standalone Agent Skills file — install the server, register, deploy, databases, logs, API
 - [Full docs dump](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms-full.txt): every docs-site page plus the API reference in one markdown file
-- [Install & quickstart](https://dennisonbertram.github.io/agentic-hosting/install/): Docker, gVisor, Nixpacks, Traefik, systemd `ah.service`
-- [Registration & API keys](https://dennisonbertram.github.io/agentic-hosting/auth/): bootstrap token → tenant → `api_key` (shown once)
+- [Install & quickstart](https://agentic.hosting/docs/install/): Docker, gVisor, Nixpacks, Traefik, systemd `ah.service`
+- [Registration & API keys](https://agentic.hosting/docs/auth/): bootstrap token → tenant → `api_key` (shown once)
 
 ## Operate
 
-- [Deploy from git](https://dennisonbertram.github.io/agentic-hosting/deploy/): `POST /v1/services` then `POST .../builds` with `source_type=git`
-- [Postgres & Redis](https://dennisonbertram.github.io/agentic-hosting/databases/): `POST /v1/databases` + connection-string + env + restart
-- [REST API](https://dennisonbertram.github.io/agentic-hosting/api/): every `/v1/` route from `internal/api/server.go`
-- [Env vars & secrets](https://dennisonbertram.github.io/agentic-hosting/env/): AES-256-GCM at rest; POST merges; forbidden PATH / LD_*
-- [Reconciliation](https://dennisonbertram.github.io/agentic-hosting/reconciliation/): 30s loop, crash-loop circuit (5 / 10 min)
-- [Crash-loop & disk guards](https://dennisonbertram.github.io/agentic-hosting/guards/): 80% warn, 90% block
-- [Rate limits](https://dennisonbertram.github.io/agentic-hosting/rate-limits/): 100/200 tenant, 500/1000 global, register 5/IP/hr
-- [Backups](https://dennisonbertram.github.io/agentic-hosting/backups/): `ah backup` → `/var/lib/ah/backups/`
-- [Troubleshooting](https://dennisonbertram.github.io/agentic-hosting/troubleshooting/): HTTPS required, circuit open, CGO, gVisor
+- [Deploy from git](https://agentic.hosting/docs/deploy/): `POST /v1/services` then `POST .../builds` with `source_type=git`
+- [Postgres & Redis](https://agentic.hosting/docs/databases/): `POST /v1/databases` + connection-string + env + restart
+- [REST API](https://agentic.hosting/docs/api/): every `/v1/` route from `internal/api/server.go`
+- [Env vars & secrets](https://agentic.hosting/docs/env/): AES-256-GCM at rest; POST merges; forbidden PATH / LD_*
+- [Reconciliation](https://agentic.hosting/docs/reconciliation/): 30s loop, crash-loop circuit (5 / 10 min)
+- [Crash-loop & disk guards](https://agentic.hosting/docs/guards/): 80% warn, 90% block
+- [Rate limits](https://agentic.hosting/docs/rate-limits/): 100/200 tenant, 500/1000 global, register 5/IP/hr
+- [Backups](https://agentic.hosting/docs/backups/): `ah backup` → `/var/lib/ah/backups/`
+- [Troubleshooting](https://agentic.hosting/docs/troubleshooting/): HTTPS required, circuit open, CGO, gVisor
 
 ## Optional
 
-- [Overview](https://dennisonbertram.github.io/agentic-hosting/): what the control plane is
-- [Why it exists](https://dennisonbertram.github.io/agentic-hosting/why/): agents vs human dashboards
-- [Architecture](https://dennisonbertram.github.io/agentic-hosting/architecture/): ah, Docker, gVisor, Traefik, Nixpacks, SQLite
-- [Security model](https://dennisonbertram.github.io/agentic-hosting/security/): HMAC API keys, gVisor, loopback API
-- [Claude Code slash commands](https://dennisonbertram.github.io/agentic-hosting/claude-code/): `/ah-deploy` `/ah-status` `/ah-db` `/ah-logs` `/ah-register` `/ah-snapshot`
+- [Overview](https://agentic.hosting/docs/): what the control plane is
+- [Why it exists](https://agentic.hosting/docs/why/): agents vs human dashboards
+- [Architecture](https://agentic.hosting/docs/architecture/): ah, Docker, gVisor, Traefik, Nixpacks, SQLite
+- [Security model](https://agentic.hosting/docs/security/): HMAC API keys, gVisor, loopback API
+- [Claude Code slash commands](https://agentic.hosting/docs/claude-code/): `/ah-deploy` `/ah-status` `/ah-db` `/ah-logs` `/ah-register` `/ah-snapshot`
 - [In-repo Claude skill](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/.claude/skills/agentic-hosting/SKILL.md): same operator flows used by Claude Code
 - [API reference (skill)](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/.claude/skills/agentic-hosting/references/api-reference.md): endpoint shapes
 - [Server setup (skill)](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/.claude/skills/agentic-hosting/references/server-setup.md): bare-metal install
-- [Roadmap](https://dennisonbertram.github.io/agentic-hosting/roadmap/): what the code does not do yet
+- [Roadmap](https://agentic.hosting/docs/roadmap/): what the code does not do yet
 - [GitHub repository](https://github.com/dennisonbertram/agentic-hosting): source and issues
 - [Corrections](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/docs-site/CORRECTIONS.md): stale claims vs live code

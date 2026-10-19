@@ -11,6 +11,16 @@ Operator docs, the homepage, and the Claude skill drifted from `internal/`. This
 | `POST /v1/tenant/reactivate` | `POST /v1/tenants/{tenantID}/reactivate` (bootstrap header; returns a new `api_key`) | `internal/api/server.go`, `handleTenantReactivate` |
 | Disk block at 95% | Warn at **80%**, block new deploys/builds/DBs at **90%** | `diskcheck.CheckAll(..., 80, 90)` |
 | Idempotency TTL 24 hours | **10 minutes**; scoped tenant + method + path + body hash. `POST /v1/environments/{id}/exec` is excluded | `internal/middleware/idempotency.go` |
+| Idempotency on POST/PUT/DELETE (or “all mutating routes”) | **POST and PUT only**; DELETE and PATCH are skipped. No PUT routes exist. `POST /v1/auth/keys` excluded. Only 2xx stored; in-memory; max 50 keys/tenant | `idempotency.go:146`, `:157-162` |
+| Disk ≥90% returns 503 | Sync paths (build, DB create, restart, redeploy) return **500** `{"error":"internal error"}`. Service create returns 201; async deploy sets `failed` + `last_error` | `diskcheck.go`; `apierr.WriteAPIError` fallback; `handleServiceCreate` |
+| Circuit reset then `/start` | Reset **removes** the container; `/start` returns 409. Use `/reset` then `/redeploy` | `services.go` `ResetCircuitBreaker`, `Start` |
+| Poll `status == "circuit_open"` | `status` stays `crashed`; `circuit_open` is a boolean | `services.Service` JSON; reconciler `tripBreaker` |
+| Default per-app resources 512 MB / 1 CPU | New tenants: **2048 MB / 2 CPUs** from `tenant_quotas`. 512/1 is the RunContainer fallback if the quota row cannot be loaded | `state_001_init.sql`; `docker/client.go`; `getResourceLimits` |
+| Quickstart `nginx:alpine` | Crash-loops under ReadonlyRootfs. Use `nginxinc/nginx-unprivileged` on **8080** | `docker/client.go` tmpfs list; InstaBox investigation |
+| Secrets use “tenant-derived keys” | AES-256-GCM with the **server master key**; no per-tenant key separation | `internal/crypto`; `docs/security/hkdf-key-separation-plan.md` |
+| HTTP limiter ignores `tenant_quotas.api_rate_limit` | Auth reads the column per request; limiter uses it with burst 2× | `middleware/auth.go`, `ratelimit.go` |
+| Reconciler interval 60s (AGENT_RUNBOOK) | Every **30 seconds** | `cmd/ah/main.go` |
+| Unhealthy containers are stopped; auto-recovery restarts | Unhealthy containers are **restarted**. Auto-recovery leaves the service **stopped** (no container) | `reconciler.go` |
 | Runtime logs unavailable (issue #11) | `GET /v1/services/{id}/logs?follow=true&tail=100` streams Docker stdout/stderr | `handleServiceLogs` |
 | `PidsLimit: 100` | `PidsLimit: 256` | `internal/docker/client.go` |
 | API keys hashed with bcrypt | HMAC-SHA256 of `keyID.secret` with the master key; bcrypt is for passwords | `internal/crypto` |

@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -64,6 +64,7 @@ func main() {
 	dbPath := flag.String("db-path", cfg.DBPath, "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", cfg.MasterKeyPath, "Path to master encryption key")
 	baseDomain := flag.String("base-domain", cfg.BaseDomain, "Base domain for public service URLs (e.g. example.com)")
+	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
@@ -231,6 +232,12 @@ func main() {
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
 	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
+	corsAllow := config.ParseCORSOrigins(*corsOrigins)
+	if len(corsAllow) == 0 {
+		log.Printf("CORS: disabled (empty allowlist)")
+	} else {
+		log.Printf("CORS origins: %s", strings.Join(corsAllow, ", "))
+	}
 
 	// Create server
 	srv := api.NewServer(api.ServerConfig{
@@ -251,6 +258,7 @@ func main() {
 		TraefikConfigDir:      cfg.TraefikConfigDir,
 		DataDir:               filepath.Dir(*dbPath),
 		ExternalTLSTerminated: cfg.ExternalTLSTerminated,
+		CORSOrigins:           corsAllow,
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).

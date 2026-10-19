@@ -15,4 +15,4 @@ Regenerate dumps:
 node docs-site/scripts/generate-llms.mjs --check
 ```
 
-`npm run build` in `docs-site/` runs that first (`prebuild`). Website image also copies `llms.txt` and `llms-full.txt` to the nginx docroot so `https://agentic.hosting/llms.txt` works.
+`npm run build` in `docs-site/` runs that first (`prebuild`). GitHub Pages copies `llms.txt` and `llms-full.txt` to the apex (`https://agentic.hosting/llms.txt`) and the docs build also serves them at `https://agentic.hosting/docs/llms.txt`. The Hetzner website image still copies them for leftover IP/apex traffic before DNS cutover.

@@ -22,7 +22,7 @@
         <div class="setup-title">Connect</div>
         <label class="field">
           <span>API base URL</span>
-          <input id="api-base" name="apiBase" type="url" placeholder="https://your-host.example.com" autocomplete="url">
+          <input id="api-base" name="apiBase" type="url" placeholder="https://api.agentic.hosting" autocomplete="url">
         </label>
         <label class="field">
           <span>API key</span>
@@ -32,7 +32,7 @@
           <button class="primary-button" type="submit">Connect</button>
           <button class="ghost-button" id="disconnect-button" type="button">Clear</button>
         </div>
-        <p class="field-hint">Use the same origin when possible. If the API is elsewhere, the browser still needs CORS access.</p>
+        <p class="field-hint">This page is static. On agentic.hosting it defaults to https://api.agentic.hosting (override with ?api=). Same-origin is only assumed for self-hosted copies. The API allowlists this origin (and www / github.io) via CORS; other hosts need AH_CORS_ORIGINS.</p>
       </form>
 
       <nav class="nav-list" id="nav-list">

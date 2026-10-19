@@ -34,7 +34,7 @@ Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (met
 | `Authorization: Bearer …` | All tenant routes |
 | `X-Bootstrap-Token` | Register (and recover/reactivate/quotas only if `AH_ADMIN_TOKEN` is unset) |
 | `X-Admin-Token` | Recover, reactivate, quotas when `AH_ADMIN_TOKEN` is set |
-| `Idempotency-Key` | Authenticated mutating routes except `POST .../exec` |
+| `Idempotency-Key` | POST and PUT only (not DELETE/PATCH; no PUT routes). Excluded: `POST /v1/auth/keys`, `POST .../exec` |
 | `Content-Type: application/json` | Bodies |
 | `X-Forwarded-Proto: https` | Required in production from loopback Traefik |
 
@@ -161,13 +161,14 @@ Bootstrap + `{"email"}`.
 ### `POST /v1/services`
 
 ```json
-{"name":"web","image":"nginx:alpine","port":80,"env":{"KEY":"val"}}
+{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080,"env":{"KEY":"val"}}
 ```
 
 - `name` required, max 128
 - `image` validated (Docker Hub or loopback registry)
 - `port` 0 means default **8000**; explicit values must be 1–65535
 - Returns **201** with `status: "deploying"`; deploy runs in a 10-minute background context
+- Stock `nginx:alpine` crash-loops under ReadonlyRootfs (no `/var/cache/nginx` tmpfs). Use `nginxinc/nginx-unprivileged` on **8080**.
 
 ### `POST /v1/services?from_snapshot={id}`
 
@@ -388,8 +389,8 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | 413 | Body > 1 MB |
 | 422 | Registration uniqueness (deliberately vague) |
 | 429 | Rate limit |
-| 500 | Unexpected |
-| 503 | Docker/build/metering/registration unavailable; often disk |
+| 500 | Unexpected, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) |
+| 503 | Docker/build/metering/registration unavailable (manager nil) |
 
 ## Timeouts
 

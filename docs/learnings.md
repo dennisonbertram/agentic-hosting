@@ -21,6 +21,13 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | `GET/PUT .../environments/{id}/files` | Not routed; sync is `POST .../sync` |
 | PATCH tenant email | PATCH only accepts `name` |
 | Homepage `/deploy` commands | Repo files are `/ah-*`; `install.sh` now installs those same files |
+| Disk ≥90% → 503 | Sync paths return 500 `{"error":"internal error"}`; create returns 201 then fails async |
+| Circuit reset then `/start` | Reset removes the container; `/start` is 409; `/redeploy` creates a new one |
+| Poll `status == "circuit_open"` | `circuit_open` is a boolean; `status` stays `crashed` |
+| Idempotency on DELETE | POST and PUT only (`idempotency.go` method check) |
+| Default resources 512 MB / 1 CPU | New tenants: 2048 MB / 2 CPUs from `tenant_quotas` |
+| Secrets use tenant-derived keys | Single server master key; no per-tenant HKDF yet |
+| Rate limiter ignores `api_rate_limit` | Auth reads the column; limiter uses it with burst 2× |
 
 ## Build constraints
 

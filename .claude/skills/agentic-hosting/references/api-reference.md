@@ -98,8 +98,9 @@ Body: {"token":"<bootstrap-token>"}
 POST /v1/services
 Body: {
   "name": "string",           # required, max 128
-  "image": "nginx:alpine",    # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
-  "port": 80,                 # 0 / omitted → 8000; must be 1–65535 if set
+  "image": "nginxinc/nginx-unprivileged",  # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
+  "port": 8080,               # 0 / omitted → 8000; must be 1–65535 if set
+  # Stock nginx:alpine crash-loops under ReadonlyRootfs (needs /var/cache/nginx).
   "env": {"KEY": "value"}     # optional inline env vars
 }
 # There is no memory_mb / cpu_count on CreateRequest.
@@ -336,16 +337,15 @@ GET /v1/activity?limit=50
 | `running` | Container is up and passing health checks |
 | `stopped` | Manually stopped |
 | `failed` | Deploy timed out (10 min) or fatal error |
-| `circuit_open` | Crash-looped (5 crashes / 10 min); manually reset required |
-| `crashed` | Container exited unexpectedly; reconciler will restart |
+| `crashed` | Container exited unexpectedly; `circuit_open` is a **boolean field**, not a status. After 5 crashes / 10 min the breaker trips, the container is removed, and status stays `crashed` until reset |
 
 ---
 
 ## Idempotency
 
-Add to any mutating request to make retries safe:
+Add to **POST and PUT** requests (not DELETE/PATCH; no PUT routes exist today):
 ```
 Idempotency-Key: <any-stable-uuid>
 ```
-Same key + same tenant + same method + same path + same body hash = same result. TTL is 10 minutes.
-`POST /v1/environments/{id}/exec` is not idempotent.
+Same key + same tenant + same method + same path + same body hash = replayed 2xx. TTL is 10 minutes.
+`POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.

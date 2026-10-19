@@ -21,7 +21,7 @@ Every tenant **service** container (`RunContainer`):
 | Rootfs | read-only + tmpfs on `/tmp`, `/var/run`, `/var/tmp`, `/run` |
 | PIDs | 256 |
 | Swap | `MemorySwap = Memory` |
-| Restart | `unless-stopped` (defeated when the circuit opens — reconciler stops the container) |
+| Restart | `unless-stopped` (defeated when the circuit opens — reconciler **stops and removes** the container) |
 | Traefik Docker provider | `traefik.enable=false` so image labels cannot register routes |
 
 Database and environment containers also use `runsc` (see `internal/docker` / `internal/environments`).
@@ -48,7 +48,7 @@ Tenant containers are not given a path to the Docker socket.
 | Master key | 32-byte file, chmod 600 |
 | Bootstrap tokens | env only, HMAC-compared |
 
-`ah rotate-key` re-encrypts rows. There is **no** HKDF domain separation in the running crypto helpers yet (that is a planned doc under `docs/security/`).
+`ah rotate-key` re-encrypts rows. There is **no** HKDF domain separation and **no** per-tenant key derivation in the running crypto helpers yet (plan: `docs/security/hkdf-key-separation-plan.md`). All AES-256-GCM columns use the server master key.
 
 ## API / HTTP
 

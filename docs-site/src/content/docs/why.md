@@ -16,8 +16,8 @@ agentic-hosting was built so an agent can own the full lifecycle of a service wi
 | Failure mode | What `ah` does instead |
 |--------------|------------------------|
 | HTML 500 pages | Every handler writes JSON. Errors are `{"error":"<message>"}` via `httpx.WriteError` / `apierr.WriteAPIError`. |
-| Duplicate creates on retry | Authenticated mutating routes run through an idempotency store keyed by tenant + method + path + `Idempotency-Key`. TTL is **10 minutes**. Body hash mismatches return 409. |
-| Crash loops at machine speed | Reconciler opens a circuit after **5 crashes in 600 seconds**, stops the container, and backs off 30m → 1h → 4h. |
+| Duplicate creates on retry | **POST and PUT** run through an idempotency store keyed by tenant + method + path + `Idempotency-Key` (not DELETE/PATCH). TTL is **10 minutes**. Body hash mismatches return 409. |
+| Crash loops at machine speed | Reconciler opens a circuit after **5 crashes in 600 seconds**, **stops and removes** the container, and backs off 30m → 1h → 4h (circuit closes; service stays stopped until redeploy). |
 | Unbounded blast radius | Keys belong to one tenant. Max **20** active keys. Registration requires a bootstrap token (unless `--dev --open-registration`). |
 | Disk filled by a runaway deploy | `diskcheck.CheckAll` on `/var/lib/ah` and `/var/lib/docker`: warn at **80%**, **block at 90%** on deploy, build, database create, kanban create, and backup. |
 
@@ -53,7 +53,7 @@ There is no platform fee in the binary. Quotas are per-tenant rows in `tenant_qu
 | API keys | 20 (enforced in `handleKeyCreate`, not the quota table) |
 | Tenants on the instance | 1000 active |
 
-Operators raise quotas with `PATCH /v1/tenants/{tenantID}/quotas` and a bootstrap token.
+New tenants therefore get **2048 MB / 2 CPUs** as container limits (not the 512 MB / 1 CPU fallback in `RunContainer`, which applies only when the quota row cannot be loaded). `PATCH /v1/tenants/{tenantID}/quotas` currently updates service/database/build/env-var caps, not memory/CPU/disk; those quota columns are still operator-configurable in the database. All limits are still bounded by the host’s RAM, CPU, and disk.
 
 ## Related reading
 

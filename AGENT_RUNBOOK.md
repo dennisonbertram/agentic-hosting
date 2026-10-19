@@ -240,17 +240,22 @@ for i in $(seq 1 120); do
   RESPONSE=$(curl -s -H "Authorization: Bearer $API_KEY" \
     "$BASE_URL/v1/services/$SERVICE_ID")
   STATUS=$(echo "$RESPONSE" | jq -r '.status')
-  echo "[$i/120] Status: $STATUS"
+  CIRCUIT=$(echo "$RESPONSE" | jq -r '.circuit_open')
+  echo "[$i/120] Status: $STATUS circuit_open=$CIRCUIT"
+  if [ "$CIRCUIT" = "true" ]; then
+    echo "Circuit open (boolean field; status stays crashed). Fix the app, POST /reset, then POST /redeploy."
+    break
+  fi
   case "$STATUS" in
     running)
       echo "Service is up."
       break
       ;;
-    failed|circuit_open)
-      echo "Service failed. Check logs."
+    failed)
+      echo "Service failed. Check last_error / deployments (logs 409 if no container)."
       break
       ;;
-    deploying|starting)
+    deploying|starting|crashed|stopped)
       sleep 5
       ;;
     *)
@@ -692,20 +697,20 @@ If a service stays in `deploying` for more than 10 minutes, or transitions to `f
    ```
 4. If it still does not move, check the ah daemon logs on the server: `journalctl -u ah -n 100 --no-pager`
 
-### Circuit Breaker Open (`circuit_open` status)
+### Circuit Breaker Open (`circuit_open: true`)
 
-The circuit breaker opens when a service crashes 5 times within 10 minutes. This prevents a crash-looping container from consuming resources.
+The circuit breaker opens when a service crashes 5 times within 10 minutes. `status` stays `crashed`; `circuit_open` is a **boolean**, not a status string. The container is **stopped and removed**, so `/logs` returns 409.
 
-1. Investigate why it crashed. Check recent logs if your service emits them.
+1. Investigate why it crashed. Read `last_error` on `GET /v1/services/$SERVICE_ID` and `/deployments` — not `/logs`.
 2. Fix the underlying issue — bad config, missing env var, OOM, etc.
 3. Once fixed (e.g., after updating env vars or deploying a new image), reset the circuit breaker:
    ```bash
    curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/reset" \
      -H "Authorization: Bearer $API_KEY" | jq .
    ```
-4. Start the service:
+4. Redeploy the service (`/start` returns 409 because reset cleared `container_id`):
    ```bash
-   curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/start" \
+   curl -s -X POST "$BASE_URL/v1/services/$SERVICE_ID/redeploy" \
      -H "Authorization: Bearer $API_KEY" | jq .
    ```
 5. Watch status for the next few minutes to confirm it stays `running`.
@@ -794,11 +799,11 @@ Check:
 
 If Docker or gVisor is not OK, new deployments will fail and existing services may be degraded.
 
-### 3 — Check for Services in `circuit_open` State
+### 3 — Check for Services with `circuit_open: true`
 
 ```bash
 curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/services" | \
-  jq '[.[] | select(.status == "circuit_open")]'
+  jq '[.[] | select(.circuit_open == true)]'
 ```
 
 Any results here mean a service is crash-looping. Investigate and fix before the service owner notices.
@@ -840,12 +845,12 @@ You do not control these directly, but understanding them helps you reason about
 
 | Process | Interval | What it does |
 |---------|----------|--------------|
-| **Reconciler** | Every 60 seconds | Scans all services, ensures desired state matches actual state. If a service should be running but its container is gone, the reconciler restarts it. |
+| **Reconciler** | Every 30 seconds | Observes Docker restarts, counts crashes, restarts unhealthy containers, trips the breaker. Does not silently recreate a missing container. |
 | **Garbage Collector** | Every 5 minutes | Cleans up old Docker images, stopped containers, and other stale resources. If you delete a service, the GC eventually removes its underlying container and image. |
-| **Circuit Breaker** | Continuous | Monitors crash events per service. After 5 crashes in a 10-minute window, it opens the circuit and stops the service. You must call `/reset` and then `/start` to recover. |
+| **Circuit Breaker** | Continuous | After 5 crashes in 10 minutes, stops **and removes** the container. Call `/reset` then `/redeploy` (`/start` returns 409). |
 | **Disk Watchdog** | Continuous | Monitors disk usage. Above 90%, new deploys are rejected. The reconciler will not start new containers until disk is below the threshold. |
 
-The reconciler means that manually stopping a Docker container outside the API will cause it to be restarted within 60 seconds. Always use the API to manage service state.
+The reconciler means that manually stopping a Docker container outside the API is counted as a crash. Always use the API to manage service state.
 
 ---
 
@@ -861,7 +866,7 @@ The reconciler means that manually stopping a Docker container outside the API w
 | Disk watermark (blocks new deploys) | 90% used |
 | Database creation timeout | Up to 30 seconds |
 | Build sources supported | GitHub, GitLab, Bitbucket, sr.ht, Codeberg (HTTPS only) |
-| Idempotency key scope | POST, PUT, DELETE requests |
+| Idempotency key scope | POST and PUT only (not DELETE/PATCH; `POST /v1/auth/keys` excluded) |
 | Service registration header | `X-Bootstrap-Token` (HMAC-compared) |
 | Key recovery rate limit (per IP) | 5 per hour |
 | Key recovery rate limit (global) | 20 per hour |

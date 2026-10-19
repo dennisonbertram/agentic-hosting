@@ -2,18 +2,21 @@
 
 ## Idempotency
 
-Add `Idempotency-Key: <uuid>` to any mutating request to make it safe to retry on network timeout:
+Add `Idempotency-Key: <uuid>` to **POST and PUT** requests to make retries safe. DELETE and PATCH are not covered. No PUT routes exist today.
 
 ```bash
 -H "Idempotency-Key: $(uuidgen)"
 ```
 
 Rules:
-- Same key + same tenant + same endpoint = same result, no duplicate resource created
+- Same key + same tenant + same method + same path + same body hash = replayed response
+- Different body with the same key → **409**
+- Only **2xx** responses are stored; failed requests re-run on retry
 - Most important for: database creation and build triggers (the two slowest operations)
 - Key scope: per-tenant, per-endpoint, per HTTP method
 - Expiry: keys expire after **10 minutes** (`idempotencyTTL` in `internal/middleware/idempotency.go`)
-- `POST /v1/environments/{id}/exec` is excluded from idempotency
+- In-memory only (restart clears); max 50 keys per tenant (oldest evicted)
+- `POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded
 
 ## Rate Limits
 
@@ -30,6 +33,7 @@ On `429 Too Many Requests`: read the `Retry-After` header. If absent, back off e
 
 | Resource | Limit |
 |----------|-------|
+| Default memory / CPU (new tenant) | **2048 MB / 2 CPUs** from `tenant_quotas` (applied as container limits). Fallback 512 MB / 1 CPU only if the quota row cannot be loaded. Configurable per tenant; still bounded by the host. |
 | Databases per tenant | 3 |
 | API keys per tenant | 20 |
 | Env vars per service | Schema default **50** (`max_env_vars_per_service`); a single POST may set at most **100** keys |
@@ -41,20 +45,21 @@ On `429 Too Many Requests`: read the `Retry-After` header. If absent, back off e
 ## Circuit Breaker
 
 The circuit breaker opens after **5 crashes within 10 minutes**. When open:
-- Service status becomes `circuit_open`
-- Container is stopped
+- `status` stays `crashed`; `circuit_open` is a **boolean** (never a status string)
+- Container is **stopped and removed**; `container_id` is cleared
+- `/logs` returns 409 `service has no container`
 - Reconciler will not restart it automatically
 
 Recovery:
-1. Investigate and fix the root cause (bad env var, OOM, crashing app)
+1. Investigate and fix the root cause (bad env var, OOM, crashing app). Use `GET /v1/services/$SERVICE_ID` (`last_error`) and `/deployments` — not `/logs`
 2. Deploy a new image or fix config
 3. Reset: `POST /v1/services/$SERVICE_ID/reset`
-4. Start: `POST /v1/services/$SERVICE_ID/start`
+4. Redeploy: `POST /v1/services/$SERVICE_ID/redeploy` — **not** `/start` (start returns 409 because reset removed the container)
 5. Watch for `running` status
 
 **Do not loop-reset without fixing root cause.** The circuit breaker protects the server.
 
-Auto-recovery: the server has exponential backoff auto-recovery (30m → 1h → 4h). This resets the circuit and attempts restart automatically — but only if the app actually runs successfully. If it keeps crashing, the circuit re-opens.
+Auto-recovery: exponential backoff (30m → 1h → 4h) **closes the circuit and leaves the service stopped**. Nothing restarts it. Use `/redeploy` (or a new build). If it keeps crashing, the circuit re-opens.
 
 ## Disk Management
 
@@ -75,9 +80,9 @@ ssh root@<server> "docker image prune -af && docker container prune -f"
 
 ## Reconciler
 
-The reconciler runs every **30 seconds**. It scans all services and ensures desired state matches actual Docker state. If a service should be `running` but its container is gone, the reconciler restarts it within 30 seconds.
+The reconciler runs every **30 seconds**. Docker itself restarts crashed containers (`unless-stopped`). The reconciler observes those restarts, counts crashes, and trips the breaker. Unhealthy containers are **restarted** (not stopped). A missing container on a `running` row is counted as a crash — it is not silently recreated.
 
-Implication: manually stopping a Docker container outside the API will cause it to restart within 30 seconds. Always use the API to manage service state.
+Implication: `docker stop` on a tenant container is treated as a crash. Always use the API to manage service state.
 
 ## Garbage Collector
 
@@ -99,8 +104,8 @@ Deletion via the API is soft-delete — the GC handles actual container/volume c
 | `409 Conflict` | Duplicate name or idempotency conflict | Check if resource already exists |
 | `422 Unprocessable Entity` | Validation failed | Read error message; common: name already taken, bad email format |
 | `429 Too Many Requests` | Rate limited | Respect `Retry-After` header; exponential backoff |
-| `500 Internal Server Error` | Server bug | Check server logs: `journalctl -u ah -n 50` |
-| `503 Service Unavailable` | Disk >90% or Docker/gVisor unavailable | Check `/v1/system/health/detailed` |
+| `500 Internal Server Error` | Untyped errors, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) | Check `/v1/system/health/detailed?fresh=true` and `journalctl -u ah -n 50` |
+| `503 Service Unavailable` | Docker/build/metering/registration unavailable (manager nil) | Check `/v1/system/health/detailed` |
 
 ## Pagination
 

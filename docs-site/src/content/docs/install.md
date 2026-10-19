@@ -141,7 +141,8 @@ curl -s -X POST "$AH_URL/v1/services" \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"name":"web","image":"nginx:alpine","port":80}'
+  -d '{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080}'
+# Stock nginx:alpine crash-loops under ReadonlyRootfs (no /var/cache/nginx tmpfs).
 ```
 
 Or with the CLI:
@@ -149,7 +150,7 @@ Or with the CLI:
 ```bash
 curl -fsSL https://agentic.hosting/install-cli.sh | bash
 ahc configure --url "$AH_URL" --key "$AH_KEY"
-ahc deploy nginx:alpine web --port 80
+ahc deploy nginxinc/nginx-unprivileged web --port 8080
 ahc status
 ```
 

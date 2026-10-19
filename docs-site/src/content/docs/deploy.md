@@ -78,12 +78,14 @@ Stuck `deploying` longer than **10 minutes** is marked `failed` by the reconcile
 
 Arbitrary registries are rejected.
 
+Quickstart images must survive **ReadonlyRootfs** + `CapDrop ALL` (tmpfs only on `/tmp`, `/var/run`, `/var/tmp`, `/run`). Stock `nginx:alpine` crash-loops trying to `mkdir /var/cache/nginx`. Use `nginxinc/nginx-unprivileged` on port **8080**.
+
 ## CLI and skill shortcuts
 
 ```bash
 ahc deploy https://github.com/org/repo web --port 3000
 # or
-ahc deploy nginx:alpine web --port 80
+ahc deploy nginxinc/nginx-unprivileged web --port 8080
 ```
 
 `ahc deploy` treats `http://` or `https://` as git. The Claude command `/ah-deploy` does the same, then streams build logs.

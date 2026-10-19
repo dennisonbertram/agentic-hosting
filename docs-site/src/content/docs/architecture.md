@@ -63,7 +63,7 @@ Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_P
 - `Runtime: "runsc"`
 - `PidsLimit: 256`
 - `MemorySwap = Memory` (no extra swap)
-- Default 512 MB / 1 CPU unless tenant limits say otherwise
+- Memory / CPU from `tenant_quotas` (new tenants: **2048 MB / 2 CPUs**). Fallback **512 MB / 1 CPU** only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 - `CapDrop: ALL`, `SecurityOpt: no-new-privileges`, `ReadonlyRootfs: true`
 - tmpfs on `/tmp` (64m), `/var/run`, `/var/tmp`, `/run` (16m each), `noexec,nosuid`
 - `RestartPolicy: unless-stopped`
@@ -115,7 +115,7 @@ Migrations live in `internal/db/migrations/` (`state_001` … `state_019`, `mete
 4. HTTPS check (unless `--dev`)
 5. Auth (Bearer `keyID.secret` → HMAC-SHA256 verify against stored hash)
 6. Per-tenant + global token buckets
-7. Idempotency (mutating authenticated routes; **not** `POST /v1/environments/{id}/exec`)
+7. Idempotency (**POST and PUT** only; **not** DELETE/PATCH, **not** `POST /v1/auth/keys` or `POST /v1/environments/{id}/exec`; no PUT routes exist)
 8. 30s timeout on short routes; logs, DB create, kanban create, environment create/sync skip that timeout
 
 ## Packages that matter

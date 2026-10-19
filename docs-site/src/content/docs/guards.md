@@ -17,8 +17,8 @@ Implemented in `internal/reconciler` (not a library).
 |-----------|--------|
 | Crash window | 600 seconds |
 | Open threshold | `crash_count >= 5` inside the window |
-| On open | Container stopped, `circuit_open = 1` |
-| Manual reset | `POST /v1/services/{id}/reset` |
+| On open | Container **stopped and removed**, `container_id` cleared, `circuit_open = 1` |
+| Manual reset | `POST /v1/services/{id}/reset` then `POST .../redeploy` (`/start` returns 409 — no container) |
 
 Backoff (`circuitRetryBackoff`):
 
@@ -28,11 +28,11 @@ Backoff (`circuitRetryBackoff`):
 | 2 | 1 hour |
 | 3+ | 4 hours |
 
-When `circuit_retry_at` elapses, the reconciler clears the circuit and sets status `stopped` so a subsequent start can happen. If the app still crash-loops, the circuit opens again and the count escalates.
+When `circuit_retry_at` elapses, the reconciler clears the circuit and sets status `stopped`. The container is already gone; **nothing restarts it**. Use `POST .../redeploy` (not `/start`). If the app still crash-loops, the circuit opens again and the count escalates.
 
 **Do not script reset in a tight loop.** Reset is for “we fixed the binary / env.”
 
-Statuses you will see: `crashed`, and after enough failures the circuit columns flip. Some docs say `circuit_open` as a status string; the DB also has a boolean `circuit_open` column. Read both `status` and `circuit_open` on `GET /v1/services/{id}`.
+`status` is never the string `"circuit_open"`. After the breaker trips, `status` stays `crashed` and `circuit_open` is a separate boolean. After auto-recovery or manual reset, `status` is `stopped`. Read both fields on `GET /v1/services/{id}`.
 
 ## Disk watermarks
 
@@ -64,6 +64,9 @@ Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `d
 | Queued deploys | 20 |
 | Build slots | 10 |
 | PIDs per service container | 256 |
-| Default memory / CPU | 512 MB / 1 CPU |
+| Default memory / CPU (new tenant) | **2048 MB / 2 CPUs** from `tenant_quotas` (`state_001_init.sql`). `RunContainer` applies those as container limits. Fallback **512 MB / 1 CPU** only if the quota row cannot be loaded (`internal/docker/client.go`). Limits are per-tenant and still bounded by the host. |
 
-When disk is over 90%, expect **503** or a wrapped `disk check:` error on create/deploy/build — not a silent queue.
+When disk is over 90%:
+
+- `POST /v1/services` still returns **201** `deploying`; the async deploy then sets `status=failed` and `last_error` to the diskcheck message
+- Build create, DB create, restart, and redeploy return **500** `{"error":"internal error"}` — diskcheck is a plain `fmt.Errorf`, and `apierr.WriteAPIError` falls back to 500. This is **not** 503.

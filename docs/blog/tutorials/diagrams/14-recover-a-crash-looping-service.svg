@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="60" y="64" font-size="28" font-weight="700" fill="#1c1917">Crash loop to recovery</text>
+  <text x="60" y="96" font-size="20" fill="#57534e">Solid arrows happen on their own. Dashed arrows are API calls you make.</text>
+
+  <!-- top row -->
+  <rect x="60" y="150" width="220" height="110" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="170" y="212" font-size="24" font-weight="700" fill="#1c1917" text-anchor="middle">running</text>
+
+  <rect x="400" y="150" width="270" height="110" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="535" y="198" font-size="24" font-weight="700" fill="#1c1917" text-anchor="middle">crashed</text>
+  <text x="535" y="232" font-size="20" fill="#57534e" text-anchor="middle">crash_count 1 to 4</text>
+
+  <rect x="790" y="150" width="350" height="110" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+  <text x="965" y="190" font-size="24" font-weight="700" fill="#fafaf9" text-anchor="middle">crashed, circuit_open = 1</text>
+  <text x="965" y="226" font-size="20" fill="#fafaf9" text-anchor="middle">container stopped and removed</text>
+
+  <line x1="280" y1="205" x2="396" y2="205" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="338" y="140" font-size="20" fill="#57534e" text-anchor="middle">crash event</text>
+  <line x1="670" y1="205" x2="786" y2="205" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="728" y="140" font-size="20" fill="#57534e" text-anchor="middle">5th in 600s</text>
+
+  <!-- bottom row -->
+  <rect x="790" y="440" width="350" height="110" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="965" y="490" font-size="24" font-weight="700" fill="#1c1917" text-anchor="middle">stopped</text>
+  <text x="965" y="524" font-size="20" fill="#57534e" text-anchor="middle">counters cleared, no container</text>
+
+  <rect x="400" y="440" width="270" height="110" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="535" y="505" font-size="24" font-weight="700" fill="#1c1917" text-anchor="middle">deploying</text>
+
+  <!-- reset (API) -->
+  <line x1="830" y1="260" x2="830" y2="436" stroke="#1c1917" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#a)"/>
+  <text x="818" y="338" font-size="20" font-weight="700" fill="#1c1917" text-anchor="end">POST /reset</text>
+  <text x="818" y="364" font-size="20" fill="#57534e" text-anchor="end">API call</text>
+  <!-- auto retry -->
+  <line x1="1100" y1="260" x2="1100" y2="436" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="1088" y="330" text-anchor="end" font-size="20" font-weight="700" fill="#1c1917">circuit_retry_at</text>
+  <text x="1088" y="356" text-anchor="end" font-size="20" fill="#57534e">30m, then 1h, then 4h</text>
+  <text x="1088" y="382" text-anchor="end" font-size="20" fill="#57534e">automatic</text>
+  <!-- redeploy -->
+  <line x1="786" y1="495" x2="674" y2="495" stroke="#1c1917" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#a)"/>
+  <text x="730" y="586" font-size="20" font-weight="700" fill="#1c1917" text-anchor="middle">POST /redeploy</text>
+  <text x="730" y="612" font-size="20" fill="#57534e" text-anchor="middle">API call, not /start</text>
+  <line x1="730" y1="560" x2="730" y2="500" stroke="none"/>
+  <!-- back to running -->
+  <path d="M400,495 L170,495 L170,264" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="190" y="400" font-size="20" fill="#57534e">container starts</text>
+  <text x="190" y="426" font-size="20" fill="#57534e">automatic</text>
+</svg>

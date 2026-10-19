@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#1c1917"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="40" y="60" font-size="28" font-weight="700" fill="#1c1917">One host, one script: what bootstrap-stack.sh builds</text>
+  <text x="40" y="92" font-size="18" fill="#57534e">Request path on top, state and tenant workloads below</text>
+
+  <!-- Internet -->
+  <rect x="40" y="200" width="140" height="110" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="110" y="250" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Internet</text>
+  <text x="110" y="278" font-size="18" fill="#57534e" text-anchor="middle">api.&lt;domain&gt;</text>
+
+  <!-- Traefik -->
+  <rect x="230" y="200" width="220" height="110" rx="12" fill="#1c1917"/>
+  <text x="340" y="238" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">paas-traefik</text>
+  <text x="340" y="266" font-size="18" fill="#fafaf9" text-anchor="middle">ports 80 / 443</text>
+  <text x="340" y="292" font-size="18" fill="#fafaf9" text-anchor="middle">172.24.0.2</text>
+
+  <!-- Relay -->
+  <rect x="510" y="200" width="220" height="110" rx="12" fill="#1c1917"/>
+  <text x="620" y="238" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">ah-api-proxy</text>
+  <text x="620" y="266" font-size="18" fill="#fafaf9" text-anchor="middle">socat relay</text>
+  <text x="620" y="292" font-size="18" fill="#fafaf9" text-anchor="middle">172.24.0.1:8081</text>
+
+  <!-- ah -->
+  <rect x="790" y="200" width="370" height="110" rx="12" fill="#1c1917"/>
+  <text x="975" y="238" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">ah serve</text>
+  <text x="975" y="266" font-size="18" fill="#fafaf9" text-anchor="middle">127.0.0.1:8080</text>
+  <text x="975" y="292" font-size="18" fill="#fafaf9" text-anchor="middle">systemd: ah.service</text>
+
+  <!-- Request arrows -->
+  <line x1="180" y1="255" x2="226" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="450" y1="255" x2="506" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="730" y1="255" x2="786" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- State -->
+  <rect x="640" y="440" width="290" height="130" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="785" y="476" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">/var/lib/ah</text>
+  <text x="785" y="508" font-size="18" fill="#57534e" text-anchor="middle">ah.db, ah-metering.db</text>
+  <text x="785" y="534" font-size="18" fill="#57534e" text-anchor="middle">master.key, backups/</text>
+
+  <!-- Docker -->
+  <rect x="960" y="440" width="200" height="130" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="1060" y="476" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Docker daemon</text>
+  <text x="1060" y="508" font-size="18" fill="#57534e" text-anchor="middle">runtime: runsc</text>
+  <text x="1060" y="534" font-size="18" fill="#57534e" text-anchor="middle">(gVisor)</text>
+
+  <line x1="840" y1="310" x2="800" y2="436" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="1080" y1="310" x2="1070" y2="436" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- Tenants -->
+  <rect x="230" y="440" width="220" height="130" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="340" y="476" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Tenant services</text>
+  <text x="340" y="508" font-size="18" fill="#57534e" text-anchor="middle">gVisor containers</text>
+  <text x="340" y="534" font-size="18" fill="#57534e" text-anchor="middle">*.apps.&lt;domain&gt;</text>
+  <line x1="340" y1="310" x2="340" y2="436" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="352" y="385" font-size="18" fill="#57534e">app traffic</text>
+
+  <text x="40" y="625" font-size="18" fill="#57534e">The script creates every box except Internet. DNS records and firewall rules stay with you.</text>
+</svg>

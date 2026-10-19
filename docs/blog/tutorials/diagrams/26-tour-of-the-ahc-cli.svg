@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<rect x="40" y="250" width="170" height="100" rx="14" fill="#1c1917"/>
+<text x="125" y="310" font-size="32" font-weight="700" text-anchor="middle" fill="#fafaf9">ahc</text>
+<line x1="210" y1="300" x2="300" y2="80" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="304" y="30" width="860" height="100" rx="12" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+<text x="326" y="87" font-size="22" font-weight="700" fill="#1e40af">setup</text>
+<text x="470" y="86" font-size="19" fill="#1c1917">configure   register   key   recover   tenant   version</text>
+<line x1="210" y1="300" x2="300" y2="198" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="304" y="148" width="860" height="100" rx="12" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+<text x="326" y="205" font-size="22" font-weight="700" fill="#166534">deploy</text>
+<text x="470" y="191" font-size="19" fill="#1c1917">deploy &lt;git-url-or-image&gt; &lt;name&gt; --port</text>
+<text x="470" y="217" font-size="19" fill="#1c1917">build list | logs | cancel</text>
+<line x1="210" y1="300" x2="300" y2="316" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="304" y="266" width="860" height="100" rx="12" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+<text x="326" y="323" font-size="22" font-weight="700" fill="#92400e">operate</text>
+<text x="470" y="296" font-size="19" fill="#1c1917">service list  get  create  delete  start  stop  restart</text>
+<text x="470" y="322" font-size="19" fill="#1c1917">service redeploy  reset  rename  logs  deployments  env</text>
+<text x="470" y="348" font-size="19" fill="#1c1917">logs   status   activity</text>
+<line x1="210" y1="300" x2="300" y2="434" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="304" y="384" width="860" height="100" rx="12" fill="#fce7f3" stroke="#9d174d" stroke-width="2"/>
+<text x="326" y="441" font-size="22" font-weight="700" fill="#9d174d">data</text>
+<text x="470" y="427" font-size="19" fill="#1c1917">db provision | list | get | delete</text>
+<text x="470" y="453" font-size="19" fill="#1c1917">snapshot take | list | delete</text>
+<line x1="210" y1="300" x2="300" y2="552" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="304" y="502" width="860" height="100" rx="12" fill="#ede9fe" stroke="#5b21b6" stroke-width="2"/>
+<text x="326" y="559" font-size="22" font-weight="700" fill="#5b21b6">sandbox</text>
+<text x="470" y="558" font-size="19" fill="#1c1917">env list  create  get  exec  stop  start  delete  templates</text>
+<text x="40" y="650" font-size="18" fill="#57534e">Command tree of cmd/ahc. --url, --key and --json are global flags.</text>
+</svg>

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1c1917">Key lifecycle and tenant lifecycle</text>
+
+<text x="40" y="104" font-size="18" fill="#57534e">API KEY</text>
+<rect x="40" y="120" width="250" height="110" rx="12" fill="#1c1917"/>
+<text x="165" y="160" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">POST /v1/auth/keys</text>
+<text x="165" y="190" font-size="18" fill="#fafaf9" text-anchor="middle">secret shown once</text>
+<text x="165" y="214" font-size="18" fill="#fafaf9" text-anchor="middle">HMAC-SHA256 stored</text>
+<path d="M290 175H350" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="350" y="120" width="220" height="110" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="460" y="168" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Active key</text>
+<text x="460" y="198" font-size="18" fill="#57534e" text-anchor="middle">Bearer keyID.secret</text>
+<path d="M570 175H630" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="630" y="120" width="250" height="110" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="755" y="160" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Revoke or expire</text>
+<text x="755" y="190" font-size="18" fill="#57534e" text-anchor="middle">DELETE /v1/auth/keys/{id}</text>
+<text x="755" y="214" font-size="18" fill="#57534e" text-anchor="middle">or expires_at passes</text>
+<path d="M880 175H940" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="940" y="120" width="220" height="110" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="1050" y="168" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">401 invalid</text>
+<text x="1050" y="198" font-size="18" fill="#57534e" text-anchor="middle">cache TTL 30s max</text>
+
+<text x="40" y="340" font-size="18" fill="#57534e">TENANT</text>
+<rect x="40" y="360" width="200" height="110" rx="12" fill="#1c1917"/>
+<text x="140" y="408" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">Tenant active</text>
+<text x="140" y="438" font-size="18" fill="#fafaf9" text-anchor="middle">up to 20 keys</text>
+<path d="M240 415H360" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<text x="300" y="400" font-size="18" fill="#57534e" text-anchor="middle">DELETE</text>
+<text x="300" y="460" font-size="18" fill="#57534e" text-anchor="middle">/v1/tenant</text>
+<rect x="360" y="360" width="340" height="150" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="520" y="402" font-size="20" font-weight="600" fill="#1c1917" text-anchor="middle">Tenant suspended</text>
+<text x="520" y="434" font-size="18" fill="#57534e" text-anchor="middle">services, DBs, builds stopped</text>
+<text x="520" y="462" font-size="18" fill="#57534e" text-anchor="middle">all keys revoked</text>
+<text x="520" y="490" font-size="18" fill="#57534e" text-anchor="middle">requests rejected</text>
+<path d="M700 435H780" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<text x="740" y="420" font-size="18" fill="#57534e" text-anchor="middle">admin</text>
+<text x="740" y="468" font-size="18" fill="#57534e" text-anchor="middle">token</text>
+<rect x="780" y="360" width="380" height="150" rx="12" fill="#1c1917"/>
+<text x="970" y="402" font-size="20" font-weight="600" fill="#fafaf9" text-anchor="middle">POST /v1/tenants/{id}/reactivate</text>
+<text x="970" y="440" font-size="18" fill="#fafaf9" text-anchor="middle">status: active</text>
+<text x="970" y="468" font-size="18" fill="#fafaf9" text-anchor="middle">new api_key returned once</text>
+<text x="40" y="600" font-size="18" fill="#57534e">Lost every key but tenant still active? POST /v1/auth/recover with X-Admin-Token issues a new one.</text>
+</svg>

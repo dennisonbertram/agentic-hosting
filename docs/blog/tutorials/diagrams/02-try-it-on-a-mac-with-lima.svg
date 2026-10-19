@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs>
+<marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+<marker id="g" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#57534e"/></marker>
+</defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="50" font-size="28" font-weight="700" fill="#1c1917">agentic-hosting on a Mac</text>
+<rect x="40" y="80" width="760" height="560" rx="16" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="64" y="115" font-size="22" font-weight="700" fill="#1c1917">Mac host (macOS)</text>
+<text x="64" y="145" font-size="18" fill="#57534e">127.0.0.1:18080</text>
+<rect x="230" y="170" width="550" height="350" rx="14" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="254" y="204" font-size="22" font-weight="700" fill="#1c1917">Lima VM (Ubuntu 24.04 ARM64)</text>
+<rect x="254" y="226" width="240" height="64" rx="10" fill="#1c1917"/>
+<text x="374" y="266" font-size="22" text-anchor="middle" fill="#fafaf9">Traefik :80</text>
+<rect x="254" y="340" width="240" height="64" rx="10" fill="#1c1917"/>
+<text x="374" y="368" font-size="22" text-anchor="middle" fill="#fafaf9">ah</text>
+<text x="374" y="392" font-size="18" text-anchor="middle" fill="#fafaf9">127.0.0.1:8080</text>
+<rect x="520" y="340" width="240" height="64" rx="10" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="640" y="380" font-size="22" text-anchor="middle" fill="#1c1917">Docker + runsc</text>
+<rect x="520" y="430" width="240" height="64" rx="10" fill="none" stroke="#1c1917" stroke-width="2"/>
+<text x="640" y="470" font-size="22" text-anchor="middle" fill="#1c1917">registry</text>
+<path d="M374 290 V338" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M494 372 H518" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M494 258 H640 V338" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<path d="M640 404 V428" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<text x="254" y="548" font-size="18" fill="#57534e">guest port 80 forwarded to host loopback only</text>
+<path d="M134 258 H252" stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<text x="64" y="240" font-size="18" fill="#57534e">Lima forward</text>
+<rect x="64" y="560" width="140" height="64" rx="10" fill="#1c1917"/>
+<text x="134" y="598" font-size="22" text-anchor="middle" fill="#fafaf9">ngrok agent</text>
+<path d="M134 560 V266" stroke="#57534e" stroke-width="2" stroke-dasharray="8 6" fill="none" marker-end="url(#g)"/>
+<rect x="880" y="540" width="280" height="104" rx="14" fill="none" stroke="#57534e" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="1020" y="582" font-size="22" font-weight="700" text-anchor="middle" fill="#1c1917">Internet</text>
+<text x="1020" y="614" font-size="18" text-anchor="middle" fill="#57534e">TLS terminated by ngrok</text>
+<path d="M880 592 H206" stroke="#57534e" stroke-width="2" stroke-dasharray="8 6" fill="none" marker-end="url(#g)"/>
+<text x="500" y="582" font-size="18" fill="#57534e">optional, dashed</text>
+</svg>

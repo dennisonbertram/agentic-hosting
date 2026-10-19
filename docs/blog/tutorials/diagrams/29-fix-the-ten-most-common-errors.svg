@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57534e"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="40" y="46" font-size="28" font-weight="700" fill="#1c1917">Symptom, cause in code, fix</text>
+  <text x="165" y="100" font-size="18" font-weight="600" fill="#57534e">SYMPTOM</text>
+  <text x="455" y="100" font-size="18" font-weight="600" fill="#57534e">CAUSE IN CODE</text>
+  <text x="795" y="100" font-size="18" font-weight="600" fill="#57534e">FIX</text>
+
+  <!-- startup -->
+  <rect x="40" y="114" width="1120" height="100" rx="12" fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+  <rect x="40" y="114" width="110" height="100" rx="12" fill="#1c1917"/>
+  <text x="95" y="171" font-size="20" font-weight="700" fill="#fafaf9" text-anchor="middle">startup</text>
+  <text x="165" y="156" font-size="18" fill="#1c1917">403 HTTPS required</text>
+  <text x="165" y="182" font-size="18" fill="#57534e">or ah exits at boot</text>
+  <line x1="425" y1="164" x2="445" y2="164" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="455" y="156" font-size="18" fill="#1c1917">requireHTTPS</text>
+  <text x="455" y="182" font-size="18" fill="#57534e">cmd/ah/main.go checks</text>
+  <line x1="765" y1="164" x2="785" y2="164" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="795" y="156" font-size="18" fill="#1c1917">X-Forwarded-Proto: https, or --dev</text>
+  <text x="795" y="182" font-size="18" fill="#57534e">32+ char token, 64-hex master.key</text>
+
+  <!-- auth -->
+  <rect x="40" y="226" width="1120" height="100" rx="12" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+  <rect x="40" y="226" width="110" height="100" rx="12" fill="#1c1917"/>
+  <text x="95" y="283" font-size="20" font-weight="700" fill="#fafaf9" text-anchor="middle">auth</text>
+  <text x="165" y="268" font-size="18" fill="#1c1917">401 invalid api key</text>
+  <text x="165" y="294" font-size="18" fill="#57534e">on every call</text>
+  <line x1="425" y1="276" x2="445" y2="276" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="455" y="268" font-size="18" fill="#1c1917">middleware.Auth</text>
+  <text x="455" y="294" font-size="18" fill="#57534e">keyID.secret, 30s cache</text>
+  <line x1="765" y1="276" x2="785" y2="276" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="795" y="268" font-size="18" fill="#1c1917">Bearer $AH_API_KEY, full token</text>
+  <text x="795" y="294" font-size="18" fill="#57534e">new key if revoked or suspended</text>
+
+  <!-- limits -->
+  <rect x="40" y="338" width="1120" height="100" rx="12" fill="#fce7f3" stroke="#be185d" stroke-width="2"/>
+  <rect x="40" y="338" width="110" height="100" rx="12" fill="#1c1917"/>
+  <text x="95" y="395" font-size="20" font-weight="700" fill="#fafaf9" text-anchor="middle">limits</text>
+  <text x="165" y="380" font-size="18" fill="#1c1917">429 rate limit exceeded</text>
+  <text x="165" y="406" font-size="18" fill="#57534e">409 quota, 422 duplicate</text>
+  <line x1="425" y1="388" x2="445" y2="388" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="455" y="380" font-size="18" fill="#1c1917">RateLimiter, regLimiter</text>
+  <text x="455" y="406" font-size="18" fill="#57534e">apierr.QuotaExceeded</text>
+  <line x1="765" y1="388" x2="785" y2="388" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="795" y="380" font-size="18" fill="#1c1917">wait Retry-After seconds</text>
+  <text x="795" y="406" font-size="18" fill="#57534e">rename, or free a quota slot</text>
+
+  <!-- build -->
+  <rect x="40" y="450" width="1120" height="100" rx="12" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <rect x="40" y="450" width="110" height="100" rx="12" fill="#1c1917"/>
+  <text x="95" y="507" font-size="20" font-weight="700" fill="#fafaf9" text-anchor="middle">build</text>
+  <text x="165" y="492" font-size="18" fill="#1c1917">400 unsupported source_type</text>
+  <text x="165" y="518" font-size="18" fill="#57534e">400 git host not allowed</text>
+  <line x1="425" y1="500" x2="445" y2="500" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="455" y="492" font-size="18" fill="#1c1917">builds.StartBuild</text>
+  <text x="455" y="518" font-size="18" fill="#57534e">validateGitURL, 5 hosts</text>
+  <line x1="765" y1="500" x2="785" y2="500" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="795" y="492" font-size="18" fill="#1c1917">source_type, source_url, source_ref</text>
+  <text x="795" y="518" font-size="18" fill="#57534e">HTTPS URL on an allowed host</text>
+
+  <!-- runtime -->
+  <rect x="40" y="562" width="1120" height="100" rx="12" fill="#ede9fe" stroke="#6d28d9" stroke-width="2"/>
+  <rect x="40" y="562" width="110" height="100" rx="12" fill="#1c1917"/>
+  <text x="95" y="619" font-size="20" font-weight="700" fill="#fafaf9" text-anchor="middle">runtime</text>
+  <text x="165" y="604" font-size="18" fill="#1c1917">500 internal error</text>
+  <text x="165" y="630" font-size="18" fill="#57534e">crashed, circuit_open</text>
+  <line x1="425" y1="612" x2="445" y2="612" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="455" y="604" font-size="18" fill="#1c1917">diskcheck.CheckAll at 90%</text>
+  <text x="455" y="630" font-size="18" fill="#57534e">reconciler circuit breaker</text>
+  <line x1="765" y1="612" x2="785" y2="612" stroke="#57534e" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="795" y="604" font-size="18" fill="#1c1917">GET /v1/system/health/detailed</text>
+  <text x="795" y="630" font-size="18" fill="#57534e">POST /reset, then POST /redeploy</text>
+</svg>

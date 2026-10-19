@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="600" y="44" text-anchor="middle" font-size="26" font-weight="700" fill="#1c1917">One request, two paths through Traefik</text>
+
+  <rect x="450" y="70" width="300" height="56" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="600" y="105" text-anchor="middle" font-size="20" fill="#1c1917">Browser or curl</text>
+
+  <rect x="350" y="170" width="500" height="80" rx="12" fill="#1c1917"/>
+  <text x="600" y="203" text-anchor="middle" font-size="22" font-weight="700" fill="#fafaf9">paas-traefik</text>
+  <text x="600" y="232" text-anchor="middle" font-size="18" fill="#fafaf9">web / websecure, file provider only</text>
+
+  <!-- left: tenant path -->
+  <rect x="60" y="300" width="460" height="86" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="290" y="333" text-anchor="middle" font-size="20" font-weight="700" fill="#1c1917">/etc/traefik/dynamic/&lt;serviceID&gt;.yml</text>
+  <text x="290" y="362" text-anchor="middle" font-size="18" fill="#57534e">router svc-&lt;id&gt; : Host(dns_label.base)</text>
+
+  <rect x="60" y="440" width="210" height="76" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="165" y="474" text-anchor="middle" font-size="20" fill="#1c1917">ingress bridge A</text>
+  <text x="165" y="500" text-anchor="middle" font-size="18" fill="#57534e">Traefik + one service</text>
+  <rect x="310" y="440" width="210" height="76" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="415" y="474" text-anchor="middle" font-size="20" fill="#1c1917">ingress bridge B</text>
+  <text x="415" y="500" text-anchor="middle" font-size="18" fill="#57534e">Traefik + one service</text>
+
+  <rect x="60" y="560" width="210" height="64" rx="12" fill="#1c1917"/>
+  <text x="165" y="598" text-anchor="middle" font-size="20" fill="#fafaf9">container A</text>
+  <rect x="310" y="560" width="210" height="64" rx="12" fill="#1c1917"/>
+  <text x="415" y="598" text-anchor="middle" font-size="20" fill="#fafaf9">container B</text>
+  <text x="290" y="650" text-anchor="middle" font-size="18" fill="#57534e">traefik.enable=false: image labels ignored</text>
+
+  <!-- right: API path -->
+  <rect x="700" y="300" width="440" height="76" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="920" y="333" text-anchor="middle" font-size="20" fill="#1c1917">api.&lt;domain&gt; router (00-platform.yml)</text>
+  <text x="920" y="360" text-anchor="middle" font-size="18" fill="#57534e">url http://ah-api-relay:8081</text>
+  <rect x="700" y="430" width="440" height="76" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="920" y="463" text-anchor="middle" font-size="20" fill="#1c1917">socat relay on bridge gateway</text>
+  <text x="920" y="490" text-anchor="middle" font-size="18" fill="#57534e">accepts only Traefik's address</text>
+  <rect x="700" y="560" width="440" height="64" rx="12" fill="#1c1917"/>
+  <text x="920" y="598" text-anchor="middle" font-size="20" fill="#fafaf9">ah on 127.0.0.1:8080</text>
+
+  <line x1="600" y1="126" x2="600" y2="168" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="480" y1="250" x2="330" y2="298" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="720" y1="250" x2="880" y2="298" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="200" y1="386" x2="165" y2="438" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="380" y1="386" x2="415" y2="438" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="165" y1="516" x2="165" y2="558" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="415" y1="516" x2="415" y2="558" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="920" y1="376" x2="920" y2="428" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="920" y1="506" x2="920" y2="558" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="290" y="296" text-anchor="middle" font-size="18" fill="#57534e" display="none"> </text>
+  <text x="300" y="545" text-anchor="middle" font-size="18" fill="#57534e" display="none"> </text>
+</svg>

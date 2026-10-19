@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="45" y="70" font-size="32" font-weight="700" fill="#1c1917">Where a request can be stopped</text>
+<text x="45" y="105" font-size="20" fill="#57534e">Gates run in this order on authenticated routes. Each one answers with its own status code.</text>
+<rect x="45" y="190" width="190" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="140" y="240" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">authMW</text>
+<text x="140" y="275" font-size="18" text-anchor="middle" fill="#57534e">Authorization: Bearer</text>
+<line x1="140" y1="320" x2="140" y2="365" stroke="#1c1917" stroke-width="1.5" marker-end="url(#a)" stroke-dasharray="5 4"/>
+<text x="140" y="395" font-size="19" font-weight="600" text-anchor="middle" fill="#1c1917">401</text>
+<text x="140" y="420" font-size="18" text-anchor="middle" fill="#57534e">invalid api key</text>
+<line x1="235" y1="255" x2="280" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="280" y="190" width="190" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="375" y="240" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">authRateLimiter</text>
+<text x="375" y="275" font-size="18" text-anchor="middle" fill="#57534e">100 rps, burst 200</text>
+<line x1="375" y1="320" x2="375" y2="365" stroke="#1c1917" stroke-width="1.5" marker-end="url(#a)" stroke-dasharray="5 4"/>
+<text x="375" y="395" font-size="19" font-weight="600" text-anchor="middle" fill="#1c1917">429</text>
+<text x="375" y="420" font-size="18" text-anchor="middle" fill="#57534e">+ Retry-After</text>
+<line x1="470" y1="255" x2="515" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="515" y="190" width="190" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="610" y="240" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">globalRateLimiter</text>
+<text x="610" y="275" font-size="18" text-anchor="middle" fill="#57534e">500 rps, burst 1000</text>
+<line x1="610" y1="320" x2="610" y2="365" stroke="#1c1917" stroke-width="1.5" marker-end="url(#a)" stroke-dasharray="5 4"/>
+<text x="610" y="395" font-size="19" font-weight="600" text-anchor="middle" fill="#1c1917">429</text>
+<text x="610" y="420" font-size="18" text-anchor="middle" fill="#57534e">+ Retry-After</text>
+<line x1="705" y1="255" x2="750" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="750" y="190" width="190" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="845" y="240" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">idempotencyStore</text>
+<text x="845" y="275" font-size="18" text-anchor="middle" fill="#57534e">Idempotency-Key</text>
+<line x1="845" y1="320" x2="845" y2="365" stroke="#1c1917" stroke-width="1.5" marker-end="url(#a)" stroke-dasharray="5 4"/>
+<text x="845" y="395" font-size="19" font-weight="600" text-anchor="middle" fill="#1c1917">400</text>
+<text x="845" y="420" font-size="18" text-anchor="middle" fill="#57534e">409 on body mismatch</text>
+<line x1="940" y1="255" x2="985" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="985" y="190" width="190" height="130" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+<text x="1080" y="240" font-size="20" font-weight="700" text-anchor="middle" fill="#fafaf9">handler</text>
+<text x="1080" y="275" font-size="18" text-anchor="middle" fill="#d6d3d1">INSERT ... WHERE</text>
+<text x="1080" y="298" font-size="18" text-anchor="middle" fill="#d6d3d1">COUNT(*) &lt; max</text>
+<line x1="1080" y1="320" x2="1080" y2="365" stroke="#1c1917" stroke-width="1.5" marker-end="url(#a)" stroke-dasharray="5 4"/>
+<text x="1080" y="395" font-size="19" font-weight="600" text-anchor="middle" fill="#1c1917">409</text>
+<text x="1080" y="420" font-size="18" text-anchor="middle" fill="#57534e">quota exceeded</text>
+<text x="45" y="170" font-size="18" fill="#57534e">request in</text>
+<rect x="45" y="500" width="330" height="100" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="210" y="540" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">metering collector</text>
+<text x="210" y="572" font-size="18" text-anchor="middle" fill="#57534e">one sample per running service / 60s</text>
+<rect x="520" y="500" width="400" height="100" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="720" y="540" font-size="20" font-weight="700" text-anchor="middle" fill="#1c1917">GET /v1/tenant/usage/metrics</text>
+<text x="720" y="572" font-size="18" text-anchor="middle" fill="#57534e">period=hourly or daily</text>
+<line x1="375" y1="550" x2="515" y2="550" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<text x="960" y="545" font-size="18" fill="#57534e">Only 429 means slow down.</text>
+<text x="960" y="572" font-size="18" fill="#57534e">409 means a limit is full.</text>
+</svg>

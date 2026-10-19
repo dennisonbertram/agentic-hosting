@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="60" y="64" font-size="30" font-weight="700" fill="#1c1917">Snapshot a service, fork it without a build</text>
+<g stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)">
+<path d="M300 270 H440"/>
+<path d="M760 270 H900"/>
+</g>
+<g stroke-width="2">
+<rect x="40" y="130" width="260" height="260" rx="12" fill="#fafaf9" stroke="#1c1917"/>
+<rect x="440" y="130" width="320" height="260" rx="12" fill="#1c1917" stroke="#1c1917"/>
+<rect x="900" y="130" width="260" height="260" rx="12" fill="#fafaf9" stroke="#1c1917"/>
+</g>
+<g font-size="20" text-anchor="middle" fill="#1c1917">
+<text x="170" y="172" font-size="22" font-weight="700">Source service</text>
+<text x="170" y="222" fill="#57534e">image tag in registry</text>
+<text x="170" y="256" fill="#57534e">port</text>
+<text x="170" y="290" fill="#57534e">service_env (encrypted)</text>
+<text x="170" y="350" font-weight="600">my-app</text>
+
+<text x="600" y="172" font-size="22" font-weight="700" fill="#fafaf9">Snapshot</text>
+<text x="600" y="210" font-size="18" fill="#fafaf9">image_ref (retagged)</text>
+<text x="600" y="236" font-size="18" fill="#fafaf9">127.0.0.1:5000/snapshots/</text>
+<text x="600" y="260" font-size="18" fill="#fafaf9">&lt;tenant&gt;:&lt;id&gt;</text>
+<text x="600" y="296" font-size="18" fill="#fafaf9">env_encrypted blob</text>
+<text x="600" y="326" font-size="18" fill="#fafaf9">resource_config, port</text>
+
+<text x="1030" y="172" font-size="22" font-weight="700">Forked service</text>
+<text x="1030" y="222" fill="#57534e">same image</text>
+<text x="1030" y="256" fill="#57534e">restored env</text>
+<text x="1030" y="290" fill="#57534e">own container</text>
+<text x="1030" y="320" fill="#57534e">own dns_label</text>
+<text x="1030" y="360" font-weight="600">my-app-staging</text>
+</g>
+<g font-size="18" text-anchor="middle" fill="#57534e">
+<text x="370" y="226">POST</text>
+<text x="370" y="250">.../snapshots</text>
+<text x="830" y="226">POST /services</text>
+<text x="830" y="250">?from_snapshot</text>
+<text x="830" y="304" font-size="20" font-weight="700" fill="#1c1917">no build</text>
+</g>
+<text x="600" y="430" font-size="20" text-anchor="middle" fill="#1c1917">DB volumes not included</text>
+<text x="600" y="460" font-size="18" text-anchor="middle" fill="#57534e">Postgres and Redis data stays in ah-db-* volumes</text>
+<text x="600" y="540" font-size="20" text-anchor="middle" fill="#57534e">GC keeps 10 per service and 30 days:</text>
+<text x="600" y="570" font-size="20" text-anchor="middle" fill="#57534e">AH_SNAPSHOT_MAX_PER_SERVICE, AH_SNAPSHOT_MAX_AGE</text>
+</svg>

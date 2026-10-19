@@ -48,7 +48,7 @@ Single Go binary PaaS designed for AI agents: deploy, manage, and monitor servic
 
 - Run `/code-astra-review` once on the final diff before opening a PR. Changes to auth, crypto, rate limiting, the reconciler, the circuit breaker, health probes, the master key path, or bootstrap token logic must have this review before merge.
 - Use `/security-review` for a whole-codebase security audit.
-- Reviewer subagents must not send repository code to external model services (`llm`, OpenAI, OpenRouter, DeepSeek, or similar). Only `/code-astra-review` sends code outside, and only because it is the review the user chose.
+- Reviewer subagents must not send repository code to external model services (`llm`, OpenAI, DeepSeek, or similar), except OpenRouter and `/code-astra-review`, which the user has approved.
 
 ## Key Files
 

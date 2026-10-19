@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/></marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="60" y="64" font-size="30" font-weight="700" fill="#1c1917">Node app from git: repo in, container out</text>
+
+  <text x="60" y="124" font-size="20" fill="#57534e" font-weight="600">YOUR REPO (root)</text>
+  <rect x="60" y="140" width="440" height="230" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="90" y="190" font-size="24" fill="#1c1917" font-weight="600">package.json</text>
+  <text x="90" y="224" font-size="20" fill="#57534e">"build": "node --check server.js"</text>
+  <text x="90" y="254" font-size="20" fill="#57534e">"start": "node server.js"</text>
+  <text x="90" y="318" font-size="24" fill="#1c1917" font-weight="600">server.js</text>
+  <text x="90" y="348" font-size="20" fill="#57534e">listens on PORT, /  and /health</text>
+
+  <text x="700" y="124" font-size="20" fill="#57534e" font-weight="600">RUNNING CONTAINER</text>
+  <rect x="700" y="140" width="440" height="230" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <rect x="722" y="160" width="396" height="48" rx="8" fill="#1c1917"/>
+  <text x="742" y="192" font-size="22" fill="#fafaf9">Nixpacks image (Node)</text>
+  <text x="722" y="248" font-size="20" fill="#1c1917">command: npm start</text>
+  <text x="722" y="282" font-size="20" fill="#1c1917">PORT env, routed via --port</text>
+  <text x="722" y="316" font-size="20" fill="#1c1917">read-only rootfs (gVisor runsc)</text>
+  <text x="722" y="350" font-size="20" fill="#1c1917">tmpfs /tmp (64 MB), writable</text>
+
+  <line x1="500" y1="255" x2="696" y2="255" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <text x="598" y="240" font-size="20" fill="#57534e" text-anchor="middle">Nixpacks</text>
+
+  <text x="60" y="440" font-size="20" fill="#57534e" font-weight="600">SHIPPING A CHANGE</text>
+  <rect x="60" y="460" width="200" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="160" y="513" font-size="22" fill="#1c1917" text-anchor="middle">git push</text>
+  <rect x="340" y="460" width="260" height="90" rx="12" fill="#1c1917"/>
+  <text x="470" y="513" font-size="22" fill="#fafaf9" text-anchor="middle">ahc deploy &lt;url&gt; name</text>
+  <rect x="680" y="460" width="200" height="90" rx="12" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+  <text x="780" y="513" font-size="22" fill="#1c1917" text-anchor="middle">new build</text>
+  <rect x="960" y="460" width="180" height="90" rx="12" fill="#1c1917"/>
+  <text x="1050" y="500" font-size="22" fill="#fafaf9" text-anchor="middle">new container</text>
+  <text x="1050" y="528" font-size="20" fill="#fafaf9" text-anchor="middle">replaces old</text>
+  <line x1="260" y1="505" x2="336" y2="505" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="600" y1="505" x2="676" y2="505" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="880" y1="505" x2="956" y2="505" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+
+  <text x="60" y="610" font-size="20" fill="#57534e">ahc service redeploy only restarts the container with current env. It does not rebuild.</text>
+  <text x="60" y="640" font-size="20" fill="#57534e">The build always uses the repo root. No subdirectory option.</text>
+  <text x="60" y="664" font-size="20" fill="#57534e">Same name updates the service only on a server with a base domain; without one, ahc makes a second service.</text>
+</svg>

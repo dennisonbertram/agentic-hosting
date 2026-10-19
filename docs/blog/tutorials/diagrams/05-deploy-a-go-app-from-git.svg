@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1c1917"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#fafaf9"/>
+  <text x="60" y="70" font-size="30" font-weight="700" fill="#1c1917">From git URL to running service</text>
+  <text x="60" y="105" font-size="20" fill="#57534e">POST /v1/services/{id}/builds</text>
+
+  <!-- row 1 -->
+  <g stroke="#1c1917" stroke-width="2">
+    <rect x="60" y="150" width="230" height="110" rx="14" fill="#fafaf9"/>
+    <rect x="340" y="150" width="230" height="110" rx="14" fill="#1c1917"/>
+    <rect x="620" y="150" width="230" height="110" rx="14" fill="#fafaf9"/>
+    <rect x="900" y="150" width="230" height="110" rx="14" fill="#1c1917"/>
+  </g>
+  <g text-anchor="middle">
+    <text x="175" y="198" font-size="22" font-weight="700" fill="#1c1917">source_url</text>
+    <text x="175" y="228" font-size="18" fill="#57534e">https://github.com/...</text>
+    <text x="455" y="198" font-size="22" font-weight="700" fill="#fafaf9">Git validator</text>
+    <text x="455" y="228" font-size="18" fill="#fafaf9">5 hosts, HTTPS, no creds</text>
+    <text x="735" y="198" font-size="22" font-weight="700" fill="#1c1917">Build slot</text>
+    <text x="735" y="228" font-size="18" fill="#57534e">10 queued builds max</text>
+    <text x="1015" y="198" font-size="22" font-weight="700" fill="#fafaf9">ah-builder</text>
+    <text x="1015" y="228" font-size="18" fill="#fafaf9">clone, then Nixpacks</text>
+  </g>
+  <g stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)">
+    <line x1="292" y1="205" x2="336" y2="205"/>
+    <line x1="572" y1="205" x2="616" y2="205"/>
+    <line x1="852" y1="205" x2="896" y2="205"/>
+    <line x1="1015" y1="262" x2="1015" y2="346"/>
+  </g>
+
+  <!-- row 2 -->
+  <g stroke="#1c1917" stroke-width="2">
+    <rect x="900" y="350" width="230" height="110" rx="14" fill="#fafaf9"/>
+    <rect x="620" y="350" width="230" height="110" rx="14" fill="#1c1917"/>
+    <rect x="340" y="350" width="230" height="110" rx="14" fill="#fafaf9"/>
+    <rect x="60" y="350" width="230" height="110" rx="14" fill="#fafaf9"/>
+  </g>
+  <g text-anchor="middle">
+    <text x="1015" y="398" font-size="22" font-weight="700" fill="#1c1917">Local registry</text>
+    <text x="1015" y="428" font-size="18" fill="#57534e">127.0.0.1:5000</text>
+    <text x="735" y="398" font-size="22" font-weight="700" fill="#fafaf9">DeployImage</text>
+    <text x="735" y="428" font-size="18" fill="#fafaf9">swaps in the new image</text>
+    <text x="455" y="398" font-size="22" font-weight="700" fill="#1c1917">gVisor container</text>
+    <text x="455" y="428" font-size="18" fill="#57534e">runsc runtime</text>
+    <text x="175" y="398" font-size="22" font-weight="700" fill="#1c1917">Traefik route</text>
+    <text x="175" y="428" font-size="18" fill="#57534e">your service URL</text>
+  </g>
+  <g stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)">
+    <line x1="898" y1="405" x2="854" y2="405"/>
+    <line x1="618" y1="405" x2="574" y2="405"/>
+    <line x1="338" y1="405" x2="294" y2="405"/>
+  </g>
+
+  <!-- statuses -->
+  <text x="60" y="525" font-size="20" font-weight="700" fill="#1c1917">Build status</text>
+  <g stroke="#1c1917" stroke-width="1.5" fill="#fafaf9">
+    <rect x="60" y="550" width="220" height="56" rx="28"/>
+    <rect x="320" y="550" width="220" height="56" rx="28"/>
+    <rect x="580" y="550" width="300" height="56" rx="28"/>
+  </g>
+  <g text-anchor="middle" font-size="20" fill="#1c1917">
+    <text x="170" y="585">pending</text>
+    <text x="430" y="585">running</text>
+    <text x="730" y="585">succeeded / failed</text>
+  </g>
+  <g stroke="#57534e" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <line x1="282" y1="578" x2="316" y2="578"/>
+    <line x1="542" y1="578" x2="576" y2="578"/>
+  </g>
+  <text x="905" y="578" font-size="18" fill="#57534e">succeeded is set only after</text>
+  <text x="905" y="602" font-size="18" fill="#57534e">DeployImage returns</text>
+</svg>

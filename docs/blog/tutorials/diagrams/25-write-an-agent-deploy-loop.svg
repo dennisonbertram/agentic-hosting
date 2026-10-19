@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="40" y="46" font-size="26" font-weight="700" fill="#1c1917">The deploy loop: create, build, poll, decide</text>
+<rect x="40" y="80" width="300" height="90" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+<text x="190.0" y="118.0" text-anchor="middle" font-size="20" font-weight="600" fill="#fafaf9">1. Create service</text>
+<text x="190.0" y="146.0" text-anchor="middle" font-size="18" font-weight="400" fill="#d6d3d1">POST /v1/services</text>
+<rect x="450" y="80" width="300" height="90" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+<text x="600.0" y="118.0" text-anchor="middle" font-size="20" font-weight="600" fill="#fafaf9">2. Start build</text>
+<text x="600.0" y="146.0" text-anchor="middle" font-size="18" font-weight="400" fill="#d6d3d1">POST .../builds</text>
+<rect x="860" y="80" width="300" height="90" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+<text x="1010.0" y="118.0" text-anchor="middle" font-size="20" font-weight="600" fill="#fafaf9">3. Poll build every 5s</text>
+<text x="1010.0" y="146.0" text-anchor="middle" font-size="18" font-weight="400" fill="#d6d3d1">GET .../builds/{id}</text>
+<rect x="860" y="250" width="300" height="90" rx="14" fill="#1c1917" stroke="#1c1917" stroke-width="2"/>
+<text x="1010.0" y="288.0" text-anchor="middle" font-size="20" font-weight="600" fill="#fafaf9">4. Read the service</text>
+<text x="1010.0" y="316.0" text-anchor="middle" font-size="18" font-weight="400" fill="#d6d3d1">GET /v1/services/{id}</text>
+<path d="M340 125H450" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<path d="M750 125H860" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<path d="M1010 170V250" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<rect x="40" y="250" width="300" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="190.0" y="280.0" text-anchor="middle" font-size="20" font-weight="600" fill="#1c1917">Retry rules</text>
+<text x="190.0" y="308.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">429: wait Retry-After</text>
+<text x="190.0" y="336.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">503: back off, retry</text>
+<text x="190.0" y="364.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">409: stop</text>
+<rect x="450" y="250" width="300" height="130" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="600.0" y="294.0" text-anchor="middle" font-size="20" font-weight="600" fill="#1c1917">Idempotency-Key</text>
+<text x="600.0" y="322.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">one key per POST,</text>
+<text x="600.0" y="350.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">same key on every retry</text>
+<path d="M190 250V170" fill="none" stroke="#1c1917" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#a)"/>
+<path d="M600 250V170" fill="none" stroke="#1c1917" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#a)"/>
+<rect x="300" y="450" width="280" height="140" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="440.0" y="499.0" text-anchor="middle" font-size="20" font-weight="600" fill="#1c1917">running</text>
+<text x="440.0" y="527.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">circuit_open false</text>
+<text x="440.0" y="555.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">return url</text>
+<rect x="620" y="450" width="290" height="140" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="765.0" y="499.0" text-anchor="middle" font-size="20" font-weight="600" fill="#1c1917">failed</text>
+<text x="765.0" y="527.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">service last_error +</text>
+<text x="765.0" y="555.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">last build log lines</text>
+<rect x="950" y="450" width="210" height="140" rx="14" fill="#fafaf9" stroke="#1c1917" stroke-width="2"/>
+<text x="1055.0" y="513.0" text-anchor="middle" font-size="20" font-weight="600" fill="#1c1917">circuit_open true</text>
+<text x="1055.0" y="541.0" text-anchor="middle" font-size="18" font-weight="400" fill="#57534e">stop and report</text>
+<path d="M1010 340V400H440V450" fill="none" stroke="#1c1917" stroke-width="2"/>
+<path d="M440 400V450" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<path d="M1010 400H1055" fill="none" stroke="#1c1917" stroke-width="2"/>
+<path d="M1010 400H765V450" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<path d="M1055 400V450" fill="none" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
+<text x="40" y="640" font-size="18" fill="#57534e">Dashed boxes apply to every request. Build status succeeded means the image was also deployed.</text>
+</svg>

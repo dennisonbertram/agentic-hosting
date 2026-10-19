@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="Inter, system-ui, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c1917"/></marker></defs>
+<rect width="1200" height="675" fill="#fafaf9"/>
+<text x="600" y="48" text-anchor="middle" font-size="26" font-weight="700" fill="#1c1917">One URL in, four jobs out</text>
+<g stroke="#1c1917" stroke-width="2" fill="#fafaf9">
+<rect x="40" y="130" width="280" height="90" rx="14"/>
+<rect x="40" y="260" width="280" height="90" rx="14"/>
+<rect x="40" y="390" width="280" height="90" rx="14" fill="none" stroke-dasharray="6 5"/>
+<rect x="450" y="230" width="230" height="130" rx="16" fill="#1c1917"/>
+<rect x="800" y="95" width="360" height="100" rx="14"/>
+<rect x="800" y="215" width="360" height="100" rx="14"/>
+<rect x="800" y="335" width="360" height="100" rx="14"/>
+<rect x="800" y="455" width="360" height="100" rx="14"/>
+</g>
+<g fill="#1c1917" font-size="20" text-anchor="middle">
+<text x="180" y="170" font-weight="600">llms.txt</text><text x="180" y="198" fill="#57534e" font-size="18">index of docs pages</text>
+<text x="180" y="300" font-weight="600">SKILL.md</text><text x="180" y="328" fill="#57534e" font-size="18">skills/agentic-hosting/</text>
+<text x="180" y="430" font-weight="600">llms-full.txt</text><text x="180" y="458" fill="#57534e" font-size="18">optional full docs dump</text>
+<text x="565" y="290" fill="#fafaf9" font-size="26" font-weight="700">Your agent</text>
+<text x="565" y="322" fill="#fafaf9" font-size="18">curl + Bearer key</text>
+<text x="980" y="132" font-weight="600">register</text><text x="980" y="162" fill="#57534e" font-size="18">POST /v1/tenants/register</text>
+<text x="980" y="252" font-weight="600">deploy</text><text x="980" y="282" fill="#57534e" font-size="18">POST /v1/services, .../builds</text>
+<text x="980" y="372" font-weight="600">database</text><text x="980" y="402" fill="#57534e" font-size="18">POST /v1/databases</text>
+<text x="980" y="492" font-weight="600">logs</text><text x="980" y="522" fill="#57534e" font-size="18">GET /v1/services/{id}/logs</text>
+</g>
+<g stroke="#1c1917" stroke-width="2" fill="none" marker-end="url(#a)">
+<path d="M320 175L450 270"/><path d="M320 305L450 295"/><path d="M320 435L450 330" stroke-dasharray="6 5"/>
+<path d="M680 255L800 150"/><path d="M680 280L800 265"/><path d="M680 310L800 385"/><path d="M680 335L800 505"/>
+</g>
+<text x="600" y="625" text-anchor="middle" font-size="20" fill="#57534e">source of truth: internal/api/server.go</text>
+</svg>

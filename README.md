@@ -352,8 +352,9 @@ DELETE /v1/databases/{dbID}                   # Delete database and data (not li
 
 - **Reconciler** (30s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
 - **GC** (5min interval): Cleans orphaned containers, volumes, images, build directories.
-- **Circuit breaker**: 5 crashes in 10 minutes stops restarting. Reset with `POST /v1/services/{id}/reset`.
-- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%.
+- **Circuit breaker**: 5 crashes in 10 minutes stops the container **and removes it**. Reset with `POST /v1/services/{id}/reset`, then `POST .../redeploy` (`/start` returns 409 because there is no container).
+- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Sync paths return **500** `{"error":"internal error"}` (not 503); service create returns 201 then fails async.
+- **Tenant resource defaults**: New tenants get **2048 MB / 2 CPUs** from `tenant_quotas`. Fallback 512 MB / 1 CPU only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 
 ### Backups
 
@@ -370,10 +371,10 @@ ah backup
 - **ReadonlyRootfs**: Container root filesystem is read-only; tmpfs mounts for `/tmp`, `/var/run`, `/var/tmp`, `/run`
 - **CapDrop=ALL**: No Linux capabilities
 - **no-new-privileges**: Containers cannot escalate privileges
-- **Encrypted secrets**: Env vars and database credentials encrypted with AES-256-GCM using tenant-derived keys
+- **Encrypted secrets**: Env vars and database credentials encrypted with AES-256-GCM using the **server master key**. There is no per-tenant key separation yet.
 - **API keys**: HMAC-SHA256 of `keyID.secret` using the master key (constant-time compare). bcrypt is used for passwords, not API keys.
-- **Rate limiting**: Per-tenant (100 req/s burst 200) + global (500 req/s burst 1000)
-- **Idempotency**: Authenticated mutating routes accept `Idempotency-Key` (tenant + method + path + body hash). TTL is **10 minutes**. `POST /v1/environments/{id}/exec` is excluded.
+- **Rate limiting**: Per-tenant (default 100 req/s burst 200, from `tenant_quotas.api_rate_limit`) + global (500 req/s burst 1000)
+- **Idempotency**: `Idempotency-Key` applies to **POST and PUT only** (not DELETE/PATCH; no PUT routes exist). Scoped tenant + method + path + body hash. TTL is **10 minutes**. `POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.
 
 ### Networking
 
@@ -454,7 +455,7 @@ For deploys, status, build logs and databases, use the `ahc` CLI:
 
 ```bash
 ahc deploy https://github.com/org/repo my-app
-ahc deploy nginx:alpine my-site
+ahc deploy nginxinc/nginx-unprivileged my-site --port 8080
 ahc status
 ahc db provision my-app postgres
 ahc build logs my-app

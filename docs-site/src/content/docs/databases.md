@@ -27,7 +27,7 @@ Creation is a long route (no 30s chi timeout). Use an `Idempotency-Key`. Disk ch
 | GET | `/v1/databases/{dbID}/connection-string` | `{"connection_string":"..."}` — **AUDIT** logged |
 | DELETE | `/v1/databases/{dbID}` | Container + volume wiped |
 
-Passwords and connection strings are AES-256-GCM encrypted at rest (tenant-derived key material via the master key).
+Passwords and connection strings are AES-256-GCM encrypted at rest with the **server master key**. There is no per-tenant key separation yet (see [Security model](./security/)).
 
 ## Wiring a service
 

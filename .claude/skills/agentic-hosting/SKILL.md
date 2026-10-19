@@ -83,7 +83,9 @@ curl -s -X POST $AH_URL/v1/auth/recover \
 SVC=$(curl -s -X POST $AH_URL/v1/services \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"my-app","image":"nginx:alpine","port":80}')
+  -d '{"name":"my-app","image":"nginxinc/nginx-unprivileged","port":8080}')
+# Stock nginx:alpine crash-loops under ReadonlyRootfs (no /var/cache/nginx tmpfs).
+# nginxinc/nginx-unprivileged listens on 8080 and writes temp files under /tmp.
 SERVICE_ID=$(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 echo "Service ID: $SERVICE_ID"
 echo "URL: $(echo $SVC | python3 -c 'import sys,json; print(json.load(sys.stdin)["url"])')"
@@ -137,15 +139,19 @@ curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/redeploy \
 
 Large images can take up to 10 minutes. Always use a 10-minute timeout (120 × 5s):
 
+`status` is never the string `"circuit_open"` — that is a separate boolean field:
+
 ```bash
 for i in $(seq 1 120); do
-  STATUS=$(curl -s -H "Authorization: Bearer $AH_KEY" \
+  read STATUS CIRCUIT <<EOF
+$(curl -s -H "Authorization: Bearer $AH_KEY" \
     $AH_URL/v1/services/$SERVICE_ID \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin)["status"])')
-  echo "[$i/120] $STATUS"
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("status",""), "true" if d.get("circuit_open") else "false")')
+EOF
+  echo "[$i/120] $STATUS circuit_open=$CIRCUIT"
   [ "$STATUS" = "running" ] && { echo "RUNNING"; break; }
-  [ "$STATUS" = "failed" ]  && { echo "FAILED — check logs"; break; }
-  [ "$STATUS" = "circuit_open" ] && { echo "CIRCUIT OPEN — fix app, then POST .../reset"; break; }
+  [ "$STATUS" = "failed" ]  && { echo "FAILED — check last_error / deployments"; break; }
+  [ "$CIRCUIT" = "true" ] && { echo "CIRCUIT OPEN — fix app, then POST .../reset then POST .../redeploy"; break; }
   sleep 5
 done
 ```
@@ -352,9 +358,10 @@ ah rotate-key --new-key-file /path/to/new.key
 | `401 Unauthorized` | Check key format: `keyid.secret` |
 | `422 Unprocessable Entity` | Name/email already exists, missing required field, reserved subdomain (`api`, `admin`, etc.), or DNS label too long |
 | `429 Too Many Requests` | Back off; respect `Retry-After` header |
-| `503 Service Unavailable` | Disk >90% or Docker down — check `/v1/system/health/detailed` |
+| `500` `{"error":"internal error"}` on build/DB/restart/redeploy | Disk ≥90% — check `/v1/system/health/detailed?fresh=true` (not 503) |
+| `503 Service Unavailable` | Docker/build/metering/registration unavailable |
 | Service stuck `deploying` >10 min | Server marks it `failed` at 10 min; check health, delete and retry |
-| `circuit_open` | Fix the app, then `POST .../reset`, then `POST .../start` |
+| `circuit_open: true` (boolean; status is `crashed`) | Fix the app, then `POST .../reset`, then `POST .../redeploy` (`/start` returns 409 — reset removes the container) |
 | Build `failed` | Stream build logs with `?follow=true` for the error |
 | All API keys lost | Use `POST /v1/auth/recover` with bootstrap token + tenant email |
 

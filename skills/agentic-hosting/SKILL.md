@@ -28,7 +28,7 @@ Companion files (same repo):
 - Stores state in `/var/lib/ah/ah.db` (WAL) and encrypts secrets with AES-256-GCM
 - Reconciles every **30s**, warns disk at **80%**, blocks new work at **90%**
 - Opens a circuit after **5 crashes in 10 minutes**
-- Accepts `Idempotency-Key` on mutating routes (TTL **10 minutes**; `POST /v1/environments/{id}/exec` excluded)
+- Accepts `Idempotency-Key` on **POST and PUT only** (TTL **10 minutes**; not DELETE/PATCH; `POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` excluded; no PUT routes exist today)
 
 API keys are `keyID.secret`, hashed with HMAC-SHA256 (not bcrypt). Errors are `{"error":"..."}` — no `code` field.
 
@@ -162,21 +162,26 @@ Docker image path (no build):
 curl -s -X POST "$AH_URL/v1/services" \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name":"web","image":"nginx:alpine","port":80}'
+  -d '{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080}'
 # CreateRequest is name, image, port, env only — no memory_mb / cpu_count
+# Stock nginx:alpine crash-loops: ReadonlyRootfs + CapDrop ALL, tmpfs only on
+# /tmp /var/run /var/tmp /run — nginx cannot mkdir /var/cache/nginx.
+# nginxinc/nginx-unprivileged listens on 8080 and writes temp files under /tmp.
 ```
 
-Poll up to 10 minutes:
+Poll up to 10 minutes. `status` is never the string `"circuit_open"` — that is a separate boolean field:
 
 ```bash
 for i in $(seq 1 120); do
-  STATUS=$(curl -s -H "Authorization: Bearer $AH_KEY" \
+  read STATUS CIRCUIT <<EOF
+$(curl -s -H "Authorization: Bearer $AH_KEY" \
     "$AH_URL/v1/services/$SERVICE_ID" \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin)["status"])')
-  echo "[$i/120] $STATUS"
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("status",""), "true" if d.get("circuit_open") else "false")')
+EOF
+  echo "[$i/120] $STATUS circuit_open=$CIRCUIT"
   [ "$STATUS" = "running" ] && break
   [ "$STATUS" = "failed" ] && break
-  [ "$STATUS" = "circuit_open" ] && break
+  [ "$CIRCUIT" = "true" ] && break
   sleep 5
 done
 ```
@@ -256,18 +261,18 @@ Bearer (`Authorization: Bearer $AH_KEY`):
 | POST/GET/DELETE | `/v1/kanban` · GET `.../admin-token` |
 | POST/GET/DELETE | `/v1/environments` · `.../start` `.../stop` `.../lease` `.../exec` `.../sync` (`git_url`/`git_ref` on **sync only**) · previews |
 
-Pagination default **100** (activity **50**), max 200. Quota exceeded → **409**. Disk/Docker down → **503**.
+Pagination default **100** (activity **50**), max 200. Quota exceeded → **409**. Docker/manager down → **503**. Disk ≥90% on build/DB/restart/redeploy → **500** `{"error":"internal error"}` (diskcheck is untyped). Service create still returns 201; the async deploy then sets `status=failed` and `last_error`.
 
 ## Day-to-day
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/services"
 curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/reset" -H "Authorization: Bearer $AH_KEY"
-curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/start" -H "Authorization: Bearer $AH_KEY"
+curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/redeploy" -H "Authorization: Bearer $AH_KEY"
 curl -s -H "Authorization: Bearer $AH_KEY" "$AH_URL/v1/tenant/usage"
 ```
 
-Circuit open: fix the app, `POST .../reset`, then `POST .../start`. Auto-backoff 30m → 1h → 4h.
+Circuit open: fix the app, `POST .../reset`, then `POST .../redeploy`. Reset stops and **removes** the container, so `POST .../start` returns 409 (`service has no container — use POST /redeploy`). Auto-backoff 30m → 1h → 4h also leaves the service stopped — it does not restart it.
 
 Backup on the server: `ah backup` (VACUUM INTO, gzip, keep last 10). Also back up `/var/lib/ah/master.key` off-box.
 
@@ -279,7 +284,8 @@ Backup on the server: `ah backup` (VACUUM INTO, gzip, keep last 10). Also back u
 | 401 | Key format `keyID.secret`; tenant suspended; key revoked |
 | 422 | Duplicate name/email, reserved DNS label (`api`,`admin`,…), bad field |
 | 429 | Honor `Retry-After`; register limiter is 5/IP/hr |
-| 503 | Disk ≥90% or Docker down — `GET /v1/system/health/detailed?fresh=true` |
+| 500 `{"error":"internal error"}` on build/DB/restart/redeploy | Disk ≥90% — `GET /v1/system/health/detailed?fresh=true` (diskcheck is untyped; not 503) |
+| 503 | Docker/build/metering/registration unavailable |
 | `unsupported source_type` | You sent `git_url`/`branch`. Send `source_type`/`source_url`/`source_ref` |
 | `image is required` | Always send `image` (`pending` for git) |
 | Slash command 404 | Commands are `/ah-deploy` not `/deploy` |

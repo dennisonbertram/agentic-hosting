@@ -22,7 +22,7 @@ There is no required dashboard. Humans can use the optional supervisory UI or th
 
 ## Design principles (from the code, not a pitch)
 
-1. **Agentic-first** — every mutating endpoint returns JSON. Errors are `{"error":"..."}`. Write routes accept an `Idempotency-Key`.
+1. **Agentic-first** — every mutating endpoint returns JSON. Errors are `{"error":"..."}`. POST and PUT accept an `Idempotency-Key` (not DELETE/PATCH).
 2. **One happy path per primitive** — Postgres or Redis, Nixpacks, Traefik. No plugin marketplace.
 3. **Multi-tenant** — API keys are scoped to one tenant. Resources are namespaced. Rate limits are per-tenant and global.
 4. **Secure by default** — gVisor is required in production. The API binds loopback unless you pass `--dev`. HTTPS is enforced unless `--dev` is set.
@@ -160,8 +160,8 @@ agentic-hosting was built so an agent can own the full lifecycle of a service wi
 | Failure mode | What `ah` does instead |
 |--------------|------------------------|
 | HTML 500 pages | Every handler writes JSON. Errors are `{"error":"<message>"}` via `httpx.WriteError` / `apierr.WriteAPIError`. |
-| Duplicate creates on retry | Authenticated mutating routes run through an idempotency store keyed by tenant + method + path + `Idempotency-Key`. TTL is **10 minutes**. Body hash mismatches return 409. |
-| Crash loops at machine speed | Reconciler opens a circuit after **5 crashes in 600 seconds**, stops the container, and backs off 30m → 1h → 4h. |
+| Duplicate creates on retry | **POST and PUT** run through an idempotency store keyed by tenant + method + path + `Idempotency-Key` (not DELETE/PATCH). TTL is **10 minutes**. Body hash mismatches return 409. |
+| Crash loops at machine speed | Reconciler opens a circuit after **5 crashes in 600 seconds**, **stops and removes** the container, and backs off 30m → 1h → 4h (circuit closes; service stays stopped until redeploy). |
 | Unbounded blast radius | Keys belong to one tenant. Max **20** active keys. Registration requires a bootstrap token (unless `--dev --open-registration`). |
 | Disk filled by a runaway deploy | `diskcheck.CheckAll` on `/var/lib/ah` and `/var/lib/docker`: warn at **80%**, **block at 90%** on deploy, build, database create, kanban create, and backup. |
 
@@ -197,7 +197,7 @@ There is no platform fee in the binary. Quotas are per-tenant rows in `tenant_qu
 | API keys | 20 (enforced in `handleKeyCreate`, not the quota table) |
 | Tenants on the instance | 1000 active |
 
-Operators raise quotas with `PATCH /v1/tenants/{tenantID}/quotas` and a bootstrap token.
+New tenants therefore get **2048 MB / 2 CPUs** as container limits (not the 512 MB / 1 CPU fallback in `RunContainer`, which applies only when the quota row cannot be loaded). `PATCH /v1/tenants/{tenantID}/quotas` currently updates service/database/build/env-var caps, not memory/CPU/disk; those quota columns are still operator-configurable in the database. All limits are still bounded by the host’s RAM, CPU, and disk.
 
 ## Related reading
 
@@ -266,7 +266,7 @@ Environment (see `internal/config`): `AH_DATA_DIR`, `AH_DB_PATH`, `AH_METER_DB_P
 - `Runtime: "runsc"`
 - `PidsLimit: 256`
 - `MemorySwap = Memory` (no extra swap)
-- Default 512 MB / 1 CPU unless tenant limits say otherwise
+- Memory / CPU from `tenant_quotas` (new tenants: **2048 MB / 2 CPUs**). Fallback **512 MB / 1 CPU** only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 - `CapDrop: ALL`, `SecurityOpt: no-new-privileges`, `ReadonlyRootfs: true`
 - tmpfs on `/tmp` (64m), `/var/run`, `/var/tmp`, `/run` (16m each), `noexec,nosuid`
 - `RestartPolicy: unless-stopped`
@@ -318,7 +318,7 @@ Migrations live in `internal/db/migrations/` (`state_001` … `state_019`, `mete
 4. HTTPS check (unless `--dev`)
 5. Auth (Bearer `keyID.secret` → HMAC-SHA256 verify against stored hash)
 6. Per-tenant + global token buckets
-7. Idempotency (mutating authenticated routes; **not** `POST /v1/environments/{id}/exec`)
+7. Idempotency (**POST and PUT** only; **not** DELETE/PATCH, **not** `POST /v1/auth/keys` or `POST /v1/environments/{id}/exec`; no PUT routes exist)
 8. 30s timeout on short routes; logs, DB create, kanban create, environment create/sync skip that timeout
 
 ## Packages that matter
@@ -481,7 +481,8 @@ curl -s -X POST "$AH_URL/v1/services" \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"name":"web","image":"nginx:alpine","port":80}'
+  -d '{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080}'
+# Stock nginx:alpine crash-loops under ReadonlyRootfs (no /var/cache/nginx tmpfs).
 ```
 
 Or with the CLI:
@@ -489,7 +490,7 @@ Or with the CLI:
 ```bash
 curl -fsSL https://agentic.hosting/install-cli.sh | bash
 ahc configure --url "$AH_URL" --key "$AH_KEY"
-ahc deploy nginx:alpine web --port 80
+ahc deploy nginxinc/nginx-unprivileged web --port 8080
 ahc status
 ```
 
@@ -734,12 +735,14 @@ Stuck `deploying` longer than **10 minutes** is marked `failed` by the reconcile
 
 Arbitrary registries are rejected.
 
+Quickstart images must survive **ReadonlyRootfs** + `CapDrop ALL` (tmpfs only on `/tmp`, `/var/run`, `/var/tmp`, `/run`). Stock `nginx:alpine` crash-loops trying to `mkdir /var/cache/nginx`. Use `nginxinc/nginx-unprivileged` on port **8080**.
+
 ## CLI and skill shortcuts
 
 ```bash
 ahc deploy https://github.com/org/repo web --port 3000
 # or
-ahc deploy nginx:alpine web --port 80
+ahc deploy nginxinc/nginx-unprivileged web --port 8080
 ```
 
 `ahc deploy` treats `http://` or `https://` as git. The Claude command `/ah-deploy` does the same, then streams build logs.
@@ -819,7 +822,7 @@ Creation is a long route (no 30s chi timeout). Use an `Idempotency-Key`. Disk ch
 | GET | `/v1/databases/{dbID}/connection-string` | `{"connection_string":"..."}` — **AUDIT** logged |
 | DELETE | `/v1/databases/{dbID}` | Container + volume wiped |
 
-Passwords and connection strings are AES-256-GCM encrypted at rest (tenant-derived key material via the master key).
+Passwords and connection strings are AES-256-GCM encrypted at rest with the **server master key**. There is no per-tenant key separation yet (see [Security model](./security/)).
 
 ## Wiring a service
 
@@ -944,28 +947,29 @@ Do not `docker stop` a tenant container and expect it to stay down. If the row i
 
 ### 1. Crash detection
 
-For each service with `status = 'running'` and a `container_id`:
+For each service with `status` `running` or `crashed`, `circuit_open = 0`, and a `container_id`:
 
+- Docker `RestartCount` grew since last tick → crash event(s)
 - Missing container → crash
 - Exited / dead → crash
 - Transient inspect errors are **skipped** (not counted)
 
-Crash accounting (two-step SQL, to avoid SQLite evaluation-order bugs):
+Crash accounting:
 
 - Window is **600 seconds**
 - First crash in a new window sets `crash_count = 1`
 - Further crashes in the window increment
-- At **5** crashes inside the window: `circuit_open = 1`, `circuit_open_count++`, `circuit_retry_at` set, container **stopped**
+- At **5** crashes inside the window: `circuit_open = 1`, `circuit_open_count++`, `circuit_retry_at` set, container **stopped and removed**, `container_id` cleared
 
 See [Crash-loop & disk guards](./guards/) for backoff.
 
 ### 1a. Unhealthy
 
-If Docker reports `unhealthy`, the reconciler stops the container (so `unless-stopped` can start a fresh one) and counts it as a crash. The platform does **not** inject a wget HEALTHCHECK — `RunContainer` comments say healthchecks are left to the image author because many images lack curl/wget.
+If Docker reports `unhealthy`, the reconciler **restarts** the container (a manual stop would stay stopped under `unless-stopped`) and counts it as a crash. The platform does **not** inject a wget HEALTHCHECK — `RunContainer` comments say healthchecks are left to the image author because many images lack curl/wget.
 
 ### 1b. Auto recovery
 
-Rows with `circuit_open = 1` and `circuit_retry_at <= now` are reset: circuit closed, `crash_count = 0`, status `stopped`. A later tick / start path can bring them back.
+Rows with `circuit_open = 1` and `circuit_retry_at <= now` are reset: circuit closed, `crash_count = 0`, status `stopped`. The container was already removed when the breaker tripped; **nothing restarts it**. Use `POST .../redeploy` (`/start` returns 409 `service has no container`).
 
 ### 2. Stale deploys
 
@@ -1001,7 +1005,7 @@ Not the reconciler. `environments.PoolManager` refills every **60s**, pool size 
 | Action | Use |
 |--------|-----|
 | Stop a service | `POST /v1/services/{id}/stop` |
-| Pause crash loops | Wait for circuit, or `POST .../reset` after you fix the app |
+| Pause crash loops | Wait for circuit, or `POST .../reset` then `POST .../redeploy` after you fix the app |
 | Delete leftovers | API delete + wait for GC (10 min age gate) |
 | Inspect drift | `GET /v1/system/health/detailed?fresh=true` and `docker ps` |
 
@@ -1020,8 +1024,8 @@ Implemented in `internal/reconciler` (not a library).
 |-----------|--------|
 | Crash window | 600 seconds |
 | Open threshold | `crash_count >= 5` inside the window |
-| On open | Container stopped, `circuit_open = 1` |
-| Manual reset | `POST /v1/services/{id}/reset` |
+| On open | Container **stopped and removed**, `container_id` cleared, `circuit_open = 1` |
+| Manual reset | `POST /v1/services/{id}/reset` then `POST .../redeploy` (`/start` returns 409 — no container) |
 
 Backoff (`circuitRetryBackoff`):
 
@@ -1031,11 +1035,11 @@ Backoff (`circuitRetryBackoff`):
 | 2 | 1 hour |
 | 3+ | 4 hours |
 
-When `circuit_retry_at` elapses, the reconciler clears the circuit and sets status `stopped` so a subsequent start can happen. If the app still crash-loops, the circuit opens again and the count escalates.
+When `circuit_retry_at` elapses, the reconciler clears the circuit and sets status `stopped`. The container is already gone; **nothing restarts it**. Use `POST .../redeploy` (not `/start`). If the app still crash-loops, the circuit opens again and the count escalates.
 
 **Do not script reset in a tight loop.** Reset is for “we fixed the binary / env.”
 
-Statuses you will see: `crashed`, and after enough failures the circuit columns flip. Some docs say `circuit_open` as a status string; the DB also has a boolean `circuit_open` column. Read both `status` and `circuit_open` on `GET /v1/services/{id}`.
+`status` is never the string `"circuit_open"`. After the breaker trips, `status` stays `crashed` and `circuit_open` is a separate boolean. After auto-recovery or manual reset, `status` is `stopped`. Read both fields on `GET /v1/services/{id}`.
 
 ## Disk watermarks
 
@@ -1067,9 +1071,12 @@ Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `d
 | Queued deploys | 20 |
 | Build slots | 10 |
 | PIDs per service container | 256 |
-| Default memory / CPU | 512 MB / 1 CPU |
+| Default memory / CPU (new tenant) | **2048 MB / 2 CPUs** from `tenant_quotas` (`state_001_init.sql`). `RunContainer` applies those as container limits. Fallback **512 MB / 1 CPU** only if the quota row cannot be loaded (`internal/docker/client.go`). Limits are per-tenant and still bounded by the host. |
 
-When disk is over 90%, expect **503** or a wrapped `disk check:` error on create/deploy/build — not a silent queue.
+When disk is over 90%:
+
+- `POST /v1/services` still returns **201** `deploying`; the async deploy then sets `status=failed` and `last_error` to the diskcheck message
+- Build create, DB create, restart, and redeploy return **500** `{"error":"internal error"}` — diskcheck is a plain `fmt.Errorf`, and `apierr.WriteAPIError` falls back to 500. This is **not** 503.
 
 
 # Rate limits
@@ -1124,11 +1131,11 @@ Invalid bootstrap tokens **still consume** the limiter (brute-force resistance).
 
 `apierr.QuotaExceeded` is **409 Conflict**, not 429. Hitting `max_services` is a resource conflict. Hammering the API is a rate limit.
 
-The `tenant_quotas.api_rate_limit` column defaults to 100 and is **exposed** on `GET /v1/tenant/usage`, but the HTTP limiter is constructed with the constants above — it does not read that column per request.
+The `tenant_quotas.api_rate_limit` column defaults to 100. Auth middleware reads it per request (`internal/middleware/auth.go`) and the limiter uses that value with burst **2×** (`ratelimit.go`). Values ≤ 0 fall back to the 100/200 constructor defaults. `PATCH /v1/tenants/{id}/quotas` does not currently accept `api_rate_limit`, so the live default matches the constants unless the column is changed out of band.
 
 ## Idempotency is not a rate limit
 
-`Idempotency-Key` dedups retries for **10 minutes**. Same key + same tenant + method + path + body → replayed response. Different body → **409**. Stored response cap 8 KB. Exec is excluded.
+`Idempotency-Key` applies to **POST and PUT only** (not DELETE/PATCH; no PUT routes exist). Dedups retries for **10 minutes**. Same key + same tenant + method + path + body → replayed **2xx**. Different body → **409**. Stored response cap 8 KB. `POST /v1/auth/keys` and `POST .../exec` are excluded. Store is in-memory (restart clears); max 50 keys per tenant.
 
 
 # Backups
@@ -1210,7 +1217,7 @@ Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (met
 | `Authorization: Bearer …` | All tenant routes |
 | `X-Bootstrap-Token` | Register (and recover/reactivate/quotas only if `AH_ADMIN_TOKEN` is unset) |
 | `X-Admin-Token` | Recover, reactivate, quotas when `AH_ADMIN_TOKEN` is set |
-| `Idempotency-Key` | Authenticated mutating routes except `POST .../exec` |
+| `Idempotency-Key` | POST and PUT only (not DELETE/PATCH; no PUT routes). Excluded: `POST /v1/auth/keys`, `POST .../exec` |
 | `Content-Type: application/json` | Bodies |
 | `X-Forwarded-Proto: https` | Required in production from loopback Traefik |
 
@@ -1337,13 +1344,14 @@ Bootstrap + `{"email"}`.
 ### `POST /v1/services`
 
 ```json
-{"name":"web","image":"nginx:alpine","port":80,"env":{"KEY":"val"}}
+{"name":"web","image":"nginxinc/nginx-unprivileged","port":8080,"env":{"KEY":"val"}}
 ```
 
 - `name` required, max 128
 - `image` validated (Docker Hub or loopback registry)
 - `port` 0 means default **8000**; explicit values must be 1–65535
 - Returns **201** with `status: "deploying"`; deploy runs in a 10-minute background context
+- Stock `nginx:alpine` crash-loops under ReadonlyRootfs (no `/var/cache/nginx` tmpfs). Use `nginxinc/nginx-unprivileged` on **8080**.
 
 ### `POST /v1/services?from_snapshot={id}`
 
@@ -1564,8 +1572,8 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | 413 | Body > 1 MB |
 | 422 | Registration uniqueness (deliberately vague) |
 | 429 | Rate limit |
-| 500 | Unexpected |
-| 503 | Docker/build/metering/registration unavailable; often disk |
+| 500 | Unexpected, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) |
+| 503 | Docker/build/metering/registration unavailable (manager nil) |
 
 ## Timeouts
 
@@ -1654,7 +1662,7 @@ Every tenant **service** container (`RunContainer`):
 | Rootfs | read-only + tmpfs on `/tmp`, `/var/run`, `/var/tmp`, `/run` |
 | PIDs | 256 |
 | Swap | `MemorySwap = Memory` |
-| Restart | `unless-stopped` (defeated when the circuit opens — reconciler stops the container) |
+| Restart | `unless-stopped` (defeated when the circuit opens — reconciler **stops and removes** the container) |
 | Traefik Docker provider | `traefik.enable=false` so image labels cannot register routes |
 
 Database and environment containers also use `runsc` (see `internal/docker` / `internal/environments`).
@@ -1681,7 +1689,7 @@ Tenant containers are not given a path to the Docker socket.
 | Master key | 32-byte file, chmod 600 |
 | Bootstrap tokens | env only, HMAC-compared |
 
-`ah rotate-key` re-encrypts rows. There is **no** HKDF domain separation in the running crypto helpers yet (that is a planned doc under `docs/security/`).
+`ah rotate-key` re-encrypts rows. There is **no** HKDF domain separation and **no** per-tenant key derivation in the running crypto helpers yet (plan: `docs/security/hkdf-key-separation-plan.md`). All AES-256-GCM columns use the server master key.
 
 ## API / HTTP
 
@@ -1753,18 +1761,19 @@ You passed `--listen-addr=0.0.0.0` without `--dev`. That is intentional.
 
 ## Circuit open / service `crashed`
 
-Five exits or unhealthies in 10 minutes. Container is stopped.
+Five exits or unhealthies in 10 minutes. Container is **stopped and removed**. `/logs` then returns 409 `service has no container`.
 
-1. `GET /v1/services/{id}` and `/logs`
-2. Fix image or env
-3. `POST /v1/services/{id}/reset`
-4. `POST /v1/services/{id}/start`
+1. `GET /v1/services/{id}` — read `last_error`, `crash_count`, and the boolean `circuit_open` (`status` is `crashed`, not `"circuit_open"`)
+2. `GET /v1/services/{id}/deployments` for crash history
+3. Fix image or env
+4. `POST /v1/services/{id}/reset`
+5. `POST /v1/services/{id}/redeploy` — **not** `/start` (start returns 409 because reset cleared `container_id`)
 
-Or wait for auto-backoff (30m / 1h / 4h).
+Or wait for auto-backoff (30m / 1h / 4h), which **closes the circuit and leaves the service stopped**. Then redeploy.
 
 ## Deploy / build returns disk error
 
-`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`.
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, restart, redeploy) return **500** `{"error":"internal error"}`, not 503. Service create returns 201 and the async deploy fails with `last_error` set.
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" \
@@ -1980,8 +1989,9 @@ Body: {"token":"<bootstrap-token>"}
 POST /v1/services
 Body: {
   "name": "string",           # required, max 128
-  "image": "nginx:alpine",    # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
-  "port": 80,                 # 0 / omitted → 8000; must be 1–65535 if set
+  "image": "nginxinc/nginx-unprivileged",  # required (Docker Hub or 127.0.0.1:5000 / localhost:5000)
+  "port": 8080,               # 0 / omitted → 8000; must be 1–65535 if set
+  # Stock nginx:alpine crash-loops under ReadonlyRootfs (needs /var/cache/nginx).
   "env": {"KEY": "value"}     # optional inline env vars
 }
 # There is no memory_mb / cpu_count on CreateRequest.
@@ -2218,16 +2228,15 @@ GET /v1/activity?limit=50
 | `running` | Container is up and passing health checks |
 | `stopped` | Manually stopped |
 | `failed` | Deploy timed out (10 min) or fatal error |
-| `circuit_open` | Crash-looped (5 crashes / 10 min); manually reset required |
-| `crashed` | Container exited unexpectedly; reconciler will restart |
+| `crashed` | Container exited unexpectedly; `circuit_open` is a **boolean field**, not a status. After 5 crashes / 10 min the breaker trips, the container is removed, and status stays `crashed` until reset |
 
 ---
 
 ## Idempotency
 
-Add to any mutating request to make retries safe:
+Add to **POST and PUT** requests (not DELETE/PATCH; no PUT routes exist today):
 ```
 Idempotency-Key: <any-stable-uuid>
 ```
-Same key + same tenant + same method + same path + same body hash = same result. TTL is 10 minutes.
-`POST /v1/environments/{id}/exec` is not idempotent.
+Same key + same tenant + same method + same path + same body hash = replayed 2xx. TTL is 10 minutes.
+`POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.

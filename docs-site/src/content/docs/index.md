@@ -22,7 +22,7 @@ There is no required dashboard. Humans can use the optional supervisory UI or th
 
 ## Design principles (from the code, not a pitch)
 
-1. **Agentic-first** — every mutating endpoint returns JSON. Errors are `{"error":"..."}`. Write routes accept an `Idempotency-Key`.
+1. **Agentic-first** — every mutating endpoint returns JSON. Errors are `{"error":"..."}`. POST and PUT accept an `Idempotency-Key` (not DELETE/PATCH).
 2. **One happy path per primitive** — Postgres or Redis, Nixpacks, Traefik. No plugin marketplace.
 3. **Multi-tenant** — API keys are scoped to one tenant. Resources are namespaced. Rate limits are per-tenant and global.
 4. **Secure by default** — gVisor is required in production. The API binds loopback unless you pass `--dev`. HTTPS is enforced unless `--dev` is set.

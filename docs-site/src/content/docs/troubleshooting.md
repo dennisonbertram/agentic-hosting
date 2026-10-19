@@ -36,18 +36,19 @@ You passed `--listen-addr=0.0.0.0` without `--dev`. That is intentional.
 
 ## Circuit open / service `crashed`
 
-Five exits or unhealthies in 10 minutes. Container is stopped.
+Five exits or unhealthies in 10 minutes. Container is **stopped and removed**. `/logs` then returns 409 `service has no container`.
 
-1. `GET /v1/services/{id}` and `/logs`
-2. Fix image or env
-3. `POST /v1/services/{id}/reset`
-4. `POST /v1/services/{id}/start`
+1. `GET /v1/services/{id}` — read `last_error`, `crash_count`, and the boolean `circuit_open` (`status` is `crashed`, not `"circuit_open"`)
+2. `GET /v1/services/{id}/deployments` for crash history
+3. Fix image or env
+4. `POST /v1/services/{id}/reset`
+5. `POST /v1/services/{id}/redeploy` — **not** `/start` (start returns 409 because reset cleared `container_id`)
 
-Or wait for auto-backoff (30m / 1h / 4h).
+Or wait for auto-backoff (30m / 1h / 4h), which **closes the circuit and leaves the service stopped**. Then redeploy.
 
 ## Deploy / build returns disk error
 
-`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`.
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, restart, redeploy) return **500** `{"error":"internal error"}`, not 503. Service create returns 201 and the async deploy fails with `last_error` set.
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" \

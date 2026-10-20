@@ -50,7 +50,7 @@ func main() {
 			runBackup(dbPath)
 			return
 		case "rotate-key":
-			runRotateKey(os.Args[2:])
+			runRotateKey(os.Args[2:], cfg.DBPath)
 			return
 		case "build-broker":
 			runBuildBroker()

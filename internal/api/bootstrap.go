@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"math"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -31,14 +29,7 @@ type BootstrapTokenValidateResponse struct {
 //     configured" and "token not matched" to avoid information leakage.
 func (s *Server) handleBootstrapTokenValidate(w http.ResponseWriter, r *http.Request) {
 	// Apply the same rate limiter as tenant registration.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	if !regLimiter.allowRequest(w, r) {
 		return
 	}
 

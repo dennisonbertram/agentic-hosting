@@ -11,22 +11,30 @@ import (
 	"fmt"
 	"io"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-func Encrypt(plaintext []byte, key []byte) (string, error) {
+// newGCM returns AES-256-GCM keyed with the first 32 bytes of key.
+func newGCM(key []byte) (cipher.AEAD, error) {
 	if len(key) < 32 {
-		return "", fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+		return nil, fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
 	}
 	block, err := aes.NewCipher(key[:32])
 	if err != nil {
-		return "", fmt.Errorf("new cipher: %w", err)
+		return nil, fmt.Errorf("new cipher: %w", err)
 	}
-
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("new gcm: %w", err)
+		return nil, fmt.Errorf("new gcm: %w", err)
+	}
+	return aesGCM, nil
+}
+
+// Encrypt seals plaintext with AES-256-GCM under key and returns
+// hex(nonce || ciphertext).
+func Encrypt(plaintext []byte, key []byte) (string, error) {
+	aesGCM, err := newGCM(key)
+	if err != nil {
+		return "", err
 	}
 
 	nonce := make([]byte, aesGCM.NonceSize())
@@ -38,23 +46,15 @@ func Encrypt(plaintext []byte, key []byte) (string, error) {
 	return hex.EncodeToString(ciphertext), nil
 }
 
+// Decrypt reverses Encrypt.
 func Decrypt(ciphertextHex string, key []byte) ([]byte, error) {
-	if len(key) < 32 {
-		return nil, fmt.Errorf("key must be at least 32 bytes, got %d", len(key))
+	aesGCM, err := newGCM(key)
+	if err != nil {
+		return nil, err
 	}
 	ciphertext, err := hex.DecodeString(ciphertextHex)
 	if err != nil {
 		return nil, fmt.Errorf("hex decode: %w", err)
-	}
-
-	block, err := aes.NewCipher(key[:32])
-	if err != nil {
-		return nil, fmt.Errorf("new cipher: %w", err)
-	}
-
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("new gcm: %w", err)
 	}
 
 	nonceSize := aesGCM.NonceSize()
@@ -69,18 +69,6 @@ func Decrypt(ciphertextHex string, key []byte) ([]byte, error) {
 	}
 
 	return plaintext, nil
-}
-
-func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("bcrypt hash: %w", err)
-	}
-	return string(hash), nil
-}
-
-func VerifyPassword(hash, password string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
 // HashAPIKey produces a fast, constant-time-comparable hash for API key verification.

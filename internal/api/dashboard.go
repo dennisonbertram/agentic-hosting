@@ -38,17 +38,10 @@ func (s *Server) handleActivityList(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 	q := r.URL.Query()
 
-	limit := 50
-	if raw := q.Get("limit"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 {
-			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
-			return
-		}
-		if value > 200 {
-			value = 200
-		}
-		limit = value
+	limit, err := parseLimit(r, 50)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	var filter activityFilter

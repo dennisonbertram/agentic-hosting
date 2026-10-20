@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
+	"github.com/go-chi/chi/v5"
 )
 
 const maxKeysPerTenant = 20
@@ -60,33 +60,11 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var keyCount int
-	err := s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
-		tenantID,
-	).Scan(&keyCount)
+	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if keyCount >= maxKeysPerTenant {
-		writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached, revoke unused keys first")
-		return
-	}
-
-	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
-	// Use keyID prefix as the display hint, not the secret's prefix
-	if len(keyID) < 8 {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	prefix := keyID[:8]
 	now := time.Now().Unix()
 
 	var expiresAt *int64
@@ -95,26 +73,54 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &exp
 	}
 
-	_, err = s.store.StateDB.Exec(
+	// The quota check is part of the INSERT so concurrent creates cannot both
+	// pass a separate COUNT and push the tenant past maxKeysPerTenant.
+	res, err := s.store.StateDB.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		keyID, tenantID, req.Name, prefix, keyHash, now, expiresAt,
+		 SELECT ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL) < ?`,
+		key.id, tenantID, req.Name, key.prefix, key.hash, now, expiresAt,
+		tenantID, maxKeysPerTenant,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
 		return
 	}
-
-	// Return token in format "keyID.secret" for O(1) lookup
-	token := keyID + "." + apiKey
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached, revoke unused keys first")
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, CreateKeyResponse{
-		ID:      keyID,
+		ID:      key.id,
 		Name:    req.Name,
-		APIKey:  token,
-		Prefix:  prefix,
+		APIKey:  key.token,
+		Prefix:  key.prefix,
 		Expires: expiresAt,
 	})
+}
+
+// newAPIKey is a freshly generated API key that has not been stored yet.
+type newAPIKey struct {
+	id     string // api_keys primary key
+	prefix string // display hint: first 8 chars of the key ID, never of the secret
+	hash   string // HMAC of the secret, stored as api_keys.key_hash
+	token  string // "keyID.secret" (O(1) lookup by auth); shown to the caller once
+}
+
+// mintAPIKey generates a key ID and secret and derives the stored hash and the
+// one-time token.
+func (s *Server) mintAPIKey() (newAPIKey, error) {
+	secret, keyID, err := crypto.GenerateAPIKeyWithID()
+	if err != nil {
+		return newAPIKey{}, err
+	}
+	return newAPIKey{
+		id:     keyID,
+		prefix: keyID[:8], // GenerateAPIKeyWithID always returns 32 hex chars
+		hash:   crypto.HashAPIKey(secret, s.apiKeyHashKey),
+		token:  keyID + "." + secret,
+	}, nil
 }
 
 func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {

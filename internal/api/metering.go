@@ -58,7 +58,8 @@ func parseMetricsQuery(r *http.Request) (metricsQuery, error) {
 //   - period:     "hourly" or "daily" (default: "daily")
 //   - since:      RFC3339 timestamp (default: 24h ago)
 //   - until:      RFC3339 timestamp (default: now)
-//   - service_id: optional, filter to a specific service
+//   - service_id: optional, filter to a specific service (or sandbox, with kind=sandbox)
+//   - kind:       optional, "service" (default) or "sandbox"
 func (s *Server) handleTenantMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.meteringStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "metering not available")
@@ -74,8 +75,16 @@ func (s *Server) handleTenantMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serviceID := r.URL.Query().Get("service_id")
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		kind = metering.ResourceKindService
+	}
+	if !metering.ValidResourceKinds[kind] {
+		writeError(w, http.StatusBadRequest, "kind must be 'service' or 'sandbox'")
+		return
+	}
 
-	metrics, err := s.meteringStore.QueryTenantMetrics(tenantID, mq.period, mq.since, mq.until, serviceID)
+	metrics, err := s.meteringStore.QueryTenantMetricsKind(tenantID, kind, mq.period, mq.since, mq.until, serviceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query metrics")
 		return

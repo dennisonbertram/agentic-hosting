@@ -158,6 +158,8 @@ type MockDockerClient struct {
 	// RunEnvironment
 	RunEnvironmentFn    func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error)
 	RunEnvironmentCalls int
+	// RunEnvironmentConfigs records every config passed, in call order.
+	RunEnvironmentConfigs []docker.RunEnvironmentConfig
 
 	// ExecCreate
 	ExecCreateFn    func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
@@ -556,6 +558,7 @@ func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage,
 func (m *MockDockerClient) RunEnvironment(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
 	m.mu.Lock()
 	m.RunEnvironmentCalls++
+	m.RunEnvironmentConfigs = append(m.RunEnvironmentConfigs, cfg)
 	m.mu.Unlock()
 	if m.RunEnvironmentFn != nil {
 		return m.RunEnvironmentFn(ctx, cfg)

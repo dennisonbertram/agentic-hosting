@@ -109,6 +109,7 @@ Soft-delete / suspend. Stops services, DBs, kanban; cancels builds.
   "services": {"used": 0, "max": 5},
   "databases": {"used": 0, "max": 3},
   "api_keys": {"used": 0, "max": 20},
+  "sandboxes": {"used": 0, "max": 5},
   "memory_mb": 2048,
   "cpu_cores": 2.0,
   "disk_gb": 20,
@@ -118,7 +119,7 @@ Soft-delete / suspend. Stops services, DBs, kanban; cancels builds.
 
 ### `GET /v1/tenant/usage/metrics`
 
-Query: `period=hourly|daily` (default daily), `since`, `until` (RFC3339), `service_id`. 503 if metering store is nil.
+Query: `period=hourly|daily` (default daily), `since`, `until` (RFC3339), `service_id`, `kind=service|sandbox` (default `service`; with `kind=sandbox`, `service_id` filters by sandbox ID). 503 if metering store is nil. Sandbox samples are stored with `resource_kind='sandbox'` and never appear in service metrics.
 
 ### `POST /v1/tenants/{tenantID}/reactivate`
 
@@ -126,14 +127,20 @@ Bootstrap. New API key. Tenant must exist and be suspended.
 
 ### `PATCH /v1/tenants/{tenantID}/quotas`
 
-Bootstrap. Body fields (all optional, must be ≥ 1 and under caps):
+Bootstrap. Body fields (all optional, must be within min and cap):
 
-| Field | Cap |
-|-------|-----|
-| `max_services` | 100 |
-| `max_databases` | 50 |
-| `max_builds_concurrent` | 10 |
-| `max_env_vars_per_service` | 500 |
+| Field | Min | Cap | Default |
+|-------|-----|-----|---------|
+| `max_services` | 1 | 100 | 5 |
+| `max_databases` | 1 | 50 | 3 |
+| `max_builds_concurrent` | 1 | 10 | 3 |
+| `max_env_vars_per_service` | 1 | 500 | 50 |
+| `max_sandboxes` | 0 | 50 | 5 |
+| `max_sandbox_ttl_seconds` | 60 | 86400 | 14400 |
+| `max_sandbox_lifetime_seconds` | 60 | 604800 | 86400 |
+| `sandbox_egress_allowed` | 0 | 1 | 0 |
+
+`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed` is stored but has no effect yet: `egress: "internet"` is refused for every tenant until sandbox egress ships.
 
 Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`, `api_rate_limit`.
 
@@ -366,6 +373,95 @@ DELETE /v1/environments/{id}/previews/{previewID}   → 204
 
 Preview name: `^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`.
 
+Environment routes only see environments: a sandbox ID returns 404 here, and `GET /v1/environments` does not list sandboxes.
+
+---
+
+## Sandboxes (disposable)
+
+A sandbox is a throwaway container with a TTL. The server deletes it (container, `/workspace` volume and record) when the TTL expires; there is no stop/start. Isolation is the same as an environment: the configured workload runtime (`runsc` / gVisor in production), all capabilities dropped, `no-new-privileges`, 256 PIDs, memory = swap, CPU limit, `noexec` `/tmp`.
+
+**Network:** egress `none` only. The sandbox is attached only to the tenant's internal network (`Internal`, inter-container traffic off): no internet, no other tenant containers, no other tenants. A sandbox forked with `include_env` gets values such as `DATABASE_URL` but is not attached to database networks, so those connections fail.
+
+**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas and separate name namespaces: a sandbox may share a name with an environment, and names are unique only within each kind (409 names the conflicting kind).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/v1/sandboxes` | Long route, `Idempotency-Key` honoured, may pull an image |
+| GET | `/v1/sandboxes?limit&offset&status` | `status` = `creating\|running\|stopped\|failed\|deleting` |
+| GET | `/v1/sandboxes/{sandboxID}` | |
+| DELETE | `/v1/sandboxes/{sandboxID}` | 204. Long route |
+| POST | `/v1/sandboxes/{sandboxID}/exec` | Same body/response as environment exec. Not idempotent |
+| GET | `/v1/sandboxes/{sandboxID}/logs?tail=100&follow=false` | Main process logs, `tail` clamped to 10000 |
+| POST | `/v1/sandboxes/{sandboxID}/extend` | `{"ttl_seconds":1800}` |
+
+### `POST /v1/sandboxes`
+
+```json
+{
+  "name": "optional; default sbx-<8 hex>; same rule as environment names",
+  "source": {"type": "template", "template": "python"},
+  "ttl_seconds": 1800,
+  "run": "idle",
+  "include_env": false,
+  "memory_mb": 512,
+  "cpu_millicores": 1000,
+  "egress": "none"
+}
+```
+
+| Field | Rules |
+|-------|-------|
+| `source` | One of `{"type":"template","template":"<name or id>"}` (default template `default`), `{"type":"image","image":"python:3.12-slim"}`, `{"type":"snapshot","snapshot_id":"…"}`, `{"type":"service","service_id":"…"}` |
+| `ttl_seconds` | Default 1800. 60 to `max_sandbox_ttl_seconds` (default 14400) |
+| `run` | `idle` runs `sleep infinity` in `/workspace` (default for template and image); `app` keeps the image's ENTRYPOINT/CMD and WORKDIR (default for snapshot and service) |
+| `include_env` | Snapshot and service sources only. Copies the source's decrypted env vars into the container. Values are never returned by the API |
+| `memory_mb` | 128 to min(2048, tenant `max_memory_mb`). Default: template value, else 512 |
+| `cpu_millicores` | 100 to min(2000, tenant `max_cpu_cores` × 1000). Default: template value, else 1000 |
+| `egress` | `none` (default). `internet` → 403 |
+
+Every resolved image goes through the service image allowlist: Docker Hub images, or this tenant's own `127.0.0.1:5000/ah/<tenant>-*` build images and `127.0.0.1:5000/snapshots/<tenant>:*` snapshot images. `localhost/…` and other registries → 400. A snapshot or service owned by another tenant → 404. A service with no built image → 409. A service source reads the service's current image directly and does not create a snapshot.
+
+Response (201; `GET` returns the same shape, `list` an array):
+
+```json
+{
+  "id": "1a2b…", "name": "sbx-1a2b3c4d", "status": "running",
+  "source": {"type": "snapshot", "ref": "<snapshot_id>"},
+  "image": "127.0.0.1:5000/snapshots/<tenant>:<id>",
+  "run": "app", "egress": "none",
+  "memory_mb": 512, "cpu_millicores": 1000, "ttl_seconds": 1800,
+  "created_at": 1760000000, "expires_at": 1760001800,
+  "max_expires_at": 1760086400, "last_activity_at": 1760000000
+}
+```
+
+No `container_id`, volume name or env values are returned.
+
+### `POST /v1/sandboxes/{sandboxID}/exec`
+
+Argv only (no shell; wrap with `sh -c` yourself). The image must contain the coreutils `timeout` binary (distroless images fail with exit code 127). Default working directory `/workspace`. A background process that keeps stdout open holds the request until the timeout; redirect it (`nohup cmd >/tmp/x 2>&1 &`). Exec bumps `last_activity_at` but does not extend the TTL.
+
+### `POST /v1/sandboxes/{sandboxID}/extend`
+
+```json
+{"ttl_seconds": 3600}
+```
+
+Sets `expires_at = now + ttl_seconds`. 400 if `ttl_seconds` is outside 60..`max_sandbox_ttl_seconds` or the new expiry would pass `max_expires_at` (created_at + `max_sandbox_lifetime_seconds`, default 24h); 409 if the sandbox is not running or has already expired. Returns the updated sandbox.
+
+### Lifecycle
+
+```
+creating → running → (TTL) → deleted within ~30s
+running → container died → stopped → deleted after 10 min
+creating → stuck 5 min → failed → deleted after 10 min
+DELETE → deleted now
+tenant suspended → stopped → deleted after 10 min
+```
+
+The sandbox reaper runs every 30s. A teardown that fails (Docker error other than not found) leaves the row `deleting`; it is retried after 2 minutes. Lifecycle events are logged as `AUDIT: action=sandbox.{create,delete,extend,expired,reaped}`.
+
 ---
 
 ## Activity
@@ -402,6 +498,6 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | Most routes | 30s (`chi.Timeout`) |
 | Server `WriteTimeout` | 30s |
 | `ReadTimeout` / `ReadHeaderTimeout` | 10s / 5s |
-| Logs, DB create, kanban create, env create/sync, exec | no chi 30s timeout |
+| Logs, DB create, kanban create, env create/sync, exec, sandbox create/delete/logs/exec | no chi 30s timeout |
 
 Streaming past 30s write timeout can still be cut by `http.Server.WriteTimeout`. In practice log follow is used on the long-timeout group; watch server-level write timeout if streams die at ~30s.

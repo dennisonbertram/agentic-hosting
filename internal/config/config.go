@@ -50,6 +50,10 @@ type Config struct {
 	// prunes (AH_GC_PRUNE_DOCKER, default true). Set false when the Docker daemon
 	// is shared with unrelated work, such as a developer laptop.
 	GCPruneDocker bool
+
+	// MaxSandboxesTotal caps non-failed disposable sandboxes across all
+	// tenants on this host (AH_MAX_SANDBOXES_TOTAL, default 20, 0 = no host cap).
+	MaxSandboxesTotal int
 }
 
 // Container runtimes accepted in AH_CONTAINER_RUNTIME.
@@ -72,6 +76,9 @@ const (
 	DefaultSnapshotMaxAge        = 30 * 24 * time.Hour // 30 days
 )
 
+// DefaultMaxSandboxesTotal is the default host-wide sandbox cap.
+const DefaultMaxSandboxesTotal = 20
+
 // Default returns a Config with all default values.
 func Default() Config {
 	return Config{
@@ -91,6 +98,7 @@ func Default() Config {
 		ContainerRuntime:      RuntimeRunsc,
 		WarmPoolEnabled:       true,
 		GCPruneDocker:         true,
+		MaxSandboxesTotal:     DefaultMaxSandboxesTotal,
 	}
 }
 
@@ -136,6 +144,11 @@ func LoadFromEnv() (Config, error) {
 		ContainerRuntime:      strings.TrimSpace(envOr("AH_CONTAINER_RUNTIME", RuntimeRunsc)),
 		WarmPoolEnabled:       envOrBool("AH_WARM_POOL_ENABLED", true, &errs),
 		GCPruneDocker:         envOrBool("AH_GC_PRUNE_DOCKER", true, &errs),
+		MaxSandboxesTotal:     envOrInt("AH_MAX_SANDBOXES_TOTAL", DefaultMaxSandboxesTotal, &errs),
+	}
+	if cfg.MaxSandboxesTotal < 0 {
+		errs = append(errs, fmt.Errorf("AH_MAX_SANDBOXES_TOTAL must be >= 0 (0 = no host cap), got %d", cfg.MaxSandboxesTotal))
+		cfg.MaxSandboxesTotal = DefaultMaxSandboxesTotal
 	}
 	if cfg.ContainerRuntime != RuntimeRunsc && cfg.ContainerRuntime != RuntimeRunc {
 		errs = append(errs, fmt.Errorf("AH_CONTAINER_RUNTIME must be %q or %q, got %q", RuntimeRunsc, RuntimeRunc, cfg.ContainerRuntime))

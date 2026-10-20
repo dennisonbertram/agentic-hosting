@@ -1128,34 +1128,80 @@ type RunEnvironmentConfig struct {
 	Labels      map[string]string
 	EgressAllow bool
 	WarmPool    bool // explicit lifecycle marker for containers created for the warm pool
+	// Env is passed to the container as KEY=VALUE entries (sandboxes forked
+	// from a snapshot or service with include_env).
+	Env []string
+	// UseImageCmd keeps the image's own ENTRYPOINT/CMD and WORKDIR instead of
+	// "sleep infinity" in /workspace, so a forked service runs its app.
+	UseImageCmd bool
+	// LocalImage tolerates a failed pull when the image is already in the
+	// local store (snapshot and service build tags never exist upstream).
+	LocalImage bool
 }
 
 // RunEnvironment creates and starts an environment container with gVisor runtime.
 // Environments are dev workspaces: writable rootfs, sleep infinity entrypoint,
-// workspace volume at /workspace.
+// workspace volume at /workspace. Sandboxes reuse it with the same isolation.
 func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error) {
 	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID, cfg.EnvID)
 
-	// Pull the image if not available locally.
-	if err := c.PullImage(ctx, cfg.Image); err != nil {
+	if err := ensureEnvironmentImage(ctx, cfg, c.PullImage, c.ImageExists); err != nil {
 		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
 	}
 
+	containerCfg, hostCfg := environmentContainerConfigs(cfg, c.Runtime())
+
+	netCfg := &network.NetworkingConfig{}
+
+	// Ensure the tenant network exists before creating the container.
+	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
+		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("create environment container: %w", err)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		c.rollbackRemove(ctx, resp.ID)
+		return "", fmt.Errorf("start environment container: %w", err)
+	}
+
+	return resp.ID, nil
+}
+
+// ensureEnvironmentImage pulls cfg.Image. With LocalImage set, a failed pull
+// is tolerated when the image is already present locally.
+func ensureEnvironmentImage(ctx context.Context, cfg RunEnvironmentConfig, pull func(context.Context, string) error, exists func(context.Context, string) (bool, error)) error {
+	if cfg.LocalImage {
+		return pullOrUseLocal(ctx, cfg.Image, pull, exists)
+	}
+	return pull(ctx, cfg.Image)
+}
+
+// environmentContainerConfigs builds the container and host configs for an
+// environment or sandbox container. Isolation settings are identical for
+// both; only Cmd/WorkingDir (UseImageCmd) and Env differ.
+func environmentContainerConfigs(cfg RunEnvironmentConfig, runtime string) (*container.Config, *container.HostConfig) {
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	labels := environmentContainerLabels(cfg)
-
 	containerCfg := &container.Config{
-		Image:      cfg.Image,
-		Cmd:        []string{"sleep", "infinity"},
-		WorkingDir: "/workspace",
-		Labels:     labels,
+		Image:  cfg.Image,
+		Labels: environmentContainerLabels(cfg),
+	}
+	if !cfg.UseImageCmd {
+		containerCfg.Cmd = []string{"sleep", "infinity"}
+		containerCfg.WorkingDir = "/workspace"
+	}
+	if len(cfg.Env) > 0 {
+		containerCfg.Env = append([]string(nil), cfg.Env...)
 	}
 
 	initTrue := true
 	hostCfg := &container.HostConfig{
-		Runtime: c.Runtime(),
+		Runtime: runtime,
 		Init:    &initTrue,
 		Resources: container.Resources{
 			Memory:     memoryBytes,
@@ -1181,25 +1227,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		NetworkMode:   container.NetworkMode(cfg.NetworkName),
 	}
-
-	netCfg := &network.NetworkingConfig{}
-
-	// Ensure the tenant network exists before creating the container.
-	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
-		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
-	}
-
-	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
-	if err != nil {
-		return "", fmt.Errorf("create environment container: %w", err)
-	}
-
-	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		c.rollbackRemove(ctx, resp.ID)
-		return "", fmt.Errorf("start environment container: %w", err)
-	}
-
-	return resp.ID, nil
+	return containerCfg, hostCfg
 }
 
 // environmentContainerLabels builds container labels; the ah.* keys are set

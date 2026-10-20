@@ -481,7 +481,11 @@ func (g *GC) removeUnusedBuiltImages(ctx context.Context) int {
 	for _, r := range ctrImages {
 		inUse[r] = true
 	}
-	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`} {
+	// Sandboxes forked from a service or snapshot run from these local tags
+	// too; keep them while the sandbox row exists (including mid-create,
+	// before its container references the image).
+	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`,
+		`SELECT image_ref FROM environments WHERE kind = 'sandbox'`} {
 		// Unknown references (query, scan or iteration error): remove nothing.
 		if err := scanRows(ctx, g.db, q, func(rows *sql.Rows) error {
 			var ref sql.NullString

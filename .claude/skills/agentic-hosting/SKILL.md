@@ -1,6 +1,6 @@
 ---
 name: agentic-hosting
-description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", "redeploy a service", "recover an API key", "check tenant usage", "view deployment history", "fork a service", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
+description: This skill should be used when the user asks to "deploy a service", "deploy an app", "add a domain", "provision a database", "check service status", "view logs", "restart a service", "set environment variables", "reset circuit breaker", "register a tenant", "add a kanban board", "take a snapshot", "redeploy a service", "recover an API key", "check tenant usage", "view deployment history", "fork a service", "run code in a sandbox", "create a disposable sandbox", or mentions operating an agentic-hosting instance. Also trigger when the user says "use agentic-hosting", "spin up on my PaaS", or "deploy to my server".
 ---
 
 # agentic-hosting Operator Skill
@@ -316,6 +316,33 @@ curl -s -X POST "$AH_URL/v1/services?from_snapshot=$SNAPSHOT_ID" \
 # Delete a snapshot
 curl -s -X DELETE $AH_URL/v1/snapshots/$SNAPSHOT_ID -H "Authorization: Bearer $AH_KEY"
 ```
+
+## Sandboxes — run code in a throwaway container
+
+A sandbox is deleted by the server when its TTL expires. No network egress (no internet, no other containers). Sources: an environment template, a Docker Hub image, a snapshot, or a service's current image.
+
+```bash
+# One shot with the CLI: create, run, delete (exit code propagated)
+ahc sandbox run --image python:3.12-slim -- python3 -c 'print(2+2)'
+
+# Or keep one for a while
+SBX=$(curl -s -X POST $AH_URL/v1/sandboxes \
+  -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
+  -d '{"source":{"type":"template","template":"python"},"ttl_seconds":1800}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST $AH_URL/v1/sandboxes/$SBX/exec \
+  -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
+  -d '{"command":["python3","-V"]}'
+curl -s -X POST $AH_URL/v1/sandboxes/$SBX/extend \
+  -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" -d '{"ttl_seconds":3600}'
+curl -s -X DELETE $AH_URL/v1/sandboxes/$SBX -H "Authorization: Bearer $AH_KEY"
+
+# Inspect a copy of a running service (runs its app; env copied, never shown)
+ahc sandbox create web-copy --service $SERVICE_ID --include-env
+ahc sandbox logs web-copy
+ahc sandbox exec web-copy -- ps aux
+```
+
+Quota: `max_sandboxes` (default 5), TTL up to 4h per extend and 24h total by default. See `references/api-reference.md` for all fields.
 
 ## Kanban — per-tenant Vikunja board
 

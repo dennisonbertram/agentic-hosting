@@ -102,6 +102,8 @@ type Server struct {
 	idempotencyStore  *middleware.IdempotencyStore
 	longInflight      *middleware.InflightLimiter
 	corsOrigins       []string
+	// sandboxCreateLimiter caps POST /v1/sandboxes per tenant.
+	sandboxCreateLimiter *middleware.RateLimiter
 }
 
 const (
@@ -172,6 +174,8 @@ func NewServer(cfg ServerConfig) *Server {
 		idempotencyStore:  idem,
 		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
 		corsOrigins:       cfg.CORSOrigins,
+
+		sandboxCreateLimiter: middleware.NewRateLimiter(sandboxCreateRPS, sandboxCreateBurst),
 	}
 	s.setupRoutes()
 	return s
@@ -303,6 +307,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewCreate)
 		r.Get("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewList)
 		r.Delete("/v1/environments/{envID}/previews/{previewID}", s.handleEnvironmentPreviewDelete)
+
+		// Sandbox routes (create, delete, exec and logs need longer timeouts)
+		r.Get("/v1/sandboxes", s.handleSandboxList)
+		r.Get("/v1/sandboxes/{sandboxID}", s.handleSandboxGet)
+		r.Post("/v1/sandboxes/{sandboxID}/extend", s.handleSandboxExtend)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -327,6 +336,12 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/kanban", s.handleKanbanCreate)
 		r.Post("/v1/environments", s.handleEnvironmentCreate)
 		r.Post("/v1/environments/{envID}/sync", s.handleEnvironmentSync)
+		// Create may pull an image; delete stops the container and removes
+		// the volume. Create is idempotent (Idempotency-Key) and rate limited
+		// per tenant.
+		r.With(s.sandboxCreateRateLimit).Post("/v1/sandboxes", s.handleSandboxCreate)
+		r.Delete("/v1/sandboxes/{sandboxID}", s.handleSandboxDelete)
+		r.Get("/v1/sandboxes/{sandboxID}/logs", s.handleSandboxLogs)
 	})
 
 	// Long-running endpoints that skip BOTH standard timeout AND idempotency.
@@ -338,6 +353,7 @@ func (s *Server) setupRoutes() {
 		r.Use(s.longInflight.Middleware)
 		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Post("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
+		r.Post("/v1/sandboxes/{sandboxID}/exec", s.handleSandboxExec)
 	})
 
 	s.router = r

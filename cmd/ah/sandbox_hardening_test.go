@@ -45,6 +45,15 @@ type fakeTarget struct {
 	runtime string
 	tmpfs   bool
 	calls   int
+	// sweptWith records the egress network each delete-if-disabled call saw.
+	sweptWith []string
+	sweepN    int
+	sweepErr  error
+}
+
+func (t *fakeTarget) DeleteEgressSandboxesIfDisabled(context.Context) (int, error) {
+	t.sweptWith = append(t.sweptWith, t.egress)
+	return t.sweepN, t.sweepErr
 }
 
 func (t *fakeTarget) SetSandboxEgressNetwork(n string) { t.egress = n; t.calls++ }
@@ -63,10 +72,12 @@ func installedRules(bridge string) map[string]string {
 			"-A AH-SBX-EGRESS -d 100.64.0.0/10 -j DROP\n" +
 			"-A AH-SBX-EGRESS -d 169.254.0.0/16 -j DROP\n" +
 			"-A AH-SBX-EGRESS -d 127.0.0.0/8 -j DROP\n" +
+			"-A AH-SBX-EGRESS -d 0.0.0.0/8 -j DROP\n" +
 			"-A AH-SBX-EGRESS -d 224.0.0.0/4 -j DROP\n" +
 			"-A AH-SBX-EGRESS -d 240.0.0.0/4 -j DROP\n" +
 			"-A AH-SBX-EGRESS -d 203.0.113.7/32 -j DROP\n" +
 			"-A AH-SBX-EGRESS -j RETURN\n",
+		"iptables FORWARD":  "-P FORWARD DROP\n-A FORWARD -j DOCKER-USER\n-A FORWARD -j DOCKER-FORWARD\n",
 		"iptables INPUT":    "-P INPUT ACCEPT\n-A INPUT -i " + bridge + " -m comment --comment ah-sbx-egress -j DROP\n-A INPUT -p tcp --dport 22 -j ACCEPT\n",
 		"ip6tables FORWARD": "-P FORWARD DROP\n-A FORWARD -i " + bridge + " -j DROP\n",
 		"ip6tables INPUT":   "-P INPUT ACCEPT\n-A INPUT -i " + bridge + " -j DROP\n",
@@ -194,6 +205,45 @@ func TestSetupSandboxEgress_FirewallMissingDisablesEgress(t *testing.T) {
 		"input accept first": func(r map[string]string) {
 			r["iptables INPUT"] = "-A INPUT -p tcp --dport 22 -j ACCEPT\n-A INPUT -i ah-sbx-egress -j DROP\n"
 		},
+		// Regressions for the order checks: anything that can accept,
+		// return or jump elsewhere ahead of a required rule fails.
+		"forward does not jump to DOCKER-USER (nftables backend)": func(r map[string]string) {
+			r["iptables FORWARD"] = "-P FORWARD ACCEPT\n"
+		},
+		"forward unreadable": func(r map[string]string) { delete(r, "iptables FORWARD") },
+		"forward accepts before DOCKER-USER": func(r map[string]string) {
+			r["iptables FORWARD"] = "-P FORWARD DROP\n-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A FORWARD -j DOCKER-USER\n"
+		},
+		"forward jumps to ufw chain before DOCKER-USER": func(r map[string]string) {
+			r["iptables FORWARD"] = "-P FORWARD DROP\n-A FORWARD -j ufw-before-forward\n-A FORWARD -j DOCKER-USER\n"
+		},
+		"forward DOCKER-USER jump narrowed": func(r map[string]string) {
+			r["iptables FORWARD"] = "-P FORWARD DROP\n-A FORWARD -p tcp -j DOCKER-USER\n"
+		},
+		"return before jump (ufw-docker)": func(r map[string]string) {
+			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -s 10.0.0.0/8 -j RETURN\n-A DOCKER-USER -i ah-sbx-egress -m comment --comment ah-sbx-egress -j AH-SBX-EGRESS\n"
+		},
+		"user chain jump before jump": func(r map[string]string) {
+			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -j ufw-user-forward\n-A DOCKER-USER -i ah-sbx-egress -j AH-SBX-EGRESS\n"
+		},
+		"jump narrowed to tcp": func(r map[string]string) {
+			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -i ah-sbx-egress -p tcp -j AH-SBX-EGRESS\n"
+		},
+		"ctstate NEW return before drops": func(r map[string]string) {
+			r["iptables AH-SBX-EGRESS"] = "-A AH-SBX-EGRESS -m conntrack --ctstate NEW -j RETURN\n" + r["iptables AH-SBX-EGRESS"]
+		},
+		"user chain jump before drops": func(r map[string]string) {
+			r["iptables AH-SBX-EGRESS"] = "-A AH-SBX-EGRESS -j SOMETHING-ELSE\n" + r["iptables AH-SBX-EGRESS"]
+		},
+		"this-network not dropped": func(r map[string]string) {
+			r["iptables AH-SBX-EGRESS"] = strings.Replace(r["iptables AH-SBX-EGRESS"], "-A AH-SBX-EGRESS -d 0.0.0.0/8 -j DROP\n", "", 1)
+		},
+		"reserved not dropped": func(r map[string]string) {
+			r["iptables AH-SBX-EGRESS"] = strings.Replace(r["iptables AH-SBX-EGRESS"], "-A AH-SBX-EGRESS -d 240.0.0.0/4 -j DROP\n", "", 1)
+		},
+		"ufw input chain before input drop": func(r map[string]string) {
+			r["iptables INPUT"] = "-P INPUT DROP\n-A INPUT -j ufw-before-input\n-A INPUT -i ah-sbx-egress -j DROP\n"
+		},
 		"iptables unavailable": func(r map[string]string) {
 			for k := range r {
 				delete(r, k)
@@ -295,6 +345,24 @@ func TestConfigureSandboxHardening_Applies(t *testing.T) {
 	err = configureSandboxHardening(context.Background(), cfg, "", false, d, target, sandboxEgressOptions{}, func(string, ...any) {})
 	require.Error(t, err)
 	assert.Zero(t, target.calls)
+	assert.Empty(t, target.sweptWith)
+}
+
+// Regression: when the firewall check disables egress, egress sandboxes from
+// an earlier run are deleted after the (empty) network is applied.
+func TestConfigureSandboxHardening_DisabledEgressDeletesEgressSandboxes(t *testing.T) {
+	rules := installedRules("ah-sbx-egress")
+	delete(rules, "iptables AH-SBX-EGRESS")
+	target := &fakeTarget{egress: "sentinel", sweepN: 2, sweepErr: errors.New("daemon busy")}
+	var logged []string
+	err := configureSandboxHardening(context.Background(), config.Default(), "ah-sbx-egress", false, &fakeHardeningDocker{}, target,
+		sandboxEgressOptions{GOOS: "linux", Run: fakeRunner(rules)},
+		func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
+	require.NoError(t, err, "a failed delete is not fatal")
+	assert.Equal(t, []string{""}, target.sweptWith, "runs once, after egress was set to disabled")
+	joined := strings.Join(logged, "\n")
+	assert.Contains(t, joined, "deleted 2 sandbox(es)")
+	assert.Contains(t, joined, "daemon busy")
 }
 
 func TestDefaultSandboxEgressSubnetMatches(t *testing.T) {
@@ -307,4 +375,21 @@ func TestIsPlainRule(t *testing.T) {
 	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -p tcp -j DROP")))
 	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -m tcp -j DROP")))
 	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i")))
+}
+
+func TestFirewallOrder_DropsAndLogsAheadAreFine(t *testing.T) {
+	rules := installedRules("ah-sbx-egress")
+	rules["iptables INPUT"] = "-P INPUT ACCEPT\n-A INPUT -s 198.51.100.9/32 -j REJECT --reject-with icmp-port-unreachable\n-A INPUT -j LOG\n-A INPUT -i ah-sbx-egress -j DROP\n"
+	rules["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -s 198.51.100.9/32 -j DROP\n-A DOCKER-USER -i ah-sbx-egress -m comment --comment ah-sbx-egress-guard -j DROP\n-A DOCKER-USER -i ah-sbx-egress -m comment --comment ah-sbx-egress -j AH-SBX-EGRESS\n"
+	_, err := checkSandboxEgressFirewall(context.Background(), "ah-sbx-egress", "linux", fakeRunner(rules))
+	require.NoError(t, err)
+}
+
+func TestIsEstablishedReturn(t *testing.T) {
+	assert.True(t, isEstablishedReturn(strings.Fields("-A C -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN")))
+	assert.True(t, isEstablishedReturn(strings.Fields("-A C -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN")))
+	assert.False(t, isEstablishedReturn(strings.Fields("-A C -m conntrack --ctstate NEW -j RETURN")))
+	assert.False(t, isEstablishedReturn(strings.Fields("-A C -m conntrack --ctstate NEW,RELATED,ESTABLISHED -j RETURN")))
+	assert.False(t, isEstablishedReturn(strings.Fields("-A C -s 10.0.0.0/8 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN")))
+	assert.False(t, isEstablishedReturn(strings.Fields("-A C -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")))
 }

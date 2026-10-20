@@ -23,8 +23,14 @@
 #
 # Every rule carries the comment "ah-sbx-egress" so remove/status find them.
 # install is idempotent: it rebuilds the chain and moves the two jump/drop
-# rules back to position 1. Run it again after anything that reorders INPUT
-# or DOCKER-USER (ufw/firewalld reloads, fail2ban restarts).
+# rules back to position 1. While it does, temporary "ah-sbx-egress-guard"
+# drops at position 1 cut the bridge off entirely, so running sandboxes never
+# see a partial ruleset; a failed install leaves them in place (fail closed).
+# Run it again after anything that reorders INPUT or DOCKER-USER
+# (ufw/firewalld reloads, fail2ban restarts).
+#
+# The rules only work while Docker manages iptables with its iptables
+# firewall backend (FORWARD -j DOCKER-USER); ah checks that too.
 #
 # ah verifies these rules at startup (from `snapshot` output, see
 # docs/runbooks/sandboxes-hardening.md) and keeps egress disabled if they
@@ -33,6 +39,7 @@ set -Eeuo pipefail
 
 chain=AH-SBX-EGRESS
 comment=ah-sbx-egress
+guard_comment=ah-sbx-egress-guard
 bridge=${AH_SANDBOX_EGRESS_NETWORK:-ah-sbx-egress}
 dry_run=0 persist=1 detect_host_ips=1
 host_ips=()
@@ -150,14 +157,36 @@ persist_rules() {
   fi
 }
 
+# ensure_chain NAME: create iptables chain NAME if it does not exist.
+ensure_chain() {
+  if ((dry_run)); then
+    printf 'would run: iptables -w -N %s   (if missing)\n' "$1"
+  elif ! iptables -w -S "$1" >/dev/null 2>&1; then
+    iptables -w -N "$1"
+  fi
+}
+
 install_rules() {
   detect_ips
-  # Chain: create if missing, then rebuild from scratch.
-  if ((dry_run)); then
-    printf 'would run: iptables -w -N %s   (if missing)\n' "$chain"
-  elif ! iptables -w -S "$chain" >/dev/null 2>&1; then
-    iptables -w -N "$chain"
+  # DOCKER-USER exists once Docker has started; create it so install can run
+  # first (ah still checks that FORWARD jumps to it).
+  ensure_chain DOCKER-USER
+  ensure_chain "$chain"
+
+  # Fail closed while rebuilding: running egress sandboxes must never see a
+  # flushed or half-built chain, or a moment with no INPUT drop. Guard drops
+  # go to position 1 first and are removed only after everything else is in
+  # place. If a step fails (set -e), the guards stay and the bridge stays cut
+  # off (no egress at all) until install succeeds.
+  trap 'log "install FAILED: the bridge stays blocked by the $guard_comment rules until install succeeds"' ERR
+  ipt -I DOCKER-USER 1 -i "$bridge" -m comment --comment "$guard_comment" -j DROP
+  ipt -I INPUT 1 -i "$bridge" -m comment --comment "$guard_comment" -j DROP
+  local ch
+  if ((have_ip6)); then
+    for ch in FORWARD INPUT; do ip6t -I "$ch" 1 -i "$bridge" -m comment --comment "$guard_comment" -j DROP; done
   fi
+
+  # Chain: rebuild from scratch (behind the guard).
   ipt -F "$chain"
   ipt -A "$chain" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
   local cidr
@@ -167,12 +196,6 @@ install_rules() {
   fi
   ipt -A "$chain" -j RETURN
 
-  # DOCKER-USER exists once Docker has started; create it so install can run first.
-  if ((dry_run)); then
-    printf 'would run: iptables -w -N DOCKER-USER   (if missing)\n'
-  elif ! iptables -w -S DOCKER-USER >/dev/null 2>&1; then
-    iptables -w -N DOCKER-USER
-  fi
   delete_tagged iptables DOCKER-USER -i "$bridge" -m comment --comment "$comment" -j "$chain"
   ipt -I DOCKER-USER 1 -i "$bridge" -m comment --comment "$comment" -j "$chain"
 
@@ -180,7 +203,6 @@ install_rules() {
   ipt -I INPUT 1 -i "$bridge" -m comment --comment "$comment" -j DROP
 
   if ((have_ip6)); then
-    local ch
     for ch in FORWARD INPUT; do
       delete_tagged ip6tables "$ch" -i "$bridge" -m comment --comment "$comment" -j DROP
       ip6t -I "$ch" 1 -i "$bridge" -m comment --comment "$comment" -j DROP
@@ -188,11 +210,29 @@ install_rules() {
   else
     log 'note: ip6tables not found; skipping IPv6 drops (IPv6 is disabled on the egress bridge)'
   fi
+
+  # Everything is in place: lift the guards.
+  delete_guards
+  trap - ERR
   persist_rules
   if ((dry_run)); then log "dry-run: no changes made (bridge $bridge)"; else log "installed for bridge $bridge"; fi
 }
 
+# delete_guards: remove install's temporary guard drops (also leftovers of
+# a failed install).
+delete_guards() {
+  delete_tagged iptables DOCKER-USER -i "$bridge" -m comment --comment "$guard_comment" -j DROP
+  delete_tagged iptables INPUT -i "$bridge" -m comment --comment "$guard_comment" -j DROP
+  if ((have_ip6)); then
+    local ch
+    for ch in FORWARD INPUT; do
+      delete_tagged ip6tables "$ch" -i "$bridge" -m comment --comment "$guard_comment" -j DROP
+    done
+  fi
+}
+
 remove_rules() {
+  delete_guards
   delete_tagged iptables DOCKER-USER -i "$bridge" -m comment --comment "$comment" -j "$chain"
   delete_tagged iptables INPUT -i "$bridge" -m comment --comment "$comment" -j DROP
   if ((have_ip6)); then
@@ -214,6 +254,9 @@ first_rule() { "$1" -w -S "$2" 2>/dev/null | grep -m1 -- "^-A $2 " || :; }
 
 status_rules() {
   local ok=1 rules cidr first
+  first=$(first_rule iptables FORWARD)
+  if [[ $first == "-A FORWARD -j DOCKER-USER" ]]; then log "ok: FORWARD jumps to DOCKER-USER first"
+  else log "MISSING: FORWARD rule 1 is not '-j DOCKER-USER' (got: ${first:-none}); Docker must manage iptables (iptables firewall backend)"; ok=0; fi
   first=$(first_rule iptables DOCKER-USER)
   if [[ $first == *"-i $bridge "*"-j $chain"* ]]; then log "ok: DOCKER-USER jumps to $chain first"
   else log "MISSING: DOCKER-USER rule 1 is not '-i $bridge -j $chain' (got: ${first:-none})"; ok=0; fi
@@ -250,7 +293,7 @@ snapshot_rules() {
   {
     printf '# ah sandbox egress firewall snapshot v1 bridge=%s\n' "$bridge"
     local spec bin ch
-    for spec in "iptables DOCKER-USER" "iptables $chain" "iptables INPUT" "ip6tables FORWARD" "ip6tables INPUT"; do
+    for spec in "iptables FORWARD" "iptables DOCKER-USER" "iptables $chain" "iptables INPUT" "ip6tables FORWARD" "ip6tables INPUT"; do
       bin=${spec%% *} ch=${spec#* }
       printf '### %s %s\n' "$bin" "$ch"
       if command -v "$bin" >/dev/null 2>&1 && "$bin" -w -S "$ch" 2>/dev/null; then :; else printf '#!unreadable\n'; fi

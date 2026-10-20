@@ -22,9 +22,10 @@ import (
 const sandboxEgressChain = "AH-SBX-EGRESS"
 
 // sandboxEgressDropCIDRs are the destinations the egress chain must drop:
-// RFC 1918, carrier-grade NAT, link-local (cloud metadata), loopback and
-// multicast. The firewall script also drops the host's own public IPs, but
-// those are host-specific; the INPUT drop covers them for traffic to the host.
+// RFC 1918, carrier-grade NAT, link-local (cloud metadata), loopback, "this
+// network", multicast and reserved/broadcast: the same list as drop_cidrs in
+// the script. The script also drops the host's own public IPs, but those are
+// host-specific; the INPUT drop covers them for traffic to the host.
 var sandboxEgressDropCIDRs = []string{
 	"10.0.0.0/8",
 	"172.16.0.0/12",
@@ -32,7 +33,9 @@ var sandboxEgressDropCIDRs = []string{
 	"100.64.0.0/10",
 	"169.254.0.0/16",
 	"127.0.0.0/8",
+	"0.0.0.0/8",
 	"224.0.0.0/4",
+	"240.0.0.0/4",
 }
 
 // sandboxHardeningDocker is the Docker access the startup checks need.
@@ -72,10 +75,14 @@ func checkSandboxRuntime(ctx context.Context, d sandboxHardeningDocker, name str
 	}
 	var warnings []string
 	if !docker.IsGVisorRuntime(name, rt) {
-		if !devMode {
-			return nil, fmt.Errorf("AH_SANDBOX_RUNTIME=%s runs %q, which is not gVisor (runsc); production sandboxes must run under gVisor", name, rt.Path)
+		what := rt.Path
+		if what == "" {
+			what = "runtimeType " + rt.Type
 		}
-		warnings = append(warnings, fmt.Sprintf("WARNING: AH_SANDBOX_RUNTIME=%s (%s) is not gVisor; sandboxes share the host kernel (dev only)", name, rt.Path))
+		if !devMode {
+			return nil, fmt.Errorf("AH_SANDBOX_RUNTIME=%s runs %q, which is not gVisor (runsc); production sandboxes must run under gVisor", name, what)
+		}
+		warnings = append(warnings, fmt.Sprintf("WARNING: AH_SANDBOX_RUNTIME=%s (%s) is not gVisor; sandboxes share the host kernel (dev only)", name, what))
 		return warnings, nil
 	}
 	if !hasArg(rt.Args, "--overlay2=root:memory") {
@@ -164,10 +171,15 @@ func setupSandboxEgress(ctx context.Context, d sandboxHardeningDocker, opts sand
 
 // checkSandboxEgressFirewall verifies (best effort) that the rules from
 // docs/ops/sandbox-egress-firewall.sh are installed for bridge:
-//   - DOCKER-USER jumps to AH-SBX-EGRESS for -i bridge, before any ACCEPT;
-//   - AH-SBX-EGRESS drops every sandboxEgressDropCIDRs destination, with no
-//     ACCEPT and no unconditional RETURN ahead of those drops;
-//   - INPUT drops -i bridge before any ACCEPT.
+//   - FORWARD jumps to DOCKER-USER (Docker's iptables backend is in use);
+//   - DOCKER-USER jumps to AH-SBX-EGRESS for -i bridge, unnarrowed;
+//   - AH-SBX-EGRESS drops every sandboxEgressDropCIDRs destination, with
+//     nothing ahead of those drops that could accept or return a new
+//     connection (only the exact RELATED,ESTABLISHED RETURN is allowed);
+//   - INPUT drops -i bridge.
+//
+// Each of these jumps/drops must come before any rule of its chain that is
+// not a drop, reject or log (see ruleFirstEffective).
 //
 // IPv6 is off on the egress bridge, so missing ip6tables rules only warn.
 // It reads rules with `iptables -S`, so ah must run as root on Linux.
@@ -192,12 +204,25 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 		return fmt.Errorf("host firewall rule missing or out of order: %s; run docs/ops/sandbox-egress-firewall.sh install --bridge %s", what, bridge)
 	}
 
+	// Docker hooks DOCKER-USER into FORWARD only with its iptables backend;
+	// with firewall-backend nftables or "iptables": false nothing jumps to
+	// it, and the egress chain would filter nothing.
+	forward, err := read("iptables", "FORWARD")
+	if err != nil {
+		return nil, err
+	}
+	if !ruleFirstEffective(forward, func(f []string) bool {
+		return len(f) == 4 && flagValue(f, "-j") == "DOCKER-USER"
+	}) {
+		return nil, fmt.Errorf("host firewall rule missing or out of order: FORWARD -j DOCKER-USER (Docker must manage iptables with its iptables firewall backend, and nothing may accept, return or jump elsewhere ahead of it)")
+	}
+
 	dockerUser, err := read("iptables", "DOCKER-USER")
 	if err != nil {
 		return nil, err
 	}
-	if !ruleBeforeAccept(dockerUser, func(f []string) bool {
-		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == sandboxEgressChain
+	if !ruleFirstEffective(dockerUser, func(f []string) bool {
+		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == sandboxEgressChain && isPlainRule(f)
 	}) {
 		return nil, missing(fmt.Sprintf("DOCKER-USER -i %s -j %s", bridge, sandboxEgressChain))
 	}
@@ -207,7 +232,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 		return nil, err
 	}
 	drops := map[string]int{}
-	firstLoose := -1 // first ACCEPT, or RETURN without a conntrack state match
+	firstLoose := -1 // first rule that can let a packet skip the drops below it
 	for i, line := range chain {
 		f := strings.Fields(line)
 		target := flagValue(f, "-j")
@@ -217,7 +242,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 				drops[flagValue(f, "-d")] = i
 			}
 		}
-		if firstLoose < 0 && (target == "ACCEPT" || (target == "RETURN" && flagValue(f, "--ctstate") == "")) {
+		if firstLoose < 0 && !isHarmlessRule(f) && !isEstablishedReturn(f) {
 			firstLoose = i
 		}
 	}
@@ -232,7 +257,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 	if err != nil {
 		return nil, err
 	}
-	if !ruleBeforeAccept(input, func(f []string) bool {
+	if !ruleFirstEffective(input, func(f []string) bool {
 		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f)
 	}) {
 		return nil, missing(fmt.Sprintf("INPUT -i %s -j DROP", bridge))
@@ -245,7 +270,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 			warnings = append(warnings, fmt.Sprintf("WARNING: cannot read ip6tables %s (%v); IPv6 is disabled on %s, so egress stays IPv4 only", chain, err, bridge))
 			continue
 		}
-		if !ruleBeforeAccept(rules, func(f []string) bool {
+		if !ruleFirstEffective(rules, func(f []string) bool {
 			return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f)
 		}) {
 			warnings = append(warnings, fmt.Sprintf("WARNING: ip6tables %s has no '-i %s -j DROP' rule (defence in depth; IPv6 is disabled on the bridge)", chain, bridge))
@@ -254,19 +279,48 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 	return warnings, nil
 }
 
-// ruleBeforeAccept reports whether a rule matching want appears before any
-// ACCEPT rule of the chain.
-func ruleBeforeAccept(rules []string, want func(fields []string) bool) bool {
+// ruleFirstEffective reports whether a rule matching want comes before any
+// rule that could let a packet leave the chain without reaching it: only
+// rules that drop, reject or merely log or count may come first. An ACCEPT,
+// a RETURN, or a jump or goto to another chain (which may accept or return,
+// e.g. ufw-before-input or a ufw-docker "-s 10.0.0.0/8 -j RETURN") ahead of
+// it means some traffic skips it.
+func ruleFirstEffective(rules []string, want func(fields []string) bool) bool {
 	for _, line := range rules {
 		f := strings.Fields(line)
 		if want(f) {
 			return true
 		}
-		if flagValue(f, "-j") == "ACCEPT" {
+		if !isHarmlessRule(f) {
 			return false
 		}
 	}
 	return false
+}
+
+// isHarmlessRule reports whether an iptables -S rule can only drop the
+// packet or let it continue to the next rule: a DROP, REJECT, LOG or NFLOG
+// target, or no target at all (a counter).
+func isHarmlessRule(fields []string) bool {
+	if flagValue(fields, "-g") != "" {
+		return false
+	}
+	switch flagValue(fields, "-j") {
+	case "", "DROP", "REJECT", "LOG", "NFLOG":
+		return true
+	}
+	return false
+}
+
+// isEstablishedReturn reports whether the rule is exactly the egress chain's
+// "-m conntrack --ctstate RELATED,ESTABLISHED -j RETURN" (either order of the
+// two states): replies to connections the sandbox may already have.
+func isEstablishedReturn(fields []string) bool {
+	if len(fields) != 8 || fields[0] != "-A" || fields[2] != "-m" || fields[3] != "conntrack" ||
+		fields[4] != "--ctstate" || fields[6] != "-j" || fields[7] != "RETURN" {
+		return false
+	}
+	return fields[5] == "RELATED,ESTABLISHED" || fields[5] == "ESTABLISHED,RELATED"
 }
 
 // isPlainRule reports whether an iptables -S rule ("-A CHAIN ...") matches
@@ -305,6 +359,7 @@ type sandboxHardeningTarget interface {
 	SetSandboxEgressNetwork(name string)
 	SetSandboxRuntime(runtime string)
 	SetSandboxWorkspaceTmpfs(enabled bool)
+	DeleteEgressSandboxesIfDisabled(ctx context.Context) (int, error)
 }
 
 // configureSandboxHardening runs the startup checks and applies the result.
@@ -330,5 +385,15 @@ func configureSandboxHardening(ctx context.Context, cfg config.Config, egressNet
 	target.SetSandboxRuntime(cfg.SandboxRuntime)
 	target.SetSandboxWorkspaceTmpfs(cfg.SandboxWorkspaceTmpfs)
 	target.SetSandboxEgressNetwork(enabled)
+	// Egress sandboxes from an earlier run must not outlive the firewall
+	// check: with egress disabled they are deleted. Not fatal; a failed
+	// teardown stays 'deleting' and the reaper retries it.
+	n, err := target.DeleteEgressSandboxesIfDisabled(ctx)
+	if n > 0 {
+		logf("sandboxes: egress is disabled; deleted %d sandbox(es) with egress \"internet\"", n)
+	}
+	if err != nil {
+		logf("WARNING: sandboxes: egress is disabled but not every egress sandbox could be deleted: %v", err)
+	}
 	return nil
 }

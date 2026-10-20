@@ -26,22 +26,41 @@ func runFirewallScript(t *testing.T, args ...string) (string, error) {
 	return string(out), err
 }
 
-// applyDryRun turns the script's "would run" lines into the iptables -S
-// output the commands would produce on a host whose INPUT already accepts
-// SSH and whose DOCKER-USER ends with Docker's RETURN.
-func applyDryRun(t *testing.T, out string) map[string]string {
-	t.Helper()
-	chains := map[string][]string{
+// freshHost is the ruleset of a host whose INPUT already accepts SSH and
+// whose Docker (iptables backend) hooks DOCKER-USER, which ends with RETURN.
+func freshHost() map[string][]string {
+	return map[string][]string{
+		"iptables FORWARD":     {"-A FORWARD -j DOCKER-USER", "-A FORWARD -j DOCKER-FORWARD"},
 		"iptables INPUT":       {"-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT"},
 		"iptables DOCKER-USER": {"-A DOCKER-USER -j RETURN"},
 		"ip6tables INPUT":      {},
 		"ip6tables FORWARD":    {},
 	}
+}
+
+// wouldRun returns the script's "would run" lines.
+func wouldRun(out string) []string {
+	var lines []string
 	for _, line := range strings.Split(out, "\n") {
-		if !strings.HasPrefix(line, "would run: ") {
-			continue
+		if strings.HasPrefix(line, "would run: ") {
+			lines = append(lines, strings.TrimPrefix(line, "would run: "))
 		}
-		f := strings.Fields(strings.TrimPrefix(line, "would run: "))
+	}
+	return lines
+}
+
+// simulate applies "would run" lines to chains (in place): -A, -I 1, -F and
+// -D (every copy, as delete_tagged does). Other commands are ignored.
+func simulate(t *testing.T, chains map[string][]string, lines []string) {
+	t.Helper()
+	for _, line := range lines {
+		f := strings.Fields(line)
+		for i, w := range f { // drop "(repeated while present)" and similar notes
+			if strings.HasPrefix(w, "(") {
+				f = f[:i]
+				break
+			}
+		}
 		if len(f) < 4 || (f[0] != "iptables" && f[0] != "ip6tables") || f[1] != "-w" {
 			continue
 		}
@@ -55,13 +74,75 @@ func applyDryRun(t *testing.T, out string) map[string]string {
 			chains[key] = append([]string{rule}, chains[key]...)
 		case "-F":
 			chains[key] = nil
+		case "-D":
+			rule := "-A " + strings.Join(f[3:], " ")
+			kept := chains[key][:0:0]
+			for _, r := range chains[key] {
+				if r != rule {
+					kept = append(kept, r)
+				}
+			}
+			chains[key] = kept
 		}
 	}
+}
+
+func toRules(chains map[string][]string) map[string]string {
 	rules := map[string]string{}
 	for k, v := range chains {
 		rules[k] = strings.Join(v, "\n") + "\n"
 	}
 	return rules
+}
+
+// applyDryRun turns the script's "would run" lines into the iptables -S
+// output the commands would produce on freshHost.
+func applyDryRun(t *testing.T, out string) map[string]string {
+	t.Helper()
+	chains := freshHost()
+	simulate(t, chains, wouldRun(out))
+	return toRules(chains)
+}
+
+// Regression: a re-install (every ah start) must never leave running egress
+// sandboxes unfiltered, and an install that dies at any step must leave the
+// bridge blocked. After every prefix of the second install's commands, the
+// bridge is either cut off by the guard drops or fully filtered.
+func TestSandboxEgressFirewallScript_ReinstallNeverOpensAWindow(t *testing.T) {
+	out, err := runFirewallScript(t, "install", "--dry-run", "--no-persist", "--bridge", "ah-sbx-egress", "--host-ip", "203.0.113.7")
+	require.NoError(t, err, out)
+	lines := wouldRun(out)
+	installed := freshHost()
+	simulate(t, installed, lines)
+
+	isBridgeDrop := func(f []string) bool {
+		return flagValue(f, "-i") == "ah-sbx-egress" && flagValue(f, "-j") == "DROP" && isPlainRule(f)
+	}
+	guarded := 0
+	for k := 0; k <= len(lines); k++ {
+		chains := map[string][]string{}
+		for key, v := range installed {
+			chains[key] = append([]string(nil), v...)
+		}
+		simulate(t, chains, lines[:k])
+		rules := toRules(chains)
+		_, checkErr := checkSandboxEgressFirewall(context.Background(), "ah-sbx-egress", "linux", fakeRunner(rules))
+		if checkErr == nil {
+			continue
+		}
+		guarded++
+		input := strings.Split(strings.TrimSpace(rules["iptables INPUT"]), "\n")
+		dockerUser := strings.Split(strings.TrimSpace(rules["iptables DOCKER-USER"]), "\n")
+		assert.True(t, ruleFirstEffective(input, isBridgeDrop), "after %d commands (%q) INPUT lets the bridge in: %v", k, lines[max(k-1, 0)], input)
+		assert.True(t, ruleFirstEffective(dockerUser, isBridgeDrop), "after %d commands (%q) the bridge is neither filtered nor blocked: %v (%v)", k, lines[max(k-1, 0)], dockerUser, checkErr)
+	}
+	assert.Positive(t, guarded, "the rebuild does pass through partial states, all of them guarded")
+
+	// The guards are gone once install completes.
+	final := applyDryRun(t, out)
+	for _, v := range final {
+		assert.NotContains(t, v, "ah-sbx-egress-guard")
+	}
 }
 
 func TestSandboxEgressFirewallScript_InstallDryRun(t *testing.T) {
@@ -89,9 +170,16 @@ func TestSandboxEgressFirewallScript_InstallDryRun(t *testing.T) {
 	}
 	// ESTABLISHED,RELATED comes first, the catch-all RETURN last.
 	est := strings.Index(out, "--ctstate ESTABLISHED,RELATED -j RETURN")
-	firstDrop := strings.Index(out, "-j DROP")
+	firstDrop := strings.Index(out, "-A AH-SBX-EGRESS -d ")
 	last := strings.Index(out, "-A AH-SBX-EGRESS -j RETURN")
 	assert.True(t, est < firstDrop && firstDrop < last, "rule order")
+	// Guards go in before the chain is flushed and come out after the jump
+	// and the INPUT drop are back.
+	guardIn := strings.Index(out, "-I DOCKER-USER 1 -i ah-sbx-egress -m comment --comment ah-sbx-egress-guard -j DROP")
+	flush := strings.Index(out, "-F AH-SBX-EGRESS")
+	jump := strings.Index(out, "-I DOCKER-USER 1 -i ah-sbx-egress -m comment --comment ah-sbx-egress -j AH-SBX-EGRESS")
+	guardOut := strings.Index(out, "-D DOCKER-USER -i ah-sbx-egress -m comment --comment ah-sbx-egress-guard -j DROP")
+	assert.True(t, guardIn >= 0 && guardIn < flush && flush < jump && jump < guardOut, "guard order")
 
 	// What the script installs is exactly what ah's startup check accepts.
 	warnings, err := checkSandboxEgressFirewall(context.Background(), "ah-sbx-egress", "linux", fakeRunner(applyDryRun(t, out)))
@@ -132,7 +220,7 @@ func writeSnapshot(t *testing.T, rules map[string]string) string {
 	t.Helper()
 	var b strings.Builder
 	b.WriteString("# ah sandbox egress firewall snapshot v1 bridge=ah-sbx-egress\n")
-	for _, k := range []string{"iptables DOCKER-USER", "iptables AH-SBX-EGRESS", "iptables INPUT", "ip6tables FORWARD", "ip6tables INPUT"} {
+	for _, k := range []string{"iptables FORWARD", "iptables DOCKER-USER", "iptables AH-SBX-EGRESS", "iptables INPUT", "ip6tables FORWARD", "ip6tables INPUT"} {
 		b.WriteString("### " + k + "\n")
 		if v, ok := rules[k]; ok {
 			b.WriteString(v)

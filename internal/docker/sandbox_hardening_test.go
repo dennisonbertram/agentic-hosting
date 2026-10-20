@@ -140,8 +140,28 @@ func TestLookupRuntime(t *testing.T) {
 	rt, _, _ = c.LookupRuntime(context.Background(), "runc")
 	assert.False(t, IsGVisorRuntime("runc", rt))
 	assert.False(t, IsGVisorRuntime("runsc-evil", RuntimeInfo{Path: "/usr/bin/crun"}), "the name alone does not make a runtime gVisor")
-	assert.True(t, IsGVisorRuntime("runsc", RuntimeInfo{}))
-	assert.False(t, IsGVisorRuntime("runsc-sbx", RuntimeInfo{}), "only the built-in runsc name is trusted without a path")
+	assert.False(t, IsGVisorRuntime("runsc", RuntimeInfo{}), "a runtime without a path or gVisor shim type is not trusted by name")
+	assert.False(t, IsGVisorRuntime("runsc-sbx", RuntimeInfo{}))
+	assert.True(t, IsGVisorRuntime("runsc", RuntimeInfo{Type: "io.containerd.runsc.v1"}))
+	assert.True(t, IsGVisorRuntime("gvisor", RuntimeInfo{Type: "/opt/bin/containerd-shim-runsc-v1"}))
+}
+
+// Regression: {"runsc": {"runtimeType": "io.containerd.runc.v2"}} has no path
+// and runs runc; it must not pass as gVisor because of its name.
+func TestLookupRuntime_ShimRuntimeNamedRunscIsNotGVisor(t *testing.T) {
+	f, c := newFakeDaemon(t)
+	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{
+		"runsc":  map[string]any{"runtimeType": "io.containerd.runc.v2"},
+		"gvisor": map[string]any{"runtimeType": "io.containerd.runsc.v1"},
+	}})
+	rt, found, err := c.LookupRuntime(context.Background(), "runsc")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, "io.containerd.runc.v2", rt.Type)
+	assert.False(t, IsGVisorRuntime("runsc", rt))
+	rt, _, err = c.LookupRuntime(context.Background(), "gvisor")
+	require.NoError(t, err)
+	assert.True(t, IsGVisorRuntime("gvisor", rt))
 }
 
 func TestEnvironmentContainerConfigs_WorkspaceTmpfs(t *testing.T) {
@@ -216,4 +236,18 @@ func TestRunEnvironment_DefaultsUnchanged(t *testing.T) {
 	require.Len(t, h.Mounts, 1)
 	assert.Equal(t, mount.TypeVolume, h.Mounts[0].Type)
 	assert.Equal(t, "ah-env-e1", h.Mounts[0].Source)
+}
+
+// Regression: egress sandboxes must not be restarted by dockerd (host
+// reboot, dockerd restart) before ah's firewall rules are back; other
+// containers keep unless-stopped.
+func TestEnvironmentContainerConfigs_EgressSandboxNeverRestarts(t *testing.T) {
+	cfg := RunEnvironmentConfig{TenantID: "t", EnvID: "e", Image: "img", MemoryMB: 256, VolumeName: "v", NetworkName: "ah-sbx-egress", EgressNetwork: true}
+	_, h := environmentContainerConfigs(cfg, "runsc")
+	assert.Equal(t, container.RestartPolicyDisabled, h.RestartPolicy.Name)
+
+	cfg.EgressNetwork = false
+	cfg.NetworkName = "ah-tenant-t"
+	_, h = environmentContainerConfigs(cfg, "runsc")
+	assert.Equal(t, container.RestartPolicyUnlessStopped, h.RestartPolicy.Name)
 }

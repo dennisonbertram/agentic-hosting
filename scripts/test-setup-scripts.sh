@@ -94,6 +94,29 @@ has "$tmp/out" 'Sandbox egress stays off'
 has "$tmp/out" 'python3 (daemon.json merge for --sandbox-hardening)'
 pass 'setup-linux.sh --dry-run (fresh, partial, existing, non-Ubuntu, --sandbox-hardening)'
 
+# --- setup-linux.sh daemon.json merge (the embedded python) ----------------
+if command -v python3 >/dev/null 2>&1; then
+  awk "/<<'PY'/{f=1;next} /^PY\$/{f=0} f" "$linux" > "$tmp/merge.py"
+  merge() { python3 -I "$tmp/merge.py" "$1" "$2" runsc-sbx '["--overlay2=root:memory"]'; }
+  # runsc's own flags are kept; its --overlay2 is replaced; other keys stay.
+  printf '%s\n' '{"log-level":"info","runtimes":{"runsc":{"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm","--overlay2=root:self"]}}}' > "$tmp/d1.json"
+  merge "$tmp/d1.json" "$tmp/o1.json" 2> "$tmp/err"
+  python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["runtimes"]["runsc-sbx"]=={"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm","--overlay2=root:memory"]}, c; assert c["log-level"]=="info"; assert c["runtimes"]["runsc"]["runtimeArgs"]==["--platform=kvm","--overlay2=root:self"]' "$tmp/o1.json" ||
+    fail 'daemon.json merge dropped runsc runtimeArgs or other keys'
+  lacks "$tmp/err" 'WARNING'
+  # Re-running on the merged file changes nothing and does not warn.
+  merge "$tmp/o1.json" "$tmp/o1b.json" 2> "$tmp/err"
+  cmp -s <(python3 -I -m json.tool --sort-keys "$tmp/o1.json") <(python3 -I -m json.tool --sort-keys "$tmp/o1b.json") || fail 'daemon.json merge is not idempotent'
+  lacks "$tmp/err" 'WARNING'
+  # A customised runsc-sbx entry is left alone, with a warning.
+  printf '%s\n' '{"runtimes":{"runsc-sbx":{"path":"/opt/runsc","runtimeArgs":["--debug"]}}}' > "$tmp/d2.json"
+  merge "$tmp/d2.json" "$tmp/o2.json" 2> "$tmp/err"
+  python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["runtimes"]["runsc-sbx"]=={"path":"/opt/runsc","runtimeArgs":["--debug"]}, c' "$tmp/o2.json" ||
+    fail 'daemon.json merge overwrote a customised runsc-sbx entry'
+  has "$tmp/err" 'WARNING: daemon.json already has a runsc-sbx runtime'
+  pass 'setup-linux.sh daemon.json merge'
+fi
+
 # --- docs/ops/sandbox-egress-firewall.sh --dry-run -------------------------
 fw=$repo_root/docs/ops/sandbox-egress-firewall.sh
 "$fw" install --dry-run --host-ip 203.0.113.7 > "$tmp/out" 2>&1

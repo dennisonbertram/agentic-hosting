@@ -63,6 +63,11 @@ untouched, validated with `dockerd --validate`):
 }
 ```
 
+`runsc-sbx` gets the same path and `runtimeArgs` as `runsc` (for example
+`--platform=kvm`), with any `--overlay2` value replaced by
+`--overlay2=root:memory`. An existing `runsc-sbx` entry that differs is left
+unchanged with a warning; fix it by hand if needed.
+
 then runs `systemctl reload docker` (SIGHUP: running containers keep running),
 checks `docker info` lists `runsc-sbx`, sets `AH_SANDBOX_RUNTIME=runsc-sbx` and
 `AH_SANDBOX_WORKSPACE_TMPFS=true` in `/etc/default/ah`, rebuilds/reinstalls ah
@@ -125,6 +130,25 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
   - `INPUT -i ah-sbx-egress -j DROP` at position 1: no access to the ah API,
     sshd or anything else listening on the host.
   - `ip6tables` FORWARD and INPUT drops for the bridge (defence in depth).
+  - These rules only see forwarded traffic while Docker manages iptables with
+    its iptables firewall backend, which puts `FORWARD -j DOCKER-USER` first.
+    With `"firewall-backend": "nftables"` or `"iptables": false` in
+    `daemon.json` nothing jumps to `DOCKER-USER`; ah then finds no
+    `FORWARD -j DOCKER-USER` rule and keeps egress disabled.
+  - Every reinstall (each ah start) first puts temporary
+    `ah-sbx-egress-guard` drops at position 1, so running egress sandboxes
+    are cut off, not unfiltered, while the chain is rebuilt; established
+    connections may see a brief stall. If install fails part-way the guards
+    stay and the bridge has no network at all until install succeeds.
+- **Egress sandboxes never restart on their own.** Their containers have
+  Docker restart policy `no`: after a host reboot or a dockerd restart they
+  stay stopped (so none runs before the rules are reinstalled), the
+  reconciler marks them stopped and the reaper deletes them after the grace
+  period. Tenants create new ones.
+- **Startup with egress disabled deletes egress sandboxes.** If ah starts with
+  egress disabled (not configured, or the rules could not be verified), it
+  deletes every existing sandbox with egress `internet` before serving
+  requests (`AUDIT: action=sandbox.egress_disabled_delete`).
 - **IPv6** is disabled on the bridge (`EnableIPv6=false`), so sandboxes get no
   IPv6 address or route and the firewall only needs IPv4 rules. The ip6tables
   drops guard against the bridge ever being recreated with IPv6.
@@ -141,9 +165,15 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
   `AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK=1` skips the check (only for hosts
   that filter the bridge some other way; it logs a loud warning).
 - **DNS** is Docker's embedded resolver (127.0.0.11 inside the container
-  network namespace), which forwards to the host's upstream resolvers from the
-  host side, so the RFC 1918/loopback drops do not affect it. Whether it works
-  under gVisor's netstack on this host is checklist item 4.
+  network namespace). It forwards from the host namespace only when the
+  upstream is a loopback address (the systemd-resolved stub); otherwise it
+  forwards from the container's namespace, through the bridge and
+  `DOCKER-USER`, so `AH-SBX-EGRESS` sees the queries. The host's upstream
+  resolvers must therefore be public addresses (Hetzner's are). On a host
+  whose resolvers are in 10/8, 172.16/12, 100.64/10 or 169.254/16 (common in
+  cloud VPCs) egress sandboxes get no DNS unless an explicit allow rule for
+  those resolvers is placed before the drops (needs a review). Whether DNS
+  works under gVisor's netstack on this host is checklist item 5.
 - **Metering.** Network bytes of egress sandboxes are recorded every 60s
   (first sample is the baseline) and appear in
   `GET /v1/tenant/usage/metrics?kind=sandbox` (`network_rx_bytes`,
@@ -180,7 +210,15 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
    position 1 if something else (ufw/firewalld reload, fail2ban) inserted
    rules ahead of them. If `netfilter-persistent` is installed it saves the
    ruleset; note that this also saves Docker's own rules. The drop-in below
-   re-applies the rules on every ah start anyway, so persistence is optional.
+   re-applies the rules on every ah start. Persistence is not what keeps a
+   reboot safe: egress sandbox containers have restart policy `no`, so after
+   a reboot none runs until ah (and its drop-in) has started and a tenant
+   creates a new one.
+
+   The check runs only at ah start. After anything that flushes or reorders
+   `INPUT`, `FORWARD` or `DOCKER-USER` (ufw/firewalld reload, fail2ban
+   restart, a Docker restart with firewalld) run `systemctl restart ah`,
+   which reinstalls the rules and re-checks them.
 
 3. Install the systemd drop-in and set the network:
 
@@ -209,12 +247,19 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
 
 ```bash
 sed -i '/^AH_SANDBOX_EGRESS_NETWORK=/d;/^AH_SANDBOX_EGRESS_SUBNET=/d' /etc/default/ah
+systemctl restart ah     # starts with egress disabled and deletes every egress sandbox
+journalctl -u ah -n 100 --no-pager | grep -E 'egress_disabled_delete|egress sandbox'
+# only once no egress sandbox is left (the rules must outlive the last one):
+docker ps -q --filter network=ah-sbx-egress     # want: nothing
 rm /etc/systemd/system/ah.service.d/sandbox-egress.conf
-systemctl daemon-reload && systemctl restart ah
-# after the last egress sandbox has expired:
+systemctl daemon-reload
 docker network rm ah-sbx-egress
 ah-sandbox-egress-firewall remove --bridge ah-sbx-egress
 ```
+
+If the restart logged `not every egress sandbox could be deleted`, wait for
+the reaper (it retries every 30s) and repeat the `docker ps` check before
+removing the rules.
 
 Setting `sandbox_egress_allowed` back to 0 stops new egress sandboxes for one
 tenant; existing ones keep their access until they expire or are deleted.
@@ -254,6 +299,7 @@ Container names on the host are `ah-env-<tenant-id>-<sandbox-id>`.
    → `false false false ah-sbx-egress sandbox-egress`.
 3. Firewall complete and first in line (host):
    `ah-sandbox-egress-firewall status --bridge ah-sbx-egress; echo rc=$?` → `rc=0`;
+   `iptables -S FORWARD | head -2` shows `-A FORWARD -j DOCKER-USER` first;
    `iptables -S DOCKER-USER | head -2` and `iptables -S INPUT | head -2` show the `ah-sbx-egress` rules first.
 4. Container wiring (host):
    `for n in egress-a no-egress disk; do id=$(ahc --json sandbox get $n | jq -r .id); docker ps --filter "label=ah.environment=$id" --format '{{.Names}}' | xargs docker inspect --format '{{.Name}} runtime={{.HostConfig.Runtime}} net={{.HostConfig.NetworkMode}} mounts={{range .Mounts}}{{.Type}}:{{.Destination}} {{end}}'; done`

@@ -1,8 +1,10 @@
 package environments
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 )
@@ -35,6 +37,64 @@ var (
 // the host firewall rules. Empty disables egress (403 on request).
 func (m *Manager) SetSandboxEgressNetwork(name string) {
 	m.sandboxEgressNetwork = name
+}
+
+// DeleteEgressSandboxesIfDisabled runs once at startup, after
+// SetSandboxEgressNetwork and before the API serves requests. When egress is
+// disabled (not configured, or its host firewall rules could not be
+// verified), every sandbox with egress "internet" is deleted: one still
+// running would have internet access with no verified filter in front of it.
+// With egress enabled it does nothing. It returns the number deleted; a
+// sandbox whose teardown fails stays 'deleting' and the reaper retries it.
+func (m *Manager) DeleteEgressSandboxesIfDisabled(ctx context.Context) (int, error) {
+	if m.sandboxEgressNetwork != "" {
+		return 0, nil
+	}
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id, tenant_id, status FROM environments WHERE kind = 'sandbox' AND egress = ?`, SandboxEgressInternet)
+	if err != nil {
+		return 0, fmt.Errorf("select egress sandboxes: %w", err)
+	}
+	type candidate struct{ id, tenantID, status string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.tenantID, &c.status); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan egress sandbox: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	deleted := 0
+	var firstErr error
+	for _, c := range candidates {
+		res, err := m.db.ExecContext(ctx,
+			`UPDATE environments SET status = 'deleting', updated_at = ?
+			 WHERE id = ? AND tenant_id = ? AND kind = 'sandbox' AND status = ?`,
+			time.Now().Unix(), c.id, c.tenantID, c.status)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("claim egress sandbox %s: %w", c.id, err)
+			}
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue // changed since the select
+		}
+		if err := m.teardownSandbox(ctx, c.tenantID, c.id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("delete egress sandbox %s (the reaper retries): %w", c.id, err)
+			}
+			continue
+		}
+		log.Printf("AUDIT: action=sandbox.egress_disabled_delete tenant=%s sandbox=%s prior_status=%s", c.tenantID, c.id, c.status)
+		deleted++
+	}
+	return deleted, firstErr
 }
 
 // SetSandboxRuntime sets the OCI runtime sandboxes run under (for example

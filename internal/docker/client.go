@@ -1241,6 +1241,14 @@ func environmentContainerConfigs(cfg RunEnvironmentConfig, runtime string) (*con
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		NetworkMode:   container.NetworkMode(cfg.NetworkName),
 	}
+	if cfg.EgressNetwork {
+		// An egress sandbox is safe only behind the host firewall rules,
+		// which are (re)installed right before ah starts, after dockerd.
+		// Docker must never bring one back on its own (host reboot, dockerd
+		// restart) ahead of those rules: it stays stopped, the reconciler
+		// marks it stopped and the sandbox reaper deletes it.
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyDisabled}
+	}
 	return containerCfg, hostCfg
 }
 

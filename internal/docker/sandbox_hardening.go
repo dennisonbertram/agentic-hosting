@@ -164,6 +164,9 @@ func (c *DockerClient) EnsureSandboxEgressNetwork(ctx context.Context, name, sub
 type RuntimeInfo struct {
 	Path string
 	Args []string
+	// Type is the containerd shim (runtimeType) of a shim-based runtime,
+	// which has no Path.
+	Type string
 }
 
 // LookupRuntime returns the named runtime from `docker info`. found is false
@@ -177,15 +180,21 @@ func (c *DockerClient) LookupRuntime(ctx context.Context, name string) (RuntimeI
 	if !ok {
 		return RuntimeInfo{}, false, nil
 	}
-	return RuntimeInfo{Path: rt.Path, Args: append([]string(nil), rt.Args...)}, true, nil
+	return RuntimeInfo{Path: rt.Path, Args: append([]string(nil), rt.Args...), Type: rt.Type}, true, nil
 }
 
+// gVisorShimType is the containerd shim type of gVisor's shim v2 runtime.
+const gVisorShimType = "io.containerd.runsc.v1"
+
 // IsGVisorRuntime reports whether a registered runtime runs gVisor: its
-// binary is runsc (any directory), or the runtime is the built-in name runsc
-// with no explicit path.
-func IsGVisorRuntime(name string, rt RuntimeInfo) bool {
+// binary is runsc (any directory), or it has no binary path and its
+// containerd shim type is gVisor's. A runtime without a path is a shim
+// runtime whose name says nothing about what it runs (for example
+// {"runsc": {"runtimeType": "io.containerd.runc.v2"}} is runc), so the name
+// is never trusted.
+func IsGVisorRuntime(_ string, rt RuntimeInfo) bool {
 	if rt.Path == "" {
-		return name == DefaultRuntime
+		return rt.Type == gVisorShimType || filepath.Base(rt.Type) == "containerd-shim-runsc-v1"
 	}
 	return filepath.Base(rt.Path) == "runsc"
 }

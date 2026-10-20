@@ -276,8 +276,20 @@ if os.path.exists(src):
     with open(src) as f:
         cfg = json.load(f)
 runtimes = cfg.setdefault("runtimes", {})
-path = runtimes.get("runsc", {}).get("path", "/usr/bin/runsc")
-runtimes[name] = {"path": path, "runtimeArgs": args}
+runsc = runtimes.get("runsc", {})
+path = runsc.get("path", "/usr/bin/runsc")
+# Keep the operator's runsc flags (--platform, debug, ...) so sandboxes run
+# the same gVisor configuration; only the --overlay2 setting is replaced.
+overrides = {a.split("=", 1)[0] for a in args}
+base = [a for a in runsc.get("runtimeArgs", []) if a.split("=", 1)[0] not in overrides]
+want = {"path": path, "runtimeArgs": base + args}
+have = runtimes.get(name)
+if have is not None and have != want:
+    # Never overwrite a customised entry; ah warns at startup if it lacks
+    # --overlay2=root:memory.
+    print("setup-linux: WARNING: daemon.json already has a %s runtime that differs from %s; leaving it unchanged" % (name, json.dumps(want)), file=sys.stderr)
+else:
+    runtimes[name] = want
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=2, sort_keys=True)
     f.write("\n")

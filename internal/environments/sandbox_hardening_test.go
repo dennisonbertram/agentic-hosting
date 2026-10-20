@@ -76,6 +76,61 @@ func TestSandboxEgress_InternetAttachesOnlyToEgressNetwork(t *testing.T) {
 	assert.False(t, cfg.EgressNetwork)
 }
 
+// Regression: when ah starts with egress disabled (rules missing, snapshot
+// bad, or egress turned off), egress sandboxes left from a previous run must
+// not keep internet access without a verified firewall. They are deleted;
+// sandboxes without egress are untouched.
+func TestDeleteEgressSandboxesIfDisabled(t *testing.T) {
+	mgr, mock, _, _ := newSandboxManager(t)
+	mgr.SetSandboxEgressNetwork(testEgressNet)
+	allowEgress(t, mgr, testTenantID)
+	ctx := context.Background()
+	egressA, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "ea", Source: SandboxSource{Type: "image", Image: "alpine"}, Egress: "internet"})
+	require.NoError(t, err)
+	egressB, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "eb", Source: SandboxSource{Type: "image", Image: "alpine"}, Egress: "internet"})
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(`UPDATE environments SET status = 'stopped' WHERE id = ?`, egressB.ID)
+	require.NoError(t, err)
+	plain, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "plain", Source: SandboxSource{Type: "image", Image: "alpine"}})
+	require.NoError(t, err)
+
+	// Egress enabled: nothing happens.
+	n, err := mgr.DeleteEgressSandboxesIfDisabled(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.True(t, rowExists(t, mgr, egressA.ID))
+
+	// Egress disabled: every egress sandbox goes, whatever its status.
+	mgr.SetSandboxEgressNetwork("")
+	n, err = mgr.DeleteEgressSandboxesIfDisabled(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.False(t, rowExists(t, mgr, egressA.ID))
+	assert.False(t, rowExists(t, mgr, egressB.ID))
+	assert.Contains(t, mock.StopContainerCalls, egressA.containerID)
+	assert.Contains(t, mock.RemoveContainerCalls, egressA.containerID)
+	assert.True(t, rowExists(t, mgr, plain.ID), "sandboxes without egress are kept")
+}
+
+func TestDeleteEgressSandboxesIfDisabled_FailedTeardownIsLeftForReaper(t *testing.T) {
+	mgr, mock, _, _ := newSandboxManager(t)
+	mgr.SetSandboxEgressNetwork(testEgressNet)
+	allowEgress(t, mgr, testTenantID)
+	ctx := context.Background()
+	s, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Source: SandboxSource{Type: "image", Image: "alpine"}, Egress: "internet"})
+	require.NoError(t, err)
+	mock.RemoveContainerFn = func(context.Context, string) error { return fmt.Errorf("daemon busy") }
+
+	mgr.SetSandboxEgressNetwork("")
+	n, err := mgr.DeleteEgressSandboxesIfDisabled(ctx)
+	require.Error(t, err)
+	assert.Zero(t, n)
+	var status string
+	require.NoError(t, mgr.db.QueryRow(`SELECT status FROM environments WHERE id = ?`, s.ID).Scan(&status))
+	assert.Equal(t, "deleting", status, "the reaper retries a 'deleting' row")
+	assert.Contains(t, mock.StopContainerCalls, s.containerID, "the container is still stopped")
+}
+
 func TestSandboxEgress_SkipsWarmPool(t *testing.T) {
 	mgr, mock, _, _ := newSandboxManager(t)
 	mgr.SetSandboxEgressNetwork(testEgressNet)

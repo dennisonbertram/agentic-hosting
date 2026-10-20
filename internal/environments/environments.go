@@ -341,17 +341,23 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}, nil
 }
 
-// Get returns an environment by ID, scoped to tenant.
-func (m *Manager) Get(ctx context.Context, tenantID, envID string) (*Environment, error) {
+// environmentColumns is the column list scanned by scanEnvironment.
+const environmentColumns = `id, tenant_id, name, template_id, status, container_id, volume_name,
+	 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at`
+
+func scanEnvironment(row interface{ Scan(...any) error }) (*Environment, error) {
 	e := &Environment{}
-	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, template_id, status, container_id, volume_name,
-		 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at
-		 FROM environments WHERE id = ? AND tenant_id = ?`,
-		envID, tenantID,
-	).Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status, &e.ContainerID,
+	err := row.Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status, &e.ContainerID,
 		&e.VolumeName, &e.LeaseExpiresAt, &e.LeaseDurationSeconds, &e.LastActivityAt,
 		&e.CreatedAt, &e.UpdatedAt)
+	return e, err
+}
+
+// Get returns an environment by ID, scoped to tenant.
+func (m *Manager) Get(ctx context.Context, tenantID, envID string) (*Environment, error) {
+	e, err := scanEnvironment(m.db.QueryRowContext(ctx,
+		`SELECT `+environmentColumns+` FROM environments WHERE id = ? AND tenant_id = ?`,
+		envID, tenantID))
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("environment not found")
 	}
@@ -370,9 +376,7 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 		offset = 0
 	}
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, template_id, status, container_id, volume_name,
-		 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at
-		 FROM environments WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT `+environmentColumns+` FROM environments WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		tenantID, limit, offset,
 	)
 	if err != nil {
@@ -382,10 +386,8 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 
 	result := make([]*Environment, 0)
 	for rows.Next() {
-		e := &Environment{}
-		if err := rows.Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status,
-			&e.ContainerID, &e.VolumeName, &e.LeaseExpiresAt, &e.LeaseDurationSeconds,
-			&e.LastActivityAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		e, err := scanEnvironment(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan environment: %w", err)
 		}
 		result = append(result, e)
@@ -526,26 +528,30 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		}
 		recreated = true
 	}
+	// undo rolls back a start that could not be committed: optionally the
+	// restored preview routes and ingress network, then the container (removed
+	// only if this call created it). It runs detached from the request.
+	undo := func(routes, ingress bool) {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if routes {
+			m.cleanupPreviews(cleanupCtx, envID)
+		}
+		_ = m.docker.StopContainer(cleanupCtx, containerID)
+		if recreated {
+			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		if ingress {
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+		}
+	}
 	if needsIngress {
 		if err := m.ensurePreviewIngress(ctx, tenantID, envID, containerID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			_ = m.docker.StopContainer(cleanupCtx, containerID)
-			if recreated {
-				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-			}
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-			cancel()
+			undo(false, true)
 			return fmt.Errorf("restore preview ingress network: %w", err)
 		}
 		if err := m.restorePreviews(ctx, envID, tenantID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			m.cleanupPreviews(cleanupCtx, envID)
-			_ = m.docker.StopContainer(cleanupCtx, containerID)
-			if recreated {
-				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-			}
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-			cancel()
+			undo(true, true)
 			return fmt.Errorf("restore preview routes: %w", err)
 		}
 	}
@@ -563,18 +569,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		updated, err = updateResult.RowsAffected()
 	}
 	if err != nil || updated != 1 {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		if needsIngress {
-			m.cleanupPreviews(cleanupCtx, envID)
-		}
-		_ = m.docker.StopContainer(cleanupCtx, containerID)
-		if recreated {
-			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-		}
-		if needsIngress {
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-		}
-		cancel()
+		undo(needsIngress, needsIngress)
 		if err != nil {
 			return err
 		}
@@ -596,14 +591,16 @@ func (m *Manager) Stop(ctx context.Context, tenantID, envID string) error {
 		return apierr.Validation(fmt.Sprintf("environment must be running to stop (current: %s)", e.Status))
 	}
 
-	if err := m.docker.StopContainer(ctx, e.ContainerID); err != nil {
+	// A container that is already gone is as stopped as it gets; Start
+	// recreates it from the workspace volume.
+	if err := m.docker.StopContainer(ctx, e.ContainerID); err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("stop container: %w", err)
 	}
 
 	now := time.Now().Unix()
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ?`,
-		now, envID,
+		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, envID, tenantID,
 	)
 	return err
 }
@@ -692,109 +689,41 @@ func (m *Manager) ExtendLease(ctx context.Context, tenantID, envID string, durat
 
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(durationSec)
-	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET lease_expires_at = ?, updated_at = ? WHERE id = ?`,
-		leaseExpiresAt, now, envID,
-	)
-	return err
-}
-
-// ReconcileStale cleans up stuck or expired environments.
-func (m *Manager) ReconcileStale(ctx context.Context) error {
-	now := time.Now().Unix()
-	fiveMinAgo := now - 300
-
-	// Mark stuck "creating" > 5min as "failed"
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'failed', updated_at = ?
-		 WHERE status = 'creating' AND created_at < ?`,
-		now, fiveMinAgo,
+	// Conditional on 'running': if the reconciler expired the lease after the
+	// check above, report that instead of claiming an extension that the
+	// already-stopped environment will not get.
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE environments SET lease_expires_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND status = 'running'`,
+		leaseExpiresAt, now, envID, tenantID,
 	)
 	if err != nil {
-		return fmt.Errorf("reconcile creating: %w", err)
+		return err
 	}
-
-	// Check running envs — if container missing, mark "stopped"
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM environments WHERE status = 'running'`)
-	if err != nil {
-		return fmt.Errorf("reconcile running query: %w", err)
+	if n, _ := res.RowsAffected(); n == 0 {
+		return apierr.Conflict("environment stopped while extending its lease")
 	}
-	defer rows.Close()
-
-	var running []struct{ id, containerID string }
-	for rows.Next() {
-		var r struct{ id, containerID string }
-		if err := rows.Scan(&r.id, &r.containerID); err != nil {
-			log.Printf("environments: reconcile scan: %v", err)
-			continue
-		}
-		running = append(running, r)
-	}
-	rows.Close()
-
-	for _, r := range running {
-		if r.containerID != "" {
-			_, err := m.docker.InspectContainer(ctx, r.containerID)
-			if err != nil {
-				log.Printf("environments: container %s missing for env %s, marking stopped", r.containerID, r.id)
-				m.updateStatus(ctx, r.id, "stopped")
-			}
-		}
-	}
-
-	// Expire leases: running envs past lease_expires_at -> stop
-	expiredRows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM environments
-		 WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
-		now,
-	)
-	if err != nil {
-		return fmt.Errorf("reconcile expired query: %w", err)
-	}
-	defer expiredRows.Close()
-
-	var expired []struct{ id, containerID string }
-	for expiredRows.Next() {
-		var e struct{ id, containerID string }
-		if err := expiredRows.Scan(&e.id, &e.containerID); err != nil {
-			log.Printf("environments: reconcile expired scan: %v", err)
-			continue
-		}
-		expired = append(expired, e)
-	}
-	expiredRows.Close()
-
-	for _, e := range expired {
-		log.Printf("environments: lease expired for env %s, stopping", e.id)
-		if e.containerID != "" {
-			_ = m.docker.StopContainer(ctx, e.containerID)
-		}
-		m.updateStatus(ctx, e.id, "stopped")
-	}
-
 	return nil
 }
 
-// GetTemplate returns a template by ID.
-func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template, error) {
+// templateColumns is the column list scanned by scanTemplate.
+const templateColumns = `id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
+	 egress_policy, created_at, updated_at`
+
+func scanTemplate(row interface{ Scan(...any) error }) (*Template, error) {
 	t := &Template{}
-	err := m.db.QueryRowContext(ctx,
-		`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-		 egress_policy, created_at, updated_at
-		 FROM environment_templates WHERE id = ?`,
-		templateID,
-	).Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
+	err := row.Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
 		&t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
+}
+
+// GetTemplate returns a template by ID, falling back to lookup by name.
+func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template, error) {
+	t, err := scanTemplate(m.db.QueryRowContext(ctx,
+		`SELECT `+templateColumns+` FROM environment_templates WHERE id = ?`, templateID))
 	if err == sql.ErrNoRows {
-		// Also try by name
-		err = m.db.QueryRowContext(ctx,
-			`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-			 egress_policy, created_at, updated_at
-			 FROM environment_templates WHERE name = ?`,
-			templateID,
-		).Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
-			&t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt)
+		t, err = scanTemplate(m.db.QueryRowContext(ctx,
+			`SELECT `+templateColumns+` FROM environment_templates WHERE name = ?`, templateID))
 	}
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound(fmt.Sprintf("template %q not found", templateID))
@@ -808,9 +737,7 @@ func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template
 // ListTemplates returns all available templates.
 func (m *Manager) ListTemplates(ctx context.Context) ([]*Template, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-		 egress_policy, created_at, updated_at
-		 FROM environment_templates ORDER BY name`)
+		`SELECT `+templateColumns+` FROM environment_templates ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list templates: %w", err)
 	}
@@ -818,9 +745,8 @@ func (m *Manager) ListTemplates(ctx context.Context) ([]*Template, error) {
 
 	result := make([]*Template, 0)
 	for rows.Next() {
-		t := &Template{}
-		if err := rows.Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB,
-			&t.CPUMillis, &t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		t, err := scanTemplate(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan template: %w", err)
 		}
 		result = append(result, t)
@@ -897,20 +823,29 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 		return apierr.Validation("git_url must start with https://")
 	}
 
+	// git would parse a ref starting with '-' as an option. No valid ref name
+	// starts with '-' (git check-ref-format), so reject it outright.
+	if strings.HasPrefix(req.GitRef, "-") {
+		return apierr.Validation("git_ref must not start with '-'")
+	}
 	ref := req.GitRef
 	if ref == "" {
 		ref = "HEAD"
 	}
 
-	// Build the git clone/pull command to run inside the container.
-	// If /workspace/.git exists, fetch and checkout; otherwise clone fresh.
-	gitCmd := fmt.Sprintf(
-		`cd /workspace && if [ -d .git ]; then git fetch origin && git checkout %s; else git clone --depth=1 %s .; fi`,
-		ref, req.GitURL,
-	)
+	// The URL and ref are passed as positional parameters ($1, $2), never
+	// spliced into the script, so quotes, spaces or ';' in them cannot change
+	// the command. If /workspace/.git exists, fetch and check out the ref;
+	// otherwise clone fresh and, when a ref was requested, check it out too
+	// (a --depth=1 clone alone only ever yields the default branch).
+	const gitScript = `cd /workspace && if [ -d .git ]; then git fetch origin && git checkout "$2"; ` +
+		`else git clone --depth=1 "$1" . && if [ "$2" != HEAD ]; then git fetch --depth=1 origin "$2" && git checkout FETCH_HEAD; fi; fi`
 
 	// Create and run exec with a 5-minute timeout
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())), "sh", "-c", gitCmd}, "/workspace")
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{
+		"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())),
+		"sh", "-c", gitScript, "sh", req.GitURL, ref,
+	}, "/workspace")
 	if err != nil {
 		return fmt.Errorf("sync exec create: %w", err)
 	}

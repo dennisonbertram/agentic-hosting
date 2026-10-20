@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
@@ -91,11 +92,15 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 		return nil, fmt.Errorf("tag image for snapshot: %w", err)
 	}
 
-	// If anything below fails, best-effort remove the orphaned tag.
+	// If anything below fails, best-effort remove the orphaned tag. The removal
+	// is detached from the request so a cancelled request cannot skip it.
 	committed := false
 	defer func() {
 		if !committed {
-			if err := m.docker.RemoveImage(ctx, imageRef); err != nil {
+			// Bounded so a stalled Docker daemon cannot hang the request.
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if err := m.docker.RemoveImage(cctx, imageRef); err != nil {
 				log.Printf("WARNING: failed to clean up orphaned snapshot image %s: %v", imageRef, err)
 			}
 		}
@@ -159,25 +164,15 @@ func (m *Manager) Create(ctx context.Context, tenantID, serviceID string, req Cr
 
 	now := time.Now().Unix()
 
-	// Use a transaction so we can rollback the DB insert if it fails,
-	// keeping the tagged image as best-effort cleanup.
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
+	// A single INSERT is atomic on its own; on failure the deferred cleanup
+	// removes the tagged image.
+	_, err = m.db.ExecContext(ctx,
 		`INSERT INTO snapshots (id, tenant_id, service_id, name, description, image_ref, env_encrypted, resource_config, port, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshotID, tenantID, serviceID, req.Name, req.Description, imageRef, string(envJSON), resourceConfig, svcPort, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert snapshot: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit snapshot: %w", err)
 	}
 	committed = true
 
@@ -201,6 +196,9 @@ type ListFilter struct {
 	Since     int64  // filter created_at >= since (unix timestamp)
 }
 
+// likeEscaper escapes SQL LIKE metacharacters for use with ESCAPE '\'.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // List returns snapshots for a tenant with pagination and optional filters.
 func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int, filter *ListFilter) ([]*Snapshot, error) {
 	if limit <= 0 || limit > 200 {
@@ -220,8 +218,10 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int, 
 			args = append(args, filter.ServiceID)
 		}
 		if filter.Name != "" {
-			query += ` AND name LIKE ?`
-			args = append(args, "%"+filter.Name+"%")
+			// Escape LIKE metacharacters so the filter is a literal substring
+			// match ("v1_0" must not match "v1x0").
+			query += ` AND name LIKE ? ESCAPE '\'`
+			args = append(args, "%"+likeEscaper.Replace(filter.Name)+"%")
 		}
 		if filter.Since > 0 {
 			query += ` AND created_at >= ?`
@@ -279,49 +279,15 @@ func (m *Manager) Delete(ctx context.Context, tenantID, snapshotID string) error
 	if err != nil {
 		return err
 	}
-
-	// Best-effort image removal — log but don't fail the delete. Keep the tag
-	// while a service restored from this snapshot still runs from it.
-	if snap.ImageRef != "" && !m.imageReferencedByService(ctx, snap.ImageRef) {
-		if err := m.docker.RemoveImage(ctx, snap.ImageRef); err != nil {
-			log.Printf("WARNING: failed to remove snapshot image %s: %v", snap.ImageRef, err)
-		}
-	}
-
-	_, err = m.db.ExecContext(ctx,
-		`DELETE FROM snapshots WHERE id = ? AND tenant_id = ?`,
-		snapshotID, tenantID,
-	)
-	if err != nil {
-		return fmt.Errorf("delete snapshot: %w", err)
-	}
-
-	return nil
+	return m.deleteSnapshot(ctx, snap.ID, tenantID, snap.ImageRef)
 }
 
 // RestoreEnvVars decrypts and returns the environment variables stored in a
 // snapshot. Requires tenantID for tenant isolation — never call without it.
 func (m *Manager) RestoreEnvVars(ctx context.Context, tenantID, snapshotID string) (map[string]string, error) {
-	var envEncrypted string
-	err := m.db.QueryRowContext(ctx,
-		`SELECT env_encrypted FROM snapshots WHERE id = ? AND tenant_id = ?`,
-		snapshotID, tenantID,
-	).Scan(&envEncrypted)
-	if err == sql.ErrNoRows {
-		return nil, apierr.NotFound("snapshot not found")
-	}
+	encryptedMap, err := m.loadEnvBlob(ctx, tenantID, snapshotID)
 	if err != nil {
-		return nil, fmt.Errorf("query snapshot env: %w", err)
-	}
-
-	if envEncrypted == "" {
-		return map[string]string{}, nil
-	}
-
-	// Unmarshal the encrypted env blob.
-	var encryptedMap map[string]string
-	if err := json.Unmarshal([]byte(envEncrypted), &encryptedMap); err != nil {
-		return nil, fmt.Errorf("unmarshal env blob: %w", err)
+		return nil, err
 	}
 
 	// Decrypt each value.
@@ -340,6 +306,20 @@ func (m *Manager) RestoreEnvVars(ctx context.Context, tenantID, snapshotID strin
 // GetEnvKeys returns the env var keys stored in a snapshot with masked values.
 // This allows callers to see which env vars exist without revealing their values.
 func (m *Manager) GetEnvKeys(ctx context.Context, tenantID, snapshotID string) (map[string]string, error) {
+	// Values stay encrypted and are never returned.
+	encryptedMap, err := m.loadEnvBlob(ctx, tenantID, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	masked := make(map[string]string, len(encryptedMap))
+	for k := range encryptedMap {
+		masked[k] = "********"
+	}
+	return masked, nil
+}
+
+// loadEnvBlob returns a tenant's snapshot env map with values still encrypted.
+func (m *Manager) loadEnvBlob(ctx context.Context, tenantID, snapshotID string) (map[string]string, error) {
 	var envEncrypted string
 	err := m.db.QueryRowContext(ctx,
 		`SELECT env_encrypted FROM snapshots WHERE id = ? AND tenant_id = ?`,
@@ -349,24 +329,16 @@ func (m *Manager) GetEnvKeys(ctx context.Context, tenantID, snapshotID string) (
 		return nil, apierr.NotFound("snapshot not found")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query snapshot env keys: %w", err)
+		return nil, fmt.Errorf("query snapshot env: %w", err)
 	}
-
 	if envEncrypted == "" {
 		return map[string]string{}, nil
 	}
-
-	// Unmarshal just to extract keys — values stay encrypted and are not returned.
 	var encryptedMap map[string]string
 	if err := json.Unmarshal([]byte(envEncrypted), &encryptedMap); err != nil {
 		return nil, fmt.Errorf("unmarshal env blob: %w", err)
 	}
-
-	masked := make(map[string]string, len(encryptedMap))
-	for k := range encryptedMap {
-		masked[k] = "********"
-	}
-	return masked, nil
+	return encryptedMap, nil
 }
 
 // CleanExpired removes snapshots that exceed per-service count or age limits.
@@ -429,7 +401,7 @@ func (m *Manager) cleanByCount(ctx context.Context, maxPerService int) (int, err
 	for _, svc := range services {
 		excess := svc.count - maxPerService
 		// Select the oldest snapshots beyond the limit.
-		snapRows, err := m.db.QueryContext(ctx,
+		toDelete, err := m.querySnapRefs(ctx,
 			`SELECT id, tenant_id, image_ref FROM snapshots
 			 WHERE service_id = ?
 			 ORDER BY created_at ASC
@@ -440,30 +412,7 @@ func (m *Manager) cleanByCount(ctx context.Context, maxPerService int) (int, err
 			log.Printf("gc/snapshots: failed to query excess snapshots for service %s: %v", svc.serviceID, err)
 			continue
 		}
-
-		type snapInfo struct {
-			id       string
-			tenantID string
-			imageRef string
-		}
-		var toDelete []snapInfo
-		for snapRows.Next() {
-			var s snapInfo
-			if err := snapRows.Scan(&s.id, &s.tenantID, &s.imageRef); err != nil {
-				log.Printf("gc/snapshots: failed to scan snapshot row: %v", err)
-				continue
-			}
-			toDelete = append(toDelete, s)
-		}
-		snapRows.Close()
-
-		for _, s := range toDelete {
-			if err := m.deleteSnapshot(ctx, s.id, s.tenantID, s.imageRef); err != nil {
-				log.Printf("gc/snapshots: failed to delete snapshot %s: %v", s.id, err)
-				continue
-			}
-			removed++
-		}
+		removed += m.deleteSnapshots(ctx, toDelete)
 	}
 
 	return removed, nil
@@ -472,44 +421,51 @@ func (m *Manager) cleanByCount(ctx context.Context, maxPerService int) (int, err
 // cleanByAge deletes all snapshots older than maxAge.
 func (m *Manager) cleanByAge(ctx context.Context, maxAge time.Duration) (int, error) {
 	cutoff := time.Now().Add(-maxAge).Unix()
-
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, image_ref FROM snapshots WHERE created_at < ?`,
-		cutoff,
-	)
+	toDelete, err := m.querySnapRefs(ctx,
+		`SELECT id, tenant_id, image_ref FROM snapshots WHERE created_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("query expired snapshots: %w", err)
 	}
-	defer rows.Close()
+	return m.deleteSnapshots(ctx, toDelete), nil
+}
 
-	type snapInfo struct {
-		id       string
-		tenantID string
-		imageRef string
+// snapRef identifies a snapshot row and its tagged image for deletion.
+type snapRef struct {
+	id, tenantID, imageRef string
+}
+
+// querySnapRefs runs a query selecting (id, tenant_id, image_ref) and returns
+// the rows fully read, so the connection is free before any Docker calls.
+func (m *Manager) querySnapRefs(ctx context.Context, query string, args ...any) ([]snapRef, error) {
+	rows, err := m.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
-	var toDelete []snapInfo
+	defer rows.Close()
+	var refs []snapRef
 	for rows.Next() {
-		var s snapInfo
+		var s snapRef
 		if err := rows.Scan(&s.id, &s.tenantID, &s.imageRef); err != nil {
-			log.Printf("gc/snapshots: failed to scan expired snapshot: %v", err)
+			log.Printf("gc/snapshots: failed to scan snapshot row: %v", err)
 			continue
 		}
-		toDelete = append(toDelete, s)
+		refs = append(refs, s)
 	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate expired rows: %w", err)
-	}
+	return refs, rows.Err()
+}
 
-	var removed int
-	for _, s := range toDelete {
+// deleteSnapshots deletes each snapshot, logging failures, and returns how
+// many were removed.
+func (m *Manager) deleteSnapshots(ctx context.Context, refs []snapRef) int {
+	removed := 0
+	for _, s := range refs {
 		if err := m.deleteSnapshot(ctx, s.id, s.tenantID, s.imageRef); err != nil {
-			log.Printf("gc/snapshots: failed to delete expired snapshot %s: %v", s.id, err)
+			log.Printf("gc/snapshots: failed to delete snapshot %s: %v", s.id, err)
 			continue
 		}
 		removed++
 	}
-
-	return removed, nil
+	return removed
 }
 
 // deleteSnapshot removes a snapshot's Docker image and DB row.
@@ -519,7 +475,7 @@ func (m *Manager) deleteSnapshot(ctx context.Context, id, tenantID, imageRef str
 	// it once nothing references it.
 	if imageRef != "" && !m.imageReferencedByService(ctx, imageRef) {
 		if err := m.docker.RemoveImage(ctx, imageRef); err != nil {
-			log.Printf("gc/snapshots: WARNING: failed to remove image %s: %v", imageRef, err)
+			log.Printf("snapshots: WARNING: failed to remove image %s: %v", imageRef, err)
 		}
 	}
 

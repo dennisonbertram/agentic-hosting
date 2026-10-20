@@ -179,4 +179,20 @@ has "$tmp/out" "would delete $tmp/sb"
 if AH_SANDBOX_DIR=relative "$sandbox" up --dry-run > "$tmp/out" 2>&1; then fail 'sandbox.sh accepted a relative state dir'; fi
 pass 'sandbox.sh --dry-run'
 
+# --- sandbox.sh status (regression: exit 0 while running without a demo) --
+sb=$tmp/sbs
+mkdir -p "$sb/bin" "$tmp/curlstub"
+printf '#!/bin/sh\nsleep 30\n' > "$sb/bin/ah"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/curlstub/curl"
+chmod +x "$sb/bin/ah" "$tmp/curlstub/curl"
+"$sb/bin/ah" & fake_ah=$!
+printf '%s' "$fake_ah" > "$sb/ah.pid"
+status_rc=0
+AH_SANDBOX_DIR=$sb PATH="$tmp/curlstub:$PATH" "$sandbox" status > "$tmp/out" 2>&1 || status_rc=$?
+kill "$fake_ah" 2>/dev/null || :
+wait "$fake_ah" 2>/dev/null || :
+has "$tmp/out" 'running: http://127.0.0.1:18480'
+((status_rc == 0)) || { cat "$tmp/out" >&2; fail "sandbox.sh status exited $status_rc while running (no demo service)"; }
+pass 'sandbox.sh status without a demo service'
+
 printf 'test-setup-scripts: all checks passed\n'

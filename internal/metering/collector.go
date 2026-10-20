@@ -27,10 +27,14 @@ type Collector struct {
 	lastNet      map[string][2]uint64 // container ID -> cumulative [rx, tx] bytes (egress sandboxes)
 	warned       map[string]bool      // container IDs whose stats failure was already logged
 	statsTimeout time.Duration
+	// startedAt (unix seconds) separates sandboxes created while this
+	// collector was running, whose counters it has seen from zero, from ones
+	// left over from a previous ah process, whose earlier usage is unknown.
+	startedAt int64
 }
 
 func NewCollector(state, meter *sql.DB, d docker.Client) *Collector {
-	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}, lastNet: map[string][2]uint64{}, warned: map[string]bool{}, statsTimeout: 10 * time.Second}
+	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}, lastNet: map[string][2]uint64{}, warned: map[string]bool{}, statsTimeout: 10 * time.Second, startedAt: time.Now().Unix()}
 }
 
 // Run collects until ctx is cancelled.
@@ -58,6 +62,9 @@ func (c *Collector) Tick(ctx context.Context) {
 	type svc struct {
 		id, tenant, container, kind string
 		meterNet                    bool // record network bytes (internet-egress sandboxes)
+		// fromZero: the container started after this collector did, so with
+		// no baseline its cumulative counters are all unrecorded usage.
+		fromZero bool
 	}
 	var svcs []svc
 	for rows.Next() {
@@ -75,17 +82,22 @@ func (c *Collector) Tick(ctx context.Context) {
 	// values, so they cannot collide with service IDs in usage_daily's key.
 	// Sandboxes with internet egress also record network bytes, so per-tenant
 	// egress shows in /v1/tenant/usage/metrics?kind=sandbox.
-	sbxRows, err := c.state.QueryContext(ctx, `SELECT id, tenant_id, container_id, egress = 'internet' FROM environments
+	sbxRows, err := c.state.QueryContext(ctx, `SELECT id, tenant_id, container_id, egress = 'internet', created_at FROM environments
 		WHERE kind = 'sandbox' AND status = 'running' AND container_id IS NOT NULL AND container_id != ''`)
 	if err != nil {
 		log.Printf("metering: list running sandboxes: %v", err)
 	} else {
 		for sbxRows.Next() {
 			s := svc{kind: ResourceKindSandbox}
-			if err := sbxRows.Scan(&s.id, &s.tenant, &s.container, &s.meterNet); err != nil {
+			var createdAt int64
+			if err := sbxRows.Scan(&s.id, &s.tenant, &s.container, &s.meterNet, &createdAt); err != nil {
 				log.Printf("metering: scan sandbox: %v", err)
 				continue
 			}
+			// A sandbox created after this collector started has a container
+			// whose counters began at zero under our watch. Without this a
+			// sandbox living less than one tick would record no CPU or egress.
+			s.fromZero = createdAt > c.startedAt
 			svcs = append(svcs, s)
 		}
 		sbxRows.Close()
@@ -111,8 +123,10 @@ func (c *Collector) Tick(ctx context.Context) {
 		}
 		delete(c.warned, s.container)
 		// CPU counter is cumulative and keyed by container, so a replaced container
-		// starts a new baseline. The first sample records 0; a counter reset
-		// (container restart) records the new total.
+		// starts a new baseline. The first sample records 0, except for a
+		// sandbox created while this collector ran (fromZero), whose whole
+		// counter is new usage; a counter reset (container restart) records the
+		// new total.
 		var cpuSec float64
 		if prev, ok := c.lastCPU[s.container]; ok {
 			if st.CPUTotalNanos >= prev {
@@ -120,6 +134,8 @@ func (c *Collector) Tick(ctx context.Context) {
 			} else {
 				cpuSec = float64(st.CPUTotalNanos) / 1e9
 			}
+		} else if s.fromZero {
+			cpuSec = float64(st.CPUTotalNanos) / 1e9
 		}
 		memMBSec := float64(st.MemoryBytes) / (1024 * 1024) * SampleSeconds
 
@@ -129,6 +145,8 @@ func (c *Collector) Tick(ctx context.Context) {
 		if s.meterNet {
 			if prev, ok := c.lastNet[s.container]; ok {
 				rx, tx = counterDelta(st.NetRxBytes, prev[0]), counterDelta(st.NetTxBytes, prev[1])
+			} else if s.fromZero {
+				rx, tx = st.NetRxBytes, st.NetTxBytes
 			}
 		}
 

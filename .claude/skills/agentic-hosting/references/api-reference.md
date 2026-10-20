@@ -76,8 +76,9 @@ DELETE /v1/auth/keys/:keyID
 POST /v1/auth/recover
 Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
-# → {"api_key":"newkeyid.newsecret"}
-# Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
+# → 201 {"id":"...","key":"keyid.secret","name":"recovery-YYYYMMDD","created_at":unix,"warning"?:"...","revoked_key_id"?:"..."}
+#   Read the new key from .key (shown once). warning/revoked_key_id appear when the oldest key was auto-revoked.
+# Rate limited: 5/hour per IP, 20/hour global (adminLimiter, separate from registration's buckets)
 # Email must match the tenant's registered email
 
 # Validate a bootstrap token (does not register — just checks validity)
@@ -87,7 +88,7 @@ Body: {"token":"<bootstrap-token>"}
 # Rate limited like registration (5/IP/hour, 20/hour global)
 ```
 
-**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
+**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration and validation. Recovery (and reactivation and quota updates) takes `AH_ADMIN_TOKEN`; bootstrap tokens work there only when no admin token is configured (otherwise 403).
 
 ---
 

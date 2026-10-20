@@ -577,6 +577,19 @@ func (m *Manager) teardown(ctx context.Context, e *Environment, strict bool) err
 	// Clean up preview Traefik route files before DB cascade deletes the rows
 	m.cleanupPreviews(ctx, envID)
 
+	// No container_id yet: create() records it only in its final UPDATE, so a
+	// create interrupted by a crash can leave a running container the row does
+	// not know. On the strict (sandbox) path remove it by its deterministic
+	// name, or an egress sandbox would keep internet access after its row is
+	// deleted at startup.
+	if e.ContainerID == "" && strict {
+		name := fmt.Sprintf("ah-env-%s-%s", tenantID, envID)
+		if err := m.docker.RemoveContainer(ctx, name); err != nil && !isNotFoundError(err) {
+			log.Printf("environments: remove unrecorded container %s: %v", name, err)
+			return fmt.Errorf("remove container: %w", err)
+		}
+	}
+
 	// Stop and remove container (ignore not-found errors)
 	if e.ContainerID != "" {
 		if err := m.docker.StopContainer(ctx, e.ContainerID); err != nil {

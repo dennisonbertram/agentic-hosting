@@ -130,7 +130,7 @@ curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 
 ```bash
 make build
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum ./bin/ah --dev --port 8080
+AH_BOOTSTRAP_TOKEN=dev-bootstrap-token-32-chars-minimum ./bin/ah --dev --port 8080
 # or open registration (no bootstrap token):
 ./bin/ah --dev --open-registration --port 8080
 ```

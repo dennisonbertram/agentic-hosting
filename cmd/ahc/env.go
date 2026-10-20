@@ -26,7 +26,7 @@ Environments are ideal for:
 
 Quick start:
   # Create a Go dev environment
-  ahc env create my-env --template tmpl-golang
+  ahc env create my-env --template go
 
   # Run a command inside it
   ahc env exec my-env -- go version
@@ -140,8 +140,8 @@ Use --lease to set how long (in seconds) the environment stays active before aut
 
 Examples:
   ahc env create my-env
-  ahc env create my-env --template tmpl-golang
-  ahc env create my-env --template tmpl-node --lease 7200`,
+  ahc env create my-env --template go
+  ahc env create my-env --template node --lease 7200`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient(root)

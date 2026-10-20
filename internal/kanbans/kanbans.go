@@ -289,9 +289,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		return nil, fmt.Errorf("run container: %w", err)
 	}
 
-	// Update container ID — check rows affected to detect concurrent Delete
+	// Update container ID — check rows affected to detect concurrent Delete.
+	// Guarded on 'provisioning': a tenant suspension that ran before this write
+	// saw no container_id, removed nothing and set the row 'stopped'.
 	result, updateErr := m.db.ExecContext(ctx,
-		`UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ? AND status = 'provisioning'`,
 		containerID, time.Now().Unix(), id,
 	)
 	if updateErr != nil {
@@ -302,6 +304,13 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		return nil, fmt.Errorf("record kanban container: %w", updateErr)
 	}
 	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+		if m.rowExists(id) {
+			// Stopped (tenant suspended) before the container was recorded, so
+			// the suspension could not remove it. Keep the volume.
+			log.Printf("kanbans: %s was stopped during provisioning (tenant suspended?); removing unrecorded container", id)
+			m.removeContainerDetached(ctx, containerID)
+			return nil, apierr.Conflict("kanban board was stopped during provisioning (tenant suspended)")
+		}
 		log.Printf("kanbans: record %s was deleted during provisioning, cleaning up", id)
 		cleanup(containerID)
 		return nil, fmt.Errorf("kanban record deleted during provisioning")
@@ -348,10 +357,17 @@ func (m *Manager) restartFailedInPlace(ctx context.Context, tenantID, id, volume
 	const maxPortRetries = 5
 	var err error
 	for attempt := 0; attempt < maxPortRetries; attempt++ {
-		_, err = m.db.ExecContext(ctx,
+		var res sql.Result
+		res, err = m.db.ExecContext(ctx,
 			`UPDATE kanbans SET status = 'provisioning', container_id = '', port = ?, updated_at = ? WHERE id = ? AND status = 'failed'`,
 			port, time.Now().Unix(), id)
 		if err == nil {
+			// 0 rows: a concurrent Create already reserved (or deleted) the
+			// board. Touching Docker now would collide on the container name
+			// and then mark the other caller's board failed.
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil, apierr.Conflict("kanban board is already being restarted")
+			}
 			break
 		}
 		if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -367,21 +383,25 @@ func (m *Manager) restartFailedInPlace(ctx context.Context, tenantID, id, volume
 
 	jwtSecret, err := randomHex(32)
 	if err != nil {
-		m.updateStatus(ctx, id, "failed")
+		m.failProvisioning(id)
 		return nil, err
 	}
 	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerNameFor(tenantID, id), volume, publicURL, jwtSecret, port))
 	if err != nil {
-		m.updateStatus(ctx, id, "failed") // volume kept: it holds the board data
+		m.failProvisioning(id) // volume kept: it holds the board data
 		return nil, fmt.Errorf("run container: %w", err)
 	}
-	if _, err := m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`, containerID, time.Now().Unix(), id); err != nil {
+	res, err := m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ? AND status = 'provisioning'`, containerID, time.Now().Unix(), id)
+	if err != nil {
 		// Detached: a cancelled request must not leave the container running.
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-		defer cancel()
-		m.removeContainer(cctx, containerID)
-		m.updateStatus(ctx, id, "failed")
+		m.removeContainerDetached(ctx, containerID)
+		m.failProvisioning(id)
 		return nil, fmt.Errorf("store container id: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Suspended or deleted meanwhile; nothing else knows this container.
+		m.removeContainerDetached(ctx, containerID)
+		return nil, apierr.Conflict("kanban board changed during restart (tenant suspended or board deleted)")
 	}
 
 	m.background.Add(1)
@@ -392,11 +412,12 @@ func (m *Manager) restartFailedInPlace(ctx context.Context, tenantID, id, volume
 		if !m.waitForHTTP(bg, port, m.healthCheckTimeout) {
 			log.Printf("kanbans: in-place restart of %s failed health check (volume kept)", id)
 			m.removeContainer(bg, containerID)
-			m.updateStatus(bg, id, "failed")
+			m.failProvisioning(id)
 			return
 		}
 		if !m.casReady(bg, id) {
 			log.Printf("kanbans: %s changed state during in-place restart; not marking ready", id)
+			m.removeContainer(bg, containerID)
 		}
 	}()
 
@@ -589,13 +610,16 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 
 	if !m.casReady(ctx, id) {
 		// Deleted: clean up everything. Changed (e.g. suspended -> 'stopped'):
-		// StopForTenant already removed the container; keep the set-up volume
-		// so reactivation can start the board.
+		// remove the container but keep the set-up volume so reactivation can
+		// start the board.
+		// The container is removed by ID either way: StopForTenant may have
+		// run before container_id was stored and so removed nothing.
 		var one int
 		if err := m.db.QueryRowContext(ctx, `SELECT 1 FROM kanbans WHERE id = ?`, id).Scan(&one); err != nil {
 			cleanup()
 		} else {
 			log.Printf("kanbans: %s changed state during provisioning (tenant suspended?); leaving it for reactivation", id)
+			m.removeContainer(ctx, containerID)
 		}
 		return
 	}
@@ -721,6 +745,37 @@ func (m *Manager) StopForTenant(ctx context.Context, tenantID string) {
 	}
 	m.updateStatus(ctx, k.ID, "stopped")
 	log.Printf("kanbans: StopForTenant stopped kanban board for tenant %s", tenantID)
+}
+
+// failProvisioning marks a board failed only while it is still provisioning,
+// so a concurrent suspension ('stopped') or another caller's state is kept.
+func (m *Manager) failProvisioning(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := m.db.ExecContext(ctx,
+		`UPDATE kanbans SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'provisioning'`,
+		time.Now().Unix(), id,
+	); err != nil {
+		log.Printf("kanbans: failed to mark %s failed: %v", id, err)
+	}
+}
+
+// rowExists reports whether the board row is still present. A query error is
+// treated as present, so callers keep the volume rather than delete data.
+func (m *Manager) rowExists(id string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var one int
+	err := m.db.QueryRowContext(ctx, `SELECT 1 FROM kanbans WHERE id = ?`, id).Scan(&one)
+	return err != sql.ErrNoRows
+}
+
+// removeContainerDetached removes a container on a bounded context that
+// survives a cancelled request.
+func (m *Manager) removeContainerDetached(ctx context.Context, containerID string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	m.removeContainer(cctx, containerID)
 }
 
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {

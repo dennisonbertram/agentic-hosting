@@ -318,6 +318,18 @@ func (c *Client) RecoverKey(email, bootstrapToken string) (*KeyRecoverResponse, 
 	return &resp, nil
 }
 
+// RecoverKeyWithAdminToken is RecoverKey authenticated with the operator's
+// admin token (X-Admin-Token). A server with AH_ADMIN_TOKEN configured accepts
+// only that token for recovery and answers a bootstrap token with 403.
+func (c *Client) RecoverKeyWithAdminToken(email, adminToken string) (*KeyRecoverResponse, error) {
+	body := KeyRecoverRequest{Email: email}
+	var resp KeyRecoverResponse
+	if err := c.doJSON(http.MethodPost, "/v1/auth/recover", body, &resp, map[string]string{"X-Admin-Token": adminToken}); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ---- Service endpoints ----
 
 // ListServices returns all services for the current tenant.

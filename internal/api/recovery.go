@@ -33,15 +33,18 @@ type KeyRecoverResponse struct {
 // handleKeyRecover handles POST /v1/auth/recover.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour) — limits brute-force of the
-//     bootstrap token.
+//   - Rate-limited by adminLimiter (5/IP/hour, 20/global/hour), separate
+//     buckets from registration's regLimiter — limits brute-force of the
+//     admin/bootstrap token. The global bucket is charged only after a
+//     successful admin-token check (requireAdmin).
+//   - Requires the admin token (X-Admin-Token, or the body/X-Bootstrap-Token
+//     slot carrying it); bootstrap tokens only when no admin token is set.
 //   - The token is verified via HMAC-compare (no length leak).
 //   - Unknown-email and bad-token responses are deliberately identical (401)
 //     to prevent email enumeration.
 func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration to prevent
-	// brute-force of the bootstrap token via this endpoint.
+	// Admin-route limiter (separate from registration's) to prevent
+	// brute-force of the admin/bootstrap token via this endpoint.
 	if !adminLimiter.allowRequest(w, r) {
 		return
 	}

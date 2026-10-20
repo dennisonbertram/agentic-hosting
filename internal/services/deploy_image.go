@@ -46,7 +46,9 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return apierr.Conflict("circuit breaker is open: service has crashed too many times; use POST /reset to clear")
 	}
 
-	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
+	if err := m.markDeploying(ctx, tenantID, serviceID); err != nil {
+		return err
+	}
 
 	// Record deployment event.
 	deployID := m.recordDeployment(ctx, &deployments.Deployment{

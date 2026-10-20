@@ -153,6 +153,9 @@ func circuitRetryBackoff(openCount int) time.Duration {
 const (
 	staleDeployAge    = 10 * time.Minute
 	staleEnvCreateAge = 5 * time.Minute
+	// staleRestartAge is well past Restart's 2-minute operation budget, so a
+	// row still 'restarting' after it was left behind by a crashed ah process.
+	staleRestartAge = 10 * time.Minute
 )
 
 // tally counts rows inspected and rows changed by one reconciliation pass.
@@ -173,6 +176,9 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	}
 
 	var t tally
+	// 0. Services left 'restarting' by an interrupted Restart go back under watch
+	// before the crash state machine runs, so it inspects them this tick.
+	r.recoverStaleRestarts(ctx, &t)
 	// 1. Crash state machine for running/crashed services (see package doc).
 	if err := r.reconcileServices(ctx, &t); err != nil {
 		return err
@@ -481,6 +487,64 @@ func (r *Reconciler) failStaleDeploys(ctx context.Context, t *tally) {
 	if n > 0 {
 		log.Printf("reconciler: marked %d stale deploys as failed", n)
 		t.fixed += n
+	}
+}
+
+// recoverStaleRestarts hands services stuck in "restarting" (Restart was
+// interrupted by an ah crash or shutdown) back to the reconciler. A row that
+// still has a container_id goes back to 'running' so the crash state machine
+// re-inspects that container; a row whose old container was already removed
+// is marked failed. Each row is a compare-and-swap on the scanned state.
+func (r *Reconciler) recoverStaleRestarts(ctx context.Context, t *tally) {
+	const reason = "restart interrupted (reconciler)"
+	cutoff := time.Now().Add(-staleRestartAge).Unix()
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, tenant_id, image, COALESCE(container_id, '') FROM services WHERE status = 'restarting' AND updated_at < ?`, cutoff)
+	if err != nil {
+		log.Printf("reconciler: failed to query stale restarts: %v", err)
+		return
+	}
+	type staleRecord struct {
+		id, tenantID, containerID string
+		image                     sql.NullString
+	}
+	var stale []staleRecord
+	for rows.Next() {
+		var s staleRecord
+		if err := rows.Scan(&s.id, &s.tenantID, &s.image, &s.containerID); err == nil {
+			stale = append(stale, s)
+		}
+	}
+	rows.Close()
+
+	for _, s := range stale {
+		now := time.Now().Unix()
+		var res sql.Result
+		if s.containerID != "" {
+			res, err = r.db.ExecContext(ctx,
+				`UPDATE services SET status = 'running', updated_at = ?
+				 WHERE id = ? AND tenant_id = ? AND status = 'restarting' AND container_id = ? AND updated_at < ?`,
+				now, s.id, s.tenantID, s.containerID, cutoff)
+		} else {
+			res, err = r.db.ExecContext(ctx,
+				`UPDATE services SET status = 'failed', last_error = ?, updated_at = ?
+				 WHERE id = ? AND tenant_id = ? AND status = 'restarting' AND COALESCE(container_id, '') = '' AND updated_at < ?`,
+				reason, now, s.id, s.tenantID, cutoff)
+		}
+		if err != nil {
+			log.Printf("reconciler: failed to recover stale restart %s: %v", s.id, err)
+			continue
+		}
+		if c, _ := res.RowsAffected(); c == 0 {
+			continue
+		}
+		t.fixed++
+		if s.containerID != "" {
+			log.Printf("reconciler: service %s stuck restarting; returned to running for re-inspection", s.id)
+		} else {
+			log.Printf("reconciler: service %s stuck restarting without a container; marked failed", s.id)
+			r.recordServiceEvent(ctx, s.id, s.tenantID, s.image.String, deployments.StatusFailed, deployments.TriggerReconciler, reason)
+		}
 	}
 }
 

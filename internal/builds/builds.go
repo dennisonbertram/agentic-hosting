@@ -101,6 +101,9 @@ type Manager struct {
 	phases     map[string]int                // buildID -> phaseCancelled/phaseDeploying (guarded by logMu)
 	logStates  map[string]*logState          // buildID -> log accumulation state
 	cancels    map[string]context.CancelFunc // buildID -> cancel for the running build (guarded by logMu)
+	// finalWriteTimeout bounds each phase of runBuild's final DB writes
+	// (defaultFinalWriteTimeout; tests shorten it).
+	finalWriteTimeout time.Duration
 }
 
 // NewManager creates a build manager.
@@ -114,6 +117,8 @@ func NewManager(db *sql.DB, b buildExecutor, deployFn DeployFunc) *Manager {
 		phases:     make(map[string]int),
 		logStates:  make(map[string]*logState),
 		cancels:    make(map[string]context.CancelFunc),
+
+		finalWriteTimeout: defaultFinalWriteTimeout,
 	}
 	// Mark any stale builds from previous process as failed
 	m.reconcileStaleBuilds()
@@ -320,7 +325,7 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	err := m.builder.Build(ctx, req, logCb)
 
 	// Use a fresh context for final DB writes so timeout doesn't prevent status update
-	finalCtx, finalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), m.finalWriteTimeout)
 	defer finalCancel()
 
 	finishedAt := time.Now().Unix()
@@ -359,6 +364,13 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		deployCtx, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag, buildID)
 		deployCancel()
+		// The deploy can wait for a deploy slot and pull images for far longer
+		// than finalCtx's budget. Give the terminal writes a fresh context, or
+		// they fail on an expired one and the build stays 'running', holding a
+		// max_builds_concurrent slot until the next restart.
+		postCtx, postCancel := context.WithTimeout(context.Background(), m.finalWriteTimeout)
+		defer postCancel()
+		finalCtx = postCtx
 		if deployErr != nil {
 			log.Printf("build %s deploy failed: %v", buildID, deployErr)
 			logCb("[ah] Deploy failed: " + deployErr.Error())
@@ -369,6 +381,9 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	}
 	m.finishBuild(finalCtx, buildID, "succeeded", finishedAt)
 }
+
+// defaultFinalWriteTimeout bounds each phase of runBuild's final DB writes.
+const defaultFinalWriteTimeout = 30 * time.Second
 
 // finishBuild moves a running build to its terminal status. The log is flushed
 // first so a caller polling on the terminal status always sees the complete log.

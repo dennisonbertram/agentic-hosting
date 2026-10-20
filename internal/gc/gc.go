@@ -163,6 +163,7 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	}
 
 	removed += g.removeUnusedBuiltImages(ctx)
+	removed += g.removeUnusedPulledImages(ctx)
 	if !g.skipDockerPrune {
 		if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
 			log.Printf("gc: anonymous volume prune failed: %v", err)
@@ -517,6 +518,79 @@ func (g *GC) removeUnusedBuiltImages(ctx context.Context) int {
 			} else {
 				removed++
 			}
+		}
+	}
+	return removed
+}
+
+// removeUnusedPulledImages removes public images ah pulled for image-sourced
+// sandboxes (recorded in pulled_images) once no container uses them and no
+// service, snapshot, environment or template row references them. Without it
+// every distinct image a tenant runs a disposable sandbox from stays on disk
+// until the disk check blocks every tenant. A ref is only considered once it
+// was last requested more than minImageAge ago, so a create still pulling it
+// is not raced.
+func (g *GC) removeUnusedPulledImages(ctx context.Context) int {
+	cutoff := time.Now().Add(-minImageAge).Unix()
+	var refs []string
+	if err := scanRows(ctx, g.db, fmt.Sprintf(`SELECT ref FROM pulled_images WHERE pulled_at < %d`, cutoff), func(rows *sql.Rows) error {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return err
+		}
+		refs = append(refs, ref)
+		return nil
+	}); err != nil {
+		log.Printf("gc: pulled image query failed: %v", err)
+		return 0
+	}
+	if len(refs) == 0 {
+		return 0
+	}
+	ctrImages, err := g.docker.ListContainerImages(ctx)
+	if err != nil {
+		log.Printf("gc: container image list failed: %v", err)
+		return 0
+	}
+	inUse := map[string]bool{}
+	for _, r := range ctrImages {
+		inUse[r] = true
+	}
+	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`,
+		`SELECT image_ref FROM environments`, `SELECT base_image FROM environment_templates`} {
+		// Unknown references: remove nothing.
+		if err := scanRows(ctx, g.db, q, func(rows *sql.Rows) error {
+			var ref sql.NullString
+			if err := rows.Scan(&ref); err != nil {
+				return err
+			}
+			inUse[ref.String] = true
+			return nil
+		}); err != nil {
+			log.Printf("gc: image reference query failed: %v", err)
+			return 0
+		}
+	}
+
+	removed := 0
+	for _, ref := range refs {
+		if inUse[ref] {
+			continue
+		}
+		exists, err := g.docker.ImageExists(ctx, ref)
+		if err != nil {
+			continue
+		}
+		if exists {
+			// Docker refuses (without force) an image a container still uses.
+			if err := g.docker.RemoveImage(ctx, ref); err != nil {
+				log.Printf("gc: failed to remove pulled image %s: %v", ref, err)
+				continue
+			}
+			removed++
+		}
+		if _, err := g.db.ExecContext(ctx, `DELETE FROM pulled_images WHERE ref = ? AND pulled_at < ?`, ref, cutoff); err != nil {
+			log.Printf("gc: forget pulled image %s: %v", ref, err)
 		}
 	}
 	return removed

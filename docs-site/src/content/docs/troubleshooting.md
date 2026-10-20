@@ -48,7 +48,7 @@ Or wait for auto-backoff (30m / 1h / 4h), which **closes the circuit and leaves 
 
 ## Deploy / build returns disk error
 
-`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, restart, redeploy) return **500** `{"error":"internal error"}`, not 503. Service create returns 201 and the async deploy fails with `last_error` set.
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, kanban create, deploy, restart, redeploy) return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`. Service create returns 201 and the async deploy fails with `last_error` set.
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" \

@@ -39,22 +39,27 @@ On exceed: **429** plus `Retry-After`.
 
 Same 429 + `Retry-After` behavior.
 
-## Registration / bootstrap
+## Registration, bootstrap and admin routes
 
-`registrationLimiter` in `internal/api/tenants.go`:
+Two limiters of type `registrationLimiter` in `internal/api/tenants.go`, with separate buckets and the same limits:
 
 | Scope | Limit | Window |
 |-------|--------|--------|
 | Per client IP | 5 | 1 hour |
 | Global | 20 | 1 hour |
 
-Applied to:
+`regLimiter` applies to:
 
 - `POST /v1/tenants/register`
+- `POST /v1/system/bootstrap-token/validate`
+
+`adminLimiter` applies to:
+
 - `POST /v1/auth/recover`
 - `POST /v1/tenants/{id}/reactivate`
 - `PATCH /v1/tenants/{id}/quotas`
-- `POST /v1/system/bootstrap-token/validate`
+
+Every request charges its per-IP bucket. The global bucket is only checked per request; it is charged only after a successful registration (`regLimiter`) or a successful admin-token check (`adminLimiter`). Validation never charges it. A burst of registrations therefore does not block recovery, and recovery attempts do not use up the registration budget.
 
 IP comes from `trustedRealIP`: `X-Real-Ip` **only** if `RemoteAddr` is loopback (Traefik). `X-Forwarded-For` is not trusted.
 

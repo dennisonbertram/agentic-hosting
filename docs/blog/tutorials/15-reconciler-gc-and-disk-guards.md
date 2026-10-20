@@ -111,7 +111,7 @@ Before deploying a service, redeploying or restarting one, starting a build, cre
 What the caller sees depends on the path:
 
 - `POST /v1/services` still returns **201**. The deploy runs in the background, then the service goes to `failed` and `last_error` holds the disk message, something like `disk check: /var/lib/ah: insufficient disk space at /var/lib/ah (91.2% used, threshold 90%)`.
-- Restart, redeploy, build and database creates return **500** with `{"error":"internal error"}`. The disk error is a plain Go error, not a typed API error, so the response does not say why. The real reason is in the server log.
+- Restart, redeploy, build, database and kanban creates return **503** with `{"error":"insufficient disk space; try again later"}` and `Retry-After: 10`. The full disk message (path and percentage) is in the server log.
 - `ah backup` exits with a fatal log line.
 
 If the filesystem cannot be measured at all, the check allows the operation.

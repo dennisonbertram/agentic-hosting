@@ -218,16 +218,19 @@ func (s *Server) setupRoutes() {
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
-		// Recovery endpoint: authenticated by bootstrap token, not an API key.
+		// Recovery endpoint: authenticated by the admin token (bootstrap tokens
+		// only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows tenants who have lost all their keys to obtain a new one.
 		r.Post("/v1/auth/recover", s.handleKeyRecover)
-		// Reactivation endpoint: authenticated by bootstrap token, not an API key.
+		// Reactivation endpoint: authenticated by the admin token (bootstrap
+		// tokens only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows operator to reactivate a suspended tenant and generate a new API key.
 		r.Post("/v1/tenants/{tenantID}/reactivate", s.handleTenantReactivate)
 		// Validate endpoint: checks if a bootstrap token is valid.
 		// Useful during token rotation to verify both old and new tokens.
 		r.Post("/v1/system/bootstrap-token/validate", s.handleBootstrapTokenValidate)
-		// Quota update endpoint: authenticated by bootstrap token, not an API key.
+		// Quota update endpoint: authenticated by the admin token (bootstrap
+		// tokens only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows operator to update tenant resource limits.
 		r.Patch("/v1/tenants/{tenantID}/quotas", s.handleQuotaUpdate)
 	})

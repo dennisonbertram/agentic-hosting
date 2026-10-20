@@ -380,6 +380,10 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		name = "sbx-" + suffix[:8]
 	}
 
+	if req.Source.Type == SandboxSourceImage && !r.localImage {
+		m.trackPulledImage(ctx, r.image)
+	}
+
 	now := time.Now().Unix()
 	maxExpiresAt := now + int64(q.maxLifetime)
 	poolTmpl := ""
@@ -618,4 +622,30 @@ func (m *Manager) ExtendSandbox(ctx context.Context, tenantID, sandboxID string,
 		left = 0
 	}
 	return nil, apierr.Validation(fmt.Sprintf("ttl_seconds would pass the sandbox's maximum lifetime; at most %d seconds remain", left))
+}
+
+// trackPulledImage records a public image a sandbox create is about to pull,
+// so GC can remove it once nothing uses it. Only an image absent locally is
+// recorded (images already present, such as the operator's, are never GC'd
+// this way); a ref recorded earlier has its timestamp refreshed so GC does
+// not race this create. Best effort: failures only cost disk until pruned.
+func (m *Manager) trackPulledImage(ctx context.Context, ref string) {
+	now := time.Now().Unix()
+	res, err := m.db.ExecContext(ctx, `UPDATE pulled_images SET pulled_at = ? WHERE ref = ?`, now, ref)
+	if err != nil {
+		log.Printf("environments: track pulled image %s: %v", ref, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return
+	}
+	exists, err := m.docker.ImageExists(ctx, ref)
+	if err != nil || exists {
+		return
+	}
+	if _, err := m.db.ExecContext(ctx,
+		`INSERT INTO pulled_images (ref, pulled_at) VALUES (?, ?) ON CONFLICT(ref) DO UPDATE SET pulled_at = excluded.pulled_at`,
+		ref, now); err != nil {
+		log.Printf("environments: track pulled image %s: %v", ref, err)
+	}
 }

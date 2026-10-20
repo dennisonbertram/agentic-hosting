@@ -69,4 +69,4 @@ Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `d
 When disk is over 90%:
 
 - `POST /v1/services` still returns **201** `deploying`; the async deploy then sets `status=failed` and `last_error` to the diskcheck message
-- Build create, DB create, restart, and redeploy return **500** `{"error":"internal error"}` — diskcheck is a plain `fmt.Errorf`, and `apierr.WriteAPIError` falls back to 500. This is **not** 503.
+- Build create, DB create, kanban create, deploy, restart and redeploy return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` (the disk error is wrapped as `apierr.Unavailable`). Retry once space is freed.

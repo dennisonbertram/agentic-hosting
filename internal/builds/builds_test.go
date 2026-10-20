@@ -428,3 +428,29 @@ func TestStartBuild_EnforcesMaxBuildsConcurrent(t *testing.T) {
 	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM builds`).Scan(&n))
 	assert.Equal(t, 1, n, "rejected build must not leave a row")
 }
+
+// Regression: a deploy that outlasts the final-write budget must not leave the
+// build 'running' (which would hold a max_builds_concurrent slot forever).
+func TestStartBuild_SlowDeployStillFinishesBuild(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedBuildTestData(t, stateDB)
+
+	const budget = 100 * time.Millisecond
+	mgr := NewManager(stateDB, &stubBuilder{}, func(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error {
+		time.Sleep(4 * budget)
+		return nil
+	})
+	mgr.finalWriteTimeout = budget
+
+	build, err := mgr.StartBuild(context.Background(), "tenant-1", "svc-1", StartBuildRequest{
+		SourceType: "git",
+		SourceURL:  "https://github.com/example/repo.git",
+		SourceRef:  "main",
+	})
+	require.NoError(t, err)
+
+	waitForBuildStatus(t, stateDB, build.ID, "succeeded")
+	logs, err := mgr.GetBuildLogs(context.Background(), "tenant-1", build.ID)
+	require.NoError(t, err)
+	assert.Contains(t, logs, "Deploy succeeded")
+}

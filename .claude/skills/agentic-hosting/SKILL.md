@@ -387,12 +387,12 @@ ah rotate-key --new-key-file /path/to/new.key
 | `401 Unauthorized` | Check key format: `keyid.secret` |
 | `422 Unprocessable Entity` | Name/email already exists, missing required field, reserved subdomain (`api`, `admin`, etc.), or DNS label too long |
 | `429 Too Many Requests` | Back off; respect `Retry-After` header |
-| `500` `{"error":"internal error"}` on build/DB/restart/redeploy | Disk ≥90% — check `/v1/system/health/detailed?fresh=true` (not 503) |
-| `503 Service Unavailable` | Docker/build/metering/registration unavailable |
+| `503` `{"error":"insufficient disk space; try again later"}` on build/DB/kanban create/deploy/restart/redeploy | Disk ≥90% — check `/v1/system/health/detailed?fresh=true`; retry after `Retry-After` (10s) once space is freed |
+| `503 Service Unavailable` (other) | Docker/build/metering/registration unavailable, or the deploy queue is full (respect `Retry-After`) |
 | Service stuck `deploying` >10 min | Server marks it `failed` at 10 min; check health, delete and retry |
 | `circuit_open: true` (boolean; status is `crashed`) | Fix the app, then `POST .../reset`, then `POST .../redeploy` (`/start` returns 409 — reset removes the container) |
 | Build `failed` | Stream build logs with `?follow=true` for the error |
-| All API keys lost | Use `POST /v1/auth/recover` with bootstrap token + tenant email |
+| All API keys lost | Use `POST /v1/auth/recover` with the operator's admin token (`X-Admin-Token`; a bootstrap token only when the server has no `AH_ADMIN_TOKEN`) + tenant email |
 
 For idempotency (10-minute TTL), limits, and advanced operations see `references/operations.md`.
 

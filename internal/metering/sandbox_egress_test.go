@@ -76,3 +76,43 @@ func TestCounterDelta(t *testing.T) {
 	assert.EqualValues(t, 3, counterDelta(3, 10), "reset")
 	assert.EqualValues(t, 0, counterDelta(7, 7))
 }
+
+// Regression: a sandbox created after the collector started is sampled from
+// zero, so its first sample records the whole cumulative counters. Otherwise a
+// sandbox that lives less than one tick records no CPU or egress at all.
+// Sandboxes predating the collector keep the baseline-only first sample.
+func TestCollectorTick_FreshSandboxFirstSampleRecordsTotals(t *testing.T) {
+	store := newCollectorStore(t)
+	mock := &testutil.MockDockerClient{ContainerStatsFn: func(_ context.Context, id string) (*docker.ContainerStats, error) {
+		return &docker.ContainerStats{CPUTotalNanos: 3e9, MemoryBytes: 1 << 20, NetRxBytes: 7000, NetTxBytes: 9000}, nil
+	}}
+	c := NewCollector(store.StateDB, store.MeteringDB, mock)
+	for _, r := range []struct {
+		id, cid string
+		created int64
+	}{
+		{"sbx-fresh", "cf", c.startedAt + 5},
+		{"sbx-old", "co", c.startedAt - 3600},
+	} {
+		_, err := store.StateDB.Exec(`INSERT INTO environments (id, tenant_id, name, kind, status, container_id, egress, created_at, updated_at)
+			VALUES (?, 't1', ?, 'sandbox', 'running', ?, 'internet', ?, ?)`, r.id, r.id, r.cid, r.created, r.created)
+		require.NoError(t, err)
+	}
+
+	c.Tick(context.Background())
+
+	row := func(id string) (cpu float64, in, out int64) {
+		require.NoError(t, store.MeteringDB.QueryRow(
+			`SELECT cpu_seconds, network_ingress_bytes, network_egress_bytes FROM usage_daily WHERE service_id = ?`, id).Scan(&cpu, &in, &out))
+		return
+	}
+	cpu, in, out := row("sbx-fresh")
+	assert.InDelta(t, 3.0, cpu, 1e-9)
+	assert.EqualValues(t, 7000, in)
+	assert.EqualValues(t, 9000, out)
+
+	cpu, in, out = row("sbx-old")
+	assert.Zero(t, cpu, "a sandbox from before this process keeps the baseline-only first sample")
+	assert.Zero(t, in)
+	assert.Zero(t, out)
+}

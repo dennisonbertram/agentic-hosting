@@ -497,8 +497,8 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | 413 | Body > 1 MB |
 | 422 | Registration uniqueness (deliberately vague) |
 | 429 | Rate limit |
-| 500 | Unexpected, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) |
-| 503 | Docker/build/metering/registration unavailable (manager nil) |
+| 500 | Unexpected (`{"error":"internal error"}`) |
+| 503 | Docker/build/metering/registration unavailable (manager nil); disk ≥90% on build, DB create, kanban create, deploy and restart/redeploy (`{"error":"insufficient disk space; try again later"}`, `Retry-After: 10`); deploy queue full (`Retry-After`) |
 
 ## Timeouts
 

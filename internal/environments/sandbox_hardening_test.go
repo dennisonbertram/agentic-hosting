@@ -323,3 +323,47 @@ func TestSandboxEgressGate(t *testing.T) {
 	_, err = parseSandboxEgress("INTERNET")
 	assertAPICode(t, err, 400)
 }
+
+// Regression: an egress sandbox whose create was interrupted before its
+// container_id was recorded still has a container running on the egress
+// bridge. The startup sweep must remove it by name, not only delete the row.
+func TestDeleteEgressSandboxesIfDisabled_RemovesUnrecordedContainer(t *testing.T) {
+	mgr, mock, _, _ := newSandboxManager(t)
+	mgr.SetSandboxEgressNetwork(testEgressNet)
+	allowEgress(t, mgr, testTenantID)
+	ctx := context.Background()
+	s, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Source: SandboxSource{Type: "image", Image: "alpine"}, Egress: "internet"})
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(`UPDATE environments SET status = 'creating', container_id = '' WHERE id = ?`, s.ID)
+	require.NoError(t, err)
+
+	mgr.SetSandboxEgressNetwork("")
+	n, err := mgr.DeleteEgressSandboxesIfDisabled(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.False(t, rowExists(t, mgr, s.ID))
+	assert.Contains(t, mock.RemoveContainerCalls, fmt.Sprintf("ah-env-%s-%s", testTenantID, s.ID))
+}
+
+// Regression (GC of sandbox images): an image-sourced sandbox records the
+// public image it pulls so GC can remove it later, but only when the image was
+// not already present (operator images are never recorded).
+func TestCreateSandbox_TracksFreshlyPulledImage(t *testing.T) {
+	mgr, mock, _, _ := newSandboxManager(t)
+	mock.ImageExistsFn = func(_ context.Context, ref string) (bool, error) { return ref == "traefik:v3", nil }
+	ctx := context.Background()
+	for _, img := range []string{"python:3.12", "traefik:v3"} {
+		_, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Source: SandboxSource{Type: "image", Image: img}})
+		require.NoError(t, err)
+	}
+	var refs []string
+	rows, err := mgr.db.Query(`SELECT ref FROM pulled_images`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var r string
+		require.NoError(t, rows.Scan(&r))
+		refs = append(refs, r)
+	}
+	assert.Equal(t, []string{"python:3.12"}, refs)
+}

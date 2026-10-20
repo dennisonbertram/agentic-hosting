@@ -258,3 +258,58 @@ func TestReconciler_StaleDeployment(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "deploying", recentStatus, "recently-started deploying service should not be affected")
 }
+
+// Regression: a Restart interrupted by an ah crash leaves the row 'restarting',
+// which no other path watches. Stale rows go back to 'running' (container kept)
+// or 'failed' (container already cleared); fresh ones are left alone.
+func TestReconciler_StaleRestartRecovered(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	stale := now - 11*60
+	fresh := now - 30
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"tenant-1", "Test Tenant", "test@example.com", "active", now, now)
+	require.NoError(t, err)
+	for _, row := range []struct {
+		id, cid string
+		at      int64
+	}{
+		{"svc-with-ctr", "container-abc", stale},
+		{"svc-no-ctr", "", stale},
+		{"svc-fresh", "", fresh},
+	} {
+		_, err = db.ExecContext(ctx,
+			`INSERT INTO services (id, tenant_id, name, status, container_id, crash_count, circuit_open, circuit_open_count, created_at, updated_at)
+			 VALUES (?, ?, ?, 'restarting', ?, 0, 0, 0, ?, ?)`,
+			row.id, "tenant-1", row.id, row.cid, row.at, row.at)
+		require.NoError(t, err)
+	}
+
+	mock := &testutil.MockDockerClient{}
+	mock.ListContainersByLabelFn = func(ctx context.Context, label, value string) ([]string, error) {
+		return []string{"container-abc"}, nil
+	}
+	mock.InspectContainerFn = func(ctx context.Context, containerID string) (*docker.ContainerInfo, error) {
+		return &docker.ContainerInfo{Status: "running"}, nil
+	}
+
+	r := reconciler.New(db, mock, time.Minute, nil)
+	require.NoError(t, r.ReconcileOnce(ctx))
+
+	status := func(id string) (string, string) {
+		var st, le string
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT status, COALESCE(last_error, '') FROM services WHERE id = ?`, id).Scan(&st, &le))
+		return st, le
+	}
+	st, _ := status("svc-with-ctr")
+	assert.Equal(t, "running", st)
+	st, le := status("svc-no-ctr")
+	assert.Equal(t, "failed", st)
+	assert.Contains(t, le, "restart interrupted")
+	st, _ = status("svc-fresh")
+	assert.Equal(t, "restarting", st, "an in-flight restart must not be touched")
+}

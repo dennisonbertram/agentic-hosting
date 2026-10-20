@@ -470,7 +470,7 @@ curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 
 ```bash
 make build
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum ./bin/ah --dev --port 8080
+AH_BOOTSTRAP_TOKEN=dev-bootstrap-token-32-chars-minimum ./bin/ah --dev --port 8080
 # or open registration (no bootstrap token):
 ./bin/ah --dev --open-registration --port 8080
 ```
@@ -580,7 +580,7 @@ Rules from `handleTenantRegister`:
 - Email must match `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, max 256
 - Max **1000** active tenants
 - Duplicate name/email → **422** (`registration failed, please check your details and try again`)
-- Rate limit: **5 / IP / hour** and **20 / hour global** (same limiter as recover, reactivate, quota patch, bootstrap validate)
+- Rate limit: **5 / IP / hour** and **20 / hour global** (`regLimiter`, shared with bootstrap validate; recover, reactivate and quota patch use a separate `adminLimiter` with the same limits). The global bucket is charged only by a successful registration.
 
 Response:
 
@@ -1098,7 +1098,7 @@ Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `d
 When disk is over 90%:
 
 - `POST /v1/services` still returns **201** `deploying`; the async deploy then sets `status=failed` and `last_error` to the diskcheck message
-- Build create, DB create, restart, and redeploy return **500** `{"error":"internal error"}` — diskcheck is a plain `fmt.Errorf`, and `apierr.WriteAPIError` falls back to 500. This is **not** 503.
+- Build create, DB create, kanban create, deploy, restart and redeploy return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` (the disk error is wrapped as `apierr.Unavailable`). Retry once space is freed.
 
 
 # Rate limits
@@ -1137,22 +1137,27 @@ On exceed: **429** plus `Retry-After`.
 
 Same 429 + `Retry-After` behavior.
 
-## Registration / bootstrap
+## Registration, bootstrap and admin routes
 
-`registrationLimiter` in `internal/api/tenants.go`:
+Two limiters of type `registrationLimiter` in `internal/api/tenants.go`, with separate buckets and the same limits:
 
 | Scope | Limit | Window |
 |-------|--------|--------|
 | Per client IP | 5 | 1 hour |
 | Global | 20 | 1 hour |
 
-Applied to:
+`regLimiter` applies to:
 
 - `POST /v1/tenants/register`
+- `POST /v1/system/bootstrap-token/validate`
+
+`adminLimiter` applies to:
+
 - `POST /v1/auth/recover`
 - `POST /v1/tenants/{id}/reactivate`
 - `PATCH /v1/tenants/{id}/quotas`
-- `POST /v1/system/bootstrap-token/validate`
+
+Every request charges its per-IP bucket. The global bucket is only checked per request; it is charged only after a successful registration (`regLimiter`) or a successful admin-token check (`adminLimiter`). Validation never charges it. A burst of registrations therefore does not block recovery, and recovery attempts do not use up the registration budget.
 
 IP comes from `trustedRealIP`: `X-Real-Ip` **only** if `RemoteAddr` is loopback (Traefik). `X-Forwarded-For` is not trusted.
 
@@ -1711,8 +1716,8 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | 413 | Body > 1 MB |
 | 422 | Registration uniqueness (deliberately vague) |
 | 429 | Rate limit |
-| 500 | Unexpected, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) |
-| 503 | Docker/build/metering/registration unavailable (manager nil) |
+| 500 | Unexpected (`{"error":"internal error"}`) |
+| 503 | Docker/build/metering/registration unavailable (manager nil); disk ≥90% on build, DB create, kanban create, deploy and restart/redeploy (`{"error":"insufficient disk space; try again later"}`, `Retry-After: 10`); deploy queue full (`Retry-After`) |
 
 ## Timeouts
 
@@ -1912,7 +1917,7 @@ Or wait for auto-backoff (30m / 1h / 4h), which **closes the circuit and leaves 
 
 ## Deploy / build returns disk error
 
-`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, restart, redeploy) return **500** `{"error":"internal error"}`, not 503. Service create returns 201 and the async deploy fails with `last_error` set.
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, kanban create, deploy, restart, redeploy) return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`. Service create returns 201 and the async deploy fails with `last_error` set.
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" \
@@ -2106,8 +2111,9 @@ DELETE /v1/auth/keys/:keyID
 POST /v1/auth/recover
 Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
-# → {"api_key":"newkeyid.newsecret"}
-# Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
+# → 201 {"id":"...","key":"keyid.secret","name":"recovery-YYYYMMDD","created_at":unix,"warning"?:"...","revoked_key_id"?:"..."}
+#   Read the new key from .key (shown once). warning/revoked_key_id appear when the oldest key was auto-revoked.
+# Rate limited: 5/hour per IP, 20/hour global (adminLimiter, separate from registration's buckets)
 # Email must match the tenant's registered email
 
 # Validate a bootstrap token (does not register — just checks validity)
@@ -2117,7 +2123,7 @@ Body: {"token":"<bootstrap-token>"}
 # Rate limited like registration (5/IP/hour, 20/hour global)
 ```
 
-**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
+**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration and validation. Recovery (and reactivation and quota updates) takes `AH_ADMIN_TOKEN`; bootstrap tokens work there only when no admin token is configured (otherwise 403).
 
 ---
 

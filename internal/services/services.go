@@ -659,6 +659,14 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 // Deploy pulls the image, reads env vars, creates and starts the container.
 // Uses a bounded semaphore with a bounded queue for backpressure.
 func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error {
+	return m.deploy(ctx, tenantID, serviceID, false)
+}
+
+// deploy is Deploy. restartPath is set when Restart delegates here for a
+// service with no container: a full queue then returns the same 503 +
+// Retry-After as every other Restart and leaves the row untouched, instead of
+// Deploy's historical 409 that also marks the service failed.
+func (m *Manager) deploy(ctx context.Context, tenantID, serviceID string, restartPath bool) error {
 	if m.docker == nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "Docker client not configured")
 		return fmt.Errorf("docker client not configured")
@@ -669,6 +677,9 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	}
 	release, err := m.acquireDeploySlot(ctx)
 	if err != nil {
+		if errors.Is(err, apierr.ErrUnavailable) && restartPath {
+			return err
+		}
 		if errors.Is(err, apierr.ErrUnavailable) { // queue full, not a cancelled caller
 			m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "deploy queue full; try again later")
 			return apierr.Conflict("deploy queue full; try again later") // 409 kept for Deploy (existing API contract)
@@ -697,7 +708,9 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return errDiskLow(err)
 	}
 
-	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
+	if err := m.markDeploying(ctx, tenantID, serviceID); err != nil {
+		return err
+	}
 
 	// Record deployment event.
 	now := time.Now().Unix()
@@ -749,8 +762,10 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	port := resolvePort(svc.Port, envVars)
 
 	// Re-check the tenant after the (possibly slow) pull: a suspension that
-	// landed meanwhile must not get a fresh container. StopAllForTenant has
-	// already set the row's status, so only the deployment row is failed here.
+	// landed meanwhile must not get a fresh container. markDeploying only wrote
+	// 'deploying' while the tenant was active, so this suspension came after it
+	// and StopAllForTenant has since set the row's status; only the deployment
+	// row is failed here.
 	if err := m.checkTenantActive(ctx, tenantID); err != nil {
 		m.updateDeploymentStatus(context.WithoutCancel(ctx), deployID, deployments.StatusFailed, deployments.WithError("tenant not active"), deployments.WithCompletedAt(time.Now().Unix()))
 		return err
@@ -803,6 +818,28 @@ func (m *Manager) removeOldContainer(ctx context.Context, svc *Service) error {
 // suspended while a deploy was in flight makes the update affect 0 rows, and
 // the caller then removes the new container instead of leaving it running.
 const activeTenantGuard = ` AND EXISTS (SELECT 1 FROM tenants WHERE id = ? AND status = 'active')`
+
+// markDeploying moves the row to 'deploying' only while the tenant is active.
+// Deploy and DeployImage check the tenant before the (possibly long) deploy-slot
+// wait; a suspension during that wait has already run StopAllForTenant, which
+// set the row 'stopped', and an unconditional write would overwrite that. On a
+// non-active tenant the row is left alone and a Forbidden error is returned.
+func (m *Manager) markDeploying(ctx context.Context, tenantID, serviceID string) error {
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE services SET status = 'deploying', updated_at = ? WHERE id = ? AND tenant_id = ?`+activeTenantGuard,
+		time.Now().Unix(), serviceID, tenantID, tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark service deploying: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if err := m.checkTenantActive(ctx, tenantID); err != nil {
+			return err
+		}
+		return apierr.NotFound("service not found")
+	}
+	return nil
+}
 
 // errDeployInterrupted is returned when the final state write of a deploy is
 // rejected because the service changed underneath it.
@@ -1044,7 +1081,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	if pre.ContainerID == "" && !pre.CircuitOpen {
 		deployCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartDeployTimeout)
 		defer cancel()
-		return m.Deploy(deployCtx, tenantID, serviceID)
+		return m.deploy(deployCtx, tenantID, serviceID, true)
 	}
 
 	// Restart creates a container and must participate in the same backpressure.

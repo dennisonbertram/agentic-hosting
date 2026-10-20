@@ -49,7 +49,7 @@ Rules from `handleTenantRegister`:
 - Email must match `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, max 256
 - Max **1000** active tenants
 - Duplicate name/email → **422** (`registration failed, please check your details and try again`)
-- Rate limit: **5 / IP / hour** and **20 / hour global** (same limiter as recover, reactivate, quota patch, bootstrap validate)
+- Rate limit: **5 / IP / hour** and **20 / hour global** (`regLimiter`, shared with bootstrap validate; recover, reactivate and quota patch use a separate `adminLimiter` with the same limits). The global bucket is charged only by a successful registration.
 
 Response:
 

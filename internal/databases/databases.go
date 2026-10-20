@@ -281,9 +281,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("run container: %w", err)
 	}
 
-	// Update container ID — check rows affected to detect concurrent Delete
+	// Update container ID — check rows affected to detect concurrent Delete.
+	// Guarded on 'provisioning': a tenant suspension that ran before this write
+	// found no container_id, removed nothing and set the row 'stopped'.
 	result, updateErr := m.db.ExecContext(ctx,
-		`UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ? AND status = 'provisioning'`,
 		containerID, time.Now().Unix(), id,
 	)
 	if updateErr != nil {
@@ -293,6 +295,15 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("record database container: %w", updateErr)
 	}
 	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+		var exists int
+		if qErr := m.db.QueryRowContext(cleanupCtx, `SELECT COUNT(*) FROM databases WHERE id = ?`, id).Scan(&exists); qErr == nil && exists > 0 {
+			// Stopped (tenant suspended) before the container was recorded: the
+			// suspension could not remove it, so do it here. The volume is kept
+			// for reactivation, which starts the row from it.
+			log.Printf("databases: %s was stopped during provisioning (tenant suspended?); removing unrecorded container %s", id, containerID)
+			m.removeProvisionedContainer(cleanupCtx, containerID)
+			return nil, apierr.Conflict("database was stopped during provisioning (tenant suspended)")
+		}
 		log.Printf("databases: record %s was deleted during provisioning, cleaning up", id)
 		cleanup(containerID, true)
 		return nil, fmt.Errorf("database record deleted during provisioning")
@@ -311,7 +322,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	switch m.casStatus(ctx, id, "provisioning", "ready") {
 	case casApplied:
 	case casChanged:
+		// Normally the suspension already removed this container; remove it by
+		// ID anyway (a no-op then) so it can never outlive the suspension. The
+		// volume is kept for reactivation.
 		log.Printf("databases: %s changed state during provisioning (tenant suspended?); leaving it for reactivation", id)
+		m.removeProvisionedContainer(cleanupCtx, containerID)
 		return nil, apierr.Conflict("database was stopped during provisioning (tenant suspended)")
 	case casError:
 		// The row may still exist and own its per-database network: mark it
@@ -792,6 +807,14 @@ func (m *Manager) tenantActive(ctx context.Context, tenantID string) bool {
 	var status string
 	err := m.db.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&status)
 	return err == nil && status == "active"
+}
+
+// removeProvisionedContainer removes a container Create started for a row that
+// was stopped underneath it, on a bounded context, keeping the volume.
+func (m *Manager) removeProvisionedContainer(ctx context.Context, containerID string) {
+	cctx, cancel := context.WithTimeout(ctx, containerCleanupTimeout)
+	defer cancel()
+	m.removeContainer(cctx, containerID)
 }
 
 func (m *Manager) removeContainer(ctx context.Context, containerID string) {

@@ -21,7 +21,11 @@
 #   ip6tables FORWARD/INPUT -i BRIDGE -j DROP      (IPv6 is disabled on the bridge;
 #                                                   these are defence in depth)
 #
-# Every rule carries the comment "ah-sbx-egress" so remove/status find them.
+# The DOCKER-USER jump, the INPUT drop and the ip6tables drops carry the
+# comment "ah-sbx-egress" so remove/status find them. The rules inside the
+# AH-SBX-EGRESS chain carry no comment: this script owns that chain entirely
+# (install rebuilds it; remove flushes and deletes it once no bridge's
+# DOCKER-USER jump uses it any more).
 # install is idempotent: it rebuilds the chain and moves the two jump/drop
 # rules back to position 1. While it does, temporary "ah-sbx-egress-guard"
 # drops at position 1 cut the bridge off entirely, so running sandboxes never
@@ -62,7 +66,8 @@ Commands:
   install          Create/refresh chain AH-SBX-EGRESS, put the DOCKER-USER jump
                    and the INPUT drop at position 1, add ip6tables drops, and
                    save with netfilter-persistent when it is installed
-  remove           Delete every rule tagged ah-sbx-egress and the chain
+  remove           Delete this bridge's rules tagged ah-sbx-egress, and the
+                   chain unless another bridge's DOCKER-USER jump still uses it
   status           Print the rules; exit 0 if complete, 1 if anything is missing
   snapshot FILE    Write the iptables -S output ah checks at startup to FILE
                    (atomically, mode 0644). Run as root before ah starts.
@@ -239,11 +244,20 @@ remove_rules() {
     delete_tagged ip6tables FORWARD -i "$bridge" -m comment --comment "$comment" -j DROP
     delete_tagged ip6tables INPUT -i "$bridge" -m comment --comment "$comment" -j DROP
   fi
+  # Every bridge jumps to the same chain. If another bridge's DOCKER-USER
+  # jump still uses it (a renamed network, or a mistyped --bridge), flushing
+  # it would leave that live bridge jumping to an empty chain: unfiltered.
+  local docker_user
   if ((dry_run)); then
-    printf 'would run: iptables -w -F %s; iptables -w -X %s   (if present)\n' "$chain" "$chain"
+    printf 'would run: iptables -w -F %s; iptables -w -X %s   (if present and no other DOCKER-USER rule jumps to it)\n' "$chain" "$chain"
   elif iptables -w -S "$chain" >/dev/null 2>&1; then
-    iptables -w -F "$chain"
-    iptables -w -X "$chain"
+    docker_user=$(iptables -w -S DOCKER-USER 2>/dev/null || :)
+    if grep -qE -- "-j $chain( |\$)" <<<"$docker_user"; then
+      log "note: chain $chain is still used by another bridge's DOCKER-USER jump; leaving it in place"
+    else
+      iptables -w -F "$chain"
+      iptables -w -X "$chain"
+    fi
   fi
   persist_rules
   if ((dry_run)); then log "dry-run: no changes made (bridge $bridge)"; else log "removed rules for bridge $bridge"; fi

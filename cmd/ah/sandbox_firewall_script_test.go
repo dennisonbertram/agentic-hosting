@@ -286,3 +286,73 @@ func TestParseFirewallSnapshot(t *testing.T) {
 	_, ok := s["ip6tables INPUT"]
 	assert.False(t, ok)
 }
+
+// fakeIptables is a minimal stateful iptables/ip6tables stand-in for running
+// the script for real (not --dry-run): each chain is a file of "-A" lines.
+const fakeIptables = `#!/usr/bin/env bash
+set -u
+state="$FAKE_IPT_DIR/$(basename "$0")"
+mkdir -p "$state"
+[[ ${1:-} == -w ]] && shift
+op=$1 ch=$2; shift 2
+f="$state/$ch"
+case $op in
+  -S) [[ -f $f ]] || exit 1; cat "$f" ;;
+  -N) [[ -f $f ]] && exit 1; : > "$f" ;;
+  -C) [[ -f $f ]] && grep -qxF -- "-A $ch $*" "$f" ;;
+  -D) [[ -f $f ]] && grep -qxF -- "-A $ch $*" "$f" || exit 1
+      RULE="-A $ch $*" awk '!d && $0 == ENVIRON["RULE"] {d=1; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f" ;;
+  -A) printf '%s\n' "-A $ch $*" >> "$f" ;;
+  -I) shift; { printf '%s\n' "-A $ch $*"; cat "$f" 2>/dev/null || :; } > "$f.tmp" && mv "$f.tmp" "$f" ;;
+  -F) [[ -f $f ]] || exit 1; : > "$f" ;;
+  -X) [[ -f $f ]] || exit 1
+      if grep -qsE -- "-j $ch( |$)" "$state"/*; then echo "iptables: Too many links." >&2; exit 1; fi
+      rm -f "$f" ;;
+  *) exit 2 ;;
+esac
+`
+
+// Regression: removing the rules of one bridge (an old name after a rename,
+// or a mistyped --bridge) must not flush the shared AH-SBX-EGRESS chain that
+// the live bridge's DOCKER-USER jump still uses, which would leave the live
+// bridge unfiltered.
+func TestSandboxEgressFirewallScript_RemoveKeepsChainUsedByOtherBridge(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	bin := t.TempDir()
+	state := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "iptables"), []byte(fakeIptables), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ip6tables"), []byte(fakeIptables), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "id"), []byte("#!/bin/sh\necho 0\n"), 0o755))
+
+	run := func(args ...string) string {
+		cmd := exec.Command("bash", append([]string{firewallScript}, args...)...)
+		cmd.Env = append(os.Environ(), "AH_SANDBOX_EGRESS_NETWORK=", "FAKE_IPT_DIR="+state,
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+	chainRules := func() string {
+		b, err := os.ReadFile(filepath.Join(state, "iptables", "AH-SBX-EGRESS"))
+		require.NoError(t, err, "chain must still exist")
+		return string(b)
+	}
+
+	run("install", "--no-persist", "--bridge", "sbx-old", "--host-ip", "203.0.113.7")
+	run("install", "--no-persist", "--bridge", "sbx-live", "--host-ip", "203.0.113.7")
+
+	out := run("remove", "--no-persist", "--bridge", "sbx-old")
+	assert.Contains(t, out, "still used by another bridge")
+	assert.Contains(t, chainRules(), "-A AH-SBX-EGRESS -d 169.254.0.0/16 -j DROP", "the live bridge stays filtered")
+	du, err := os.ReadFile(filepath.Join(state, "iptables", "DOCKER-USER"))
+	require.NoError(t, err)
+	assert.Contains(t, string(du), "-i sbx-live -m comment --comment ah-sbx-egress -j AH-SBX-EGRESS")
+	assert.NotContains(t, string(du), "sbx-old")
+
+	// Removing the last bridge deletes the chain.
+	run("remove", "--no-persist", "--bridge", "sbx-live")
+	_, err = os.Stat(filepath.Join(state, "iptables", "AH-SBX-EGRESS"))
+	assert.True(t, os.IsNotExist(err), "chain removed once unused")
+}

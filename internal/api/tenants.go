@@ -494,14 +494,15 @@ var reactivateAfterStatusCheck func()
 // handleTenantReactivate handles POST /v1/tenants/{tenantID}/reactivate.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour).
+//   - Rate-limited by adminLimiter (5/IP/hour, 20/global/hour), separate
+//     buckets from registration's regLimiter; the global bucket is charged
+//     only after a successful admin-token check (requireAdmin).
 //   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only suspended tenants can be reactivated; already-active returns 409.
 //   - A new API key is generated and returned (one-time display).
 func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration to prevent
-	// brute-force of the bootstrap token via this endpoint.
+	// Admin-route limiter (separate from registration's) to prevent
+	// brute-force of the admin/bootstrap token via this endpoint.
 	if !adminLimiter.allowRequest(w, r) {
 		return
 	}
@@ -663,14 +664,15 @@ const (
 // handleQuotaUpdate handles PATCH /v1/tenants/{tenantID}/quotas.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour).
+//   - Rate-limited by adminLimiter (5/IP/hour, 20/global/hour), separate
+//     buckets from registration's regLimiter; the global bucket is charged
+//     only after a successful admin-token check (requireAdmin).
 //   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only updates fields that are present in the request body (partial update).
 //   - Validates that all values are positive and within defined caps.
 func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration to prevent
-	// brute-force of the bootstrap token via this endpoint.
+	// Admin-route limiter (separate from registration's) to prevent
+	// brute-force of the admin/bootstrap token via this endpoint.
 	if !adminLimiter.allowRequest(w, r) {
 		return
 	}

@@ -367,9 +367,9 @@ Connection strings use the DNS alias `ah-db-<databaseID>` and the engine port (`
 ### Background Processes
 
 - **Reconciler** (30s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
-- **GC** (5min interval): Cleans orphaned containers, volumes, images, build directories.
+- **GC** (5min interval): Cleans orphaned containers, volumes, images (including public images ah pulled for image-sourced sandboxes once nothing uses them), build directories.
 - **Circuit breaker**: 5 crashes in 10 minutes stops the container **and removes it**. Reset with `POST /v1/services/{id}/reset`, then `POST .../redeploy` (`/start` returns 409 because there is no container).
-- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Sync paths return **500** `{"error":"internal error"}` (not 503); service create returns 201 then fails async.
+- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Build, database create, kanban create, sandbox create, deploy and restart/redeploy return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`; service create returns 201 then fails async. A full deploy queue is also 503 with `Retry-After`.
 - **Tenant resource defaults**: New tenants get **2048 MB / 2 CPUs** from `tenant_quotas`. Fallback 512 MB / 1 CPU only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 
 ### Backups
@@ -406,7 +406,7 @@ ah backup
 make build
 
 # Run locally (requires Docker + gVisor)
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum AH_ADMIN_TOKEN=dev-admin-token-32-chars-minimum make run
+AH_BOOTSTRAP_TOKEN=dev-bootstrap-token-32-chars-minimum AH_ADMIN_TOKEN=dev-admin-token-32-chars-minimum make run
 
 # Run in dev mode (no HTTPS enforcement, open registration)
 ./bin/ah --dev --open-registration --port 8080

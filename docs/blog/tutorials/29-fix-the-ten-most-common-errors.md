@@ -152,9 +152,9 @@ A wrong body returns 400 with `unsupported source_type:  (only 'git' is supporte
 
 `validateGitURL` accepts only HTTPS URLs, with no credentials in them, on five hosts: `github.com`, `gitlab.com`, `bitbucket.org`, `sr.ht`, and `codeberg.org`. Anything else is a 400 such as `git host "example.com" is not in the allowed list`. Use an allowed host, and drop any `user:token@` from the URL.
 
-## 9. Disk over 90%: 500 `internal error`
+## 9. Disk over 90%: 503 `insufficient disk space`
 
-Before a build, database create, deploy, restart, or redeploy, `diskcheck.CheckAll` looks at `/var/lib/ah` and `/var/lib/docker`. At 80% it logs a warning. At 90% it returns an error. That error is not a typed API error, so the response is a plain 500 `{"error":"internal error"}`, not a 503.
+Before a build, database or kanban create, deploy, restart, or redeploy, `diskcheck.CheckAll` looks at `/var/lib/ah` and `/var/lib/docker`. At 80% it logs a warning. At 90% it returns an error, which the API sends as 503 `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`.
 
 Service create still returns 201, and the asynchronous deploy fails with `last_error` set. To confirm:
 
@@ -188,7 +188,7 @@ The Claude Code commands are named `/ah-deploy`, `/ah-status`, `/ah-db`, `/ah-lo
 
 ![Lookup table with five color-coded rows: startup, auth, limits, build, and runtime. Each row maps a symptom to the code that raises it and the fix.](diagrams/29-fix-the-ten-most-common-errors.png)
 
-The errors fall into five places in the request path. Startup checks run once in `cmd/ah/main.go`. Every request then passes `requireHTTPS`, then auth, then the rate limiters. Handlers and managers such as `builds.StartBuild` validate input and return typed errors through `apierr`, which is why quota and duplicate errors are 409 and bad input is 400. Anything that is not a typed error falls back to a 500 with `internal error`, which is why a full disk looks like a server bug. Runtime failures come from the reconciler and its circuit breaker.
+The errors fall into five places in the request path. Startup checks run once in `cmd/ah/main.go`. Every request then passes `requireHTTPS`, then auth, then the rate limiters. Handlers and managers such as `builds.StartBuild` validate input and return typed errors through `apierr`, which is why quota and duplicate errors are 409 and bad input is 400. Anything that is not a typed error falls back to a 500 with `internal error`. A full disk is typed: it returns 503 with `insufficient disk space; try again later` and `Retry-After`. Runtime failures come from the reconciler and its circuit breaker.
 
 ## What to try next
 

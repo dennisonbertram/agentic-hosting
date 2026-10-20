@@ -43,5 +43,5 @@
   <rect x="550" y="500" width="610" height="130" rx="12" fill="#1c1917"/>
   <text x="855" y="540" font-size="20" font-weight="600" text-anchor="middle" fill="#fafaf9">diskcheck.CheckAll refuses at 90%</text>
   <text x="855" y="574" font-size="18" text-anchor="middle" fill="#fafaf9">service deploy, build, database create, kanban create</text>
-  <text x="855" y="604" font-size="18" text-anchor="middle" fill="#fafaf9">ah backup  |  500 "internal error" on sync paths</text>
+  <text x="855" y="604" font-size="18" text-anchor="middle" fill="#fafaf9">ah backup  |  503 + Retry-After on sync paths</text>
 </svg>

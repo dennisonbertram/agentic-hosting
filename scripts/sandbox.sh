@@ -472,7 +472,11 @@ cmd_down() {
 cmd_status() {
   if ah_running && api_healthy; then
     log "running: $api_url (pid $(cat "$pid_file"), state $sandbox_dir)"
-    [[ -f $sandbox_dir/service.id ]] && log "demo: http://$(cat "$sandbox_dir/service.id").localhost:$http_port/health"
+    # An if, not &&: without a demo service the && list would make status
+    # (and the script) exit 1, which means "not running".
+    if [[ -f $sandbox_dir/service.id ]]; then
+      log "demo: http://$(cat "$sandbox_dir/service.id").localhost:$http_port/health"
+    fi
   else
     log 'not running'
     return 1

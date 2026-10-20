@@ -23,9 +23,11 @@ func newSandboxCmd(root *rootState) *cobra.Command {
 that the server deletes when their TTL expires. Use them to run untrusted or
 one-off code, or to inspect a copy of a service or snapshot.
 
-A sandbox has no network egress (it cannot reach the internet, other tenant
-containers or other tenants) and cannot be stopped and restarted: when it is
-done, it is deleted.
+By default (--egress none) a sandbox has no network egress: it cannot reach
+the internet, other tenant containers or other tenants. With --egress internet,
+when the operator has enabled it and your quota allows it, it can reach the
+public internet only (not private networks, this host or other sandboxes).
+A sandbox cannot be stopped and restarted: when it is done, it is deleted.
 
 Sources (pick one; default --template default):
   --template T     an environment template (see 'ahc env templates')

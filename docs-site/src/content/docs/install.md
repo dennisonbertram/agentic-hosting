@@ -113,7 +113,9 @@ Optional runtime settings for `/etc/default/ah`:
 | `AH_SANDBOX_EGRESS_SUBNET` | `10.250.0.0/24` | IPv4 subnet of that bridge. |
 | `AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK` | `false` | Enables egress without verifying the firewall rules. Only for hosts that filter the bridge some other way. |
 | `AH_SANDBOX_RUNTIME` | empty | OCI runtime for disposable sandboxes, e.g. `runsc-sbx` (`runsc --overlay2=root:memory`). Must be registered with Docker and be gVisor outside `--dev`, or `ah` refuses to start. Empty uses `AH_CONTAINER_RUNTIME`. |
-| `AH_SANDBOX_WORKSPACE_TMPFS` | `false` | `true` makes each sandbox's `/workspace` a tmpfs of its `disk_mb` (hard size limit, counted against memory) instead of a volume. Unverified on the production host. |
+| `AH_SANDBOX_WORKSPACE_TMPFS` | `true` | Each sandbox's `/workspace` is a tmpfs of its `disk_mb` (hard size limit, counted against memory; default half of `memory_mb`). `false` uses a Docker volume with no size limit instead. Unverified on the production host. |
+| `AH_SANDBOX_MAX_CONCURRENT_PULLS` | `2` | Host-wide limit on sandbox image pulls in flight; further creates wait for a slot. |
+| `AH_SANDBOX_MAX_IMAGE_MB` | `4096` | Largest public image a sandbox create may pull. A larger image is refused with 400 `image too large` and removed if that create pulled it. |
 
 `GET /v1/system/health/detailed` reports the active runtime as `container_runtime`.
 

@@ -304,10 +304,14 @@ deploy_example() {
   if [[ -z $id ]]; then
     (
       umask 077
-      python3 -I -c 'import json,sys
+      # Secrets go through the environment, never argv (readable by any
+      # local user through ps or /proc/<pid>/cmdline).
+      OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-sandbox-placeholder-no-provider-calls} \
+        DEMO_AUTH_TOKEN=$(rand_hex) \
+        python3 -I -c 'import json,os,sys
 print(json.dumps({"name":sys.argv[1],"image":sys.argv[2],"port":3000,
-  "env":{"OPENROUTER_API_KEY":sys.argv[3],"DEMO_AUTH_TOKEN":sys.argv[4]}}))' \
-        "$service_name" "$example_image" "${OPENROUTER_API_KEY:-sandbox-placeholder-no-provider-calls}" "$(rand_hex)" > "$body"
+  "env":{"OPENROUTER_API_KEY":os.environ["OPENROUTER_API_KEY"],"DEMO_AUTH_TOKEN":os.environ["DEMO_AUTH_TOKEN"]}}))' \
+        "$service_name" "$example_image" > "$body"
     )
     code=$(api POST /v1/services "$out" "$body")
     rm -f "$body"

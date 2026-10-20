@@ -60,4 +60,8 @@ func TestEnsureEnvironmentImage(t *testing.T) {
 	pulled = 0
 	assert.NoError(t, ensureEnvironmentImage(ctx, RunEnvironmentConfig{Image: "i", LocalImage: true}, okPull, absent))
 	assert.Equal(t, 1, pulled)
+	// ImagePrepared: the caller already pulled it; nothing is pulled again.
+	pulled = 0
+	assert.NoError(t, ensureEnvironmentImage(ctx, RunEnvironmentConfig{Image: "i", ImagePrepared: true}, failPull, absent))
+	assert.Zero(t, pulled)
 }

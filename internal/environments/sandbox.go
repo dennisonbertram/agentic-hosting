@@ -132,10 +132,21 @@ func (m *Manager) SetMaxSandboxesTotal(n int) {
 	m.maxSandboxesTotal = n
 }
 
-// SetSandboxDiskCheck replaces the free-disk check run before each sandbox
-// create (default: the deploy thresholds on /var/lib/ah and /var/lib/docker).
+// SetSandboxDiskCheck replaces the free-disk check run before and after the
+// image pull of each sandbox create, and by the sandbox reaper's disk
+// watchdog (default: the deploy thresholds, 90% blocks, on /var/lib/ah and
+// /var/lib/docker). It returns an error when usage is at the block
+// threshold.
 func (m *Manager) SetSandboxDiskCheck(fn func() error) {
 	m.diskCheck = fn
+}
+
+// sandboxDiskCheck returns the configured disk check or the default.
+func (m *Manager) sandboxDiskCheck() func() error {
+	if m.diskCheck != nil {
+		return m.diskCheck
+	}
+	return func() error { return diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90) }
 }
 
 // sandboxQuota is the tenant_quotas subset sandbox validation needs.
@@ -362,10 +373,7 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		return nil, err
 	}
 
-	check := m.diskCheck
-	if check == nil {
-		check = func() error { return diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90) }
-	}
+	check := m.sandboxDiskCheck()
 	if err := check(); err != nil {
 		log.Printf("environments: disk check refused sandbox create: %v", err)
 		return nil, apierr.Unavailable("insufficient disk space; try again later", err)
@@ -380,8 +388,9 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		name = "sbx-" + suffix[:8]
 	}
 
+	fresh := false
 	if req.Source.Type == SandboxSourceImage && !r.localImage {
-		m.trackPulledImage(ctx, r.image)
+		fresh = m.trackPulledImage(ctx, r.image)
 	}
 
 	now := time.Now().Unix()
@@ -411,6 +420,9 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		runtime:          m.sandboxRuntime,
 		workspaceTmpfsMB: diskMB,
 		egressNetwork:    egressNetwork,
+		prepareImage: func(ctx context.Context) error {
+			return m.prepareSandboxImage(ctx, req.Source.Type, r, fresh, check)
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -633,23 +645,30 @@ func (m *Manager) ExtendSandbox(ctx context.Context, tenantID, sandboxID string,
 // recorded (images already present, such as the operator's, are never GC'd
 // this way); a ref recorded earlier has its timestamp refreshed so GC does
 // not race this create. Best effort: failures only cost disk until pruned.
-func (m *Manager) trackPulledImage(ctx context.Context, ref string) {
+//
+// It reports whether this create brings the image onto the host: absent
+// locally and recorded in pulled_images. Only such an image is removed
+// again when the create refuses it (too large, disk full).
+func (m *Manager) trackPulledImage(ctx context.Context, ref string) bool {
+	exists, existsErr := m.docker.ImageExists(ctx, ref)
+	absent := existsErr == nil && !exists
 	now := time.Now().Unix()
 	res, err := m.db.ExecContext(ctx, `UPDATE pulled_images SET pulled_at = ? WHERE ref = ?`, now, ref)
 	if err != nil {
 		log.Printf("environments: track pulled image %s: %v", ref, err)
-		return
+		return false
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		return
+		return absent
 	}
-	exists, err := m.docker.ImageExists(ctx, ref)
-	if err != nil || exists {
-		return
+	if !absent {
+		return false
 	}
 	if _, err := m.db.ExecContext(ctx,
 		`INSERT INTO pulled_images (ref, pulled_at) VALUES (?, ?) ON CONFLICT(ref) DO UPDATE SET pulled_at = excluded.pulled_at`,
 		ref, now); err != nil {
 		log.Printf("environments: track pulled image %s: %v", ref, err)
+		return false
 	}
+	return true
 }

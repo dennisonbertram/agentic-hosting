@@ -30,8 +30,9 @@ func TestLoadFromEnv_MaxSandboxesTotal(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestLoadFromEnv_SandboxHardeningDefaultsOff(t *testing.T) {
-	for _, k := range []string{"AH_SANDBOX_EGRESS_NETWORK", "AH_SANDBOX_EGRESS_SUBNET", "AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK", "AH_SANDBOX_RUNTIME", "AH_SANDBOX_WORKSPACE_TMPFS"} {
+func TestLoadFromEnv_SandboxHardeningDefaults(t *testing.T) {
+	for _, k := range []string{"AH_SANDBOX_EGRESS_NETWORK", "AH_SANDBOX_EGRESS_SUBNET", "AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK", "AH_SANDBOX_RUNTIME", "AH_SANDBOX_WORKSPACE_TMPFS",
+		"AH_SANDBOX_MAX_CONCURRENT_PULLS", "AH_SANDBOX_MAX_IMAGE_MB"} {
 		t.Setenv(k, "")
 	}
 	cfg, err := LoadFromEnv()
@@ -40,12 +41,47 @@ func TestLoadFromEnv_SandboxHardeningDefaultsOff(t *testing.T) {
 	assert.Equal(t, DefaultSandboxEgressSubnet, cfg.SandboxEgressSubnet)
 	assert.False(t, cfg.SandboxEgressSkipFirewallCheck)
 	assert.Empty(t, cfg.SandboxRuntime)
-	assert.False(t, cfg.SandboxWorkspaceTmpfs)
+	// Regression: the bounded tmpfs workspace is the default, so a sandbox
+	// cannot fill the host disk unless the operator opts out.
+	assert.True(t, cfg.SandboxWorkspaceTmpfs)
+	assert.Equal(t, DefaultSandboxMaxConcurrentPulls, cfg.SandboxMaxConcurrentPulls)
+	assert.Equal(t, DefaultSandboxMaxImageMB, cfg.SandboxMaxImageMB)
+	assert.Equal(t, 2, DefaultSandboxMaxConcurrentPulls)
+	assert.Equal(t, 4096, DefaultSandboxMaxImageMB)
 
 	d := Default()
 	assert.Empty(t, d.SandboxEgressNetwork)
 	assert.Empty(t, d.SandboxRuntime)
-	assert.False(t, d.SandboxWorkspaceTmpfs)
+	assert.True(t, d.SandboxWorkspaceTmpfs)
+	assert.Equal(t, DefaultSandboxMaxConcurrentPulls, d.SandboxMaxConcurrentPulls)
+	assert.Equal(t, DefaultSandboxMaxImageMB, d.SandboxMaxImageMB)
+
+	t.Setenv("AH_SANDBOX_WORKSPACE_TMPFS", "false")
+	cfg, err = LoadFromEnv()
+	require.NoError(t, err)
+	assert.False(t, cfg.SandboxWorkspaceTmpfs, "the operator can opt out")
+}
+
+func TestLoadFromEnv_SandboxPullLimits(t *testing.T) {
+	t.Setenv("AH_SANDBOX_MAX_CONCURRENT_PULLS", "5")
+	t.Setenv("AH_SANDBOX_MAX_IMAGE_MB", "1024")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, 5, cfg.SandboxMaxConcurrentPulls)
+	assert.Equal(t, 1024, cfg.SandboxMaxImageMB)
+
+	for _, k := range []string{"AH_SANDBOX_MAX_CONCURRENT_PULLS", "AH_SANDBOX_MAX_IMAGE_MB"} {
+		for _, v := range []string{"0", "-1", "lots"} {
+			t.Setenv("AH_SANDBOX_MAX_CONCURRENT_PULLS", "")
+			t.Setenv("AH_SANDBOX_MAX_IMAGE_MB", "")
+			t.Setenv(k, v)
+			cfg, err := LoadFromEnv()
+			require.Error(t, err, "%s=%s", k, v)
+			assert.Contains(t, err.Error(), k)
+			assert.Equal(t, DefaultSandboxMaxConcurrentPulls, cfg.SandboxMaxConcurrentPulls)
+			assert.Equal(t, DefaultSandboxMaxImageMB, cfg.SandboxMaxImageMB)
+		}
+	}
 }
 
 func TestLoadFromEnv_SandboxHardeningSet(t *testing.T) {

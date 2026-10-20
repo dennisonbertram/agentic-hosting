@@ -87,6 +87,9 @@ type MockDockerClient struct {
 	// ImageExists (default: false, so deploys pull)
 	ImageExistsFn func(ctx context.Context, img string) (bool, error)
 
+	// ImageSize (default: 0 bytes)
+	ImageSizeFn func(ctx context.Context, img string) (int64, error)
+
 	// TagImage
 	TagImageFn    func(ctx context.Context, source, target string) error
 	TagImageCalls [][2]string // [source, target] pairs
@@ -371,6 +374,13 @@ func (m *MockDockerClient) ImageExists(ctx context.Context, img string) (bool, e
 		return m.ImageExistsFn(ctx, img)
 	}
 	return false, nil
+}
+
+func (m *MockDockerClient) ImageSize(ctx context.Context, img string) (int64, error) {
+	if m.ImageSizeFn != nil {
+		return m.ImageSizeFn(ctx, img)
+	}
+	return 0, nil
 }
 
 func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) error {

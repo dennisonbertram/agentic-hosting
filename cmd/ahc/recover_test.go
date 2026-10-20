@@ -70,3 +70,15 @@ func TestRecover_NoTokenIsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "admin or bootstrap token required")
 }
+
+// Regression: --admin-token puts the most privileged credential in argv;
+// its help steers operators to $AH_ADMIN_TOKEN instead.
+func TestRecover_AdminTokenFlagHelpWarns(t *testing.T) {
+	cmd := newRootCmd()
+	rec, _, err := cmd.Find([]string{"recover"})
+	require.NoError(t, err)
+	usage := rec.Flags().Lookup("admin-token").Usage
+	assert.Contains(t, usage, "Prefer $AH_ADMIN_TOKEN")
+	assert.Contains(t, usage, "shell history")
+	assert.Contains(t, usage, "ps")
+}

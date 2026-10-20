@@ -47,6 +47,7 @@ type Client interface {
 	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
 	PullImage(ctx context.Context, img string) error
 	ImageExists(ctx context.Context, img string) (bool, error)
+	ImageSize(ctx context.Context, img string) (int64, error)
 	TagImage(ctx context.Context, source, target string) error
 	RemoveImage(ctx context.Context, imageRef string) error
 	ListContainersByLabel(ctx context.Context, label, value string) ([]string, error)
@@ -688,6 +689,15 @@ func (c *DockerClient) ImageExists(ctx context.Context, img string) (bool, error
 	return false, err
 }
 
+// ImageSize returns the size in bytes of a local image (all its layers).
+func (c *DockerClient) ImageSize(ctx context.Context, img string) (int64, error) {
+	inspect, _, err := c.cli.ImageInspectWithRaw(ctx, img)
+	if err != nil {
+		return 0, fmt.Errorf("inspect image %s: %w", img, err)
+	}
+	return inspect.Size, nil
+}
+
 // TagImage adds a new tag to an existing image.
 func (c *DockerClient) TagImage(ctx context.Context, source, target string) error {
 	return c.cli.ImageTag(ctx, source, target)
@@ -1141,6 +1151,10 @@ type RunEnvironmentConfig struct {
 	// LocalImage tolerates a failed pull when the image is already in the
 	// local store (snapshot and service build tags never exist upstream).
 	LocalImage bool
+	// ImagePrepared means the caller has already pulled or verified Image
+	// (sandbox creates pull under a host-wide limit and check the image's
+	// size first), so RunEnvironment does not pull it again.
+	ImagePrepared bool
 	// Runtime overrides the client's OCI runtime for this container (the
 	// sandbox runtime, e.g. runsc-sbx). Empty uses the client's runtime.
 	Runtime string
@@ -1196,8 +1210,12 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 }
 
 // ensureEnvironmentImage pulls cfg.Image. With LocalImage set, a failed pull
-// is tolerated when the image is already present locally.
+// is tolerated when the image is already present locally. With ImagePrepared
+// the caller has already done this and nothing is pulled.
 func ensureEnvironmentImage(ctx context.Context, cfg RunEnvironmentConfig, pull func(context.Context, string) error, exists func(context.Context, string) (bool, error)) error {
+	if cfg.ImagePrepared {
+		return nil
+	}
 	if cfg.LocalImage {
 		return pullOrUseLocal(ctx, cfg.Image, pull, exists)
 	}

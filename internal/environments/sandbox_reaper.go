@@ -2,6 +2,7 @@ package environments
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -53,6 +54,65 @@ func (m *Manager) safeReap(ctx context.Context) {
 	}()
 	if _, err := m.ReapSandboxes(ctx); err != nil && ctx.Err() == nil {
 		log.Printf("environments: sandbox reaper: %v", err)
+	}
+	if _, err := m.DeleteSandboxesForDiskPressure(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("environments: sandbox disk watchdog: %v", err)
+	}
+}
+
+// DeleteSandboxesForDiskPressure is the reaper's disk watchdog. While the
+// sandbox disk check (SetSandboxDiskCheck: the 90% block threshold on the
+// data dir and the Docker root) fails, it deletes running sandboxes, largest
+// disk_mb first (oldest first among equals), through the same strict
+// teardown as DELETE, re-checking after each one. Sandboxes are disposable;
+// a full disk would stop deploys, builds and SQLite writes for every tenant.
+// It returns the number deleted.
+func (m *Manager) DeleteSandboxesForDiskPressure(ctx context.Context) (int, error) {
+	check := m.sandboxDiskCheck()
+	if check() == nil {
+		return 0, nil
+	}
+	deleted := 0
+	for {
+		pressure := check()
+		if pressure == nil {
+			return deleted, nil
+		}
+		if ctx.Err() != nil {
+			return deleted, ctx.Err()
+		}
+		var id, tenantID string
+		var diskMB int
+		err := m.db.QueryRowContext(ctx,
+			`SELECT id, tenant_id, disk_mb FROM environments WHERE kind = 'sandbox' AND status = 'running'
+			 ORDER BY disk_mb DESC, created_at, id LIMIT 1`).Scan(&id, &tenantID, &diskMB)
+		if err == sql.ErrNoRows {
+			if deleted == 0 {
+				log.Printf("environments: disk watchdog: %v; no running sandbox left to delete", pressure)
+			}
+			return deleted, nil
+		}
+		if err != nil {
+			return deleted, fmt.Errorf("select sandbox for disk pressure: %w", err)
+		}
+		res, err := m.db.ExecContext(ctx,
+			`UPDATE environments SET status = 'deleting', updated_at = ?
+			 WHERE id = ? AND tenant_id = ? AND kind = 'sandbox' AND status = 'running'`,
+			time.Now().Unix(), id, tenantID)
+		if err != nil {
+			return deleted, fmt.Errorf("claim sandbox %s for disk pressure: %w", id, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue // deleted or claimed elsewhere since the select
+		}
+		// A failed teardown leaves the row 'deleting' (the reaper retries
+		// it) and it is not selected again, so the loop still moves on.
+		if err := m.teardownSandbox(ctx, tenantID, id); err != nil {
+			log.Printf("environments: disk watchdog: delete sandbox %s (will retry): %v", id, err)
+			continue
+		}
+		log.Printf("AUDIT: action=sandbox.disk_pressure_deleted tenant=%s sandbox=%s disk_mb=%d reason=%q", tenantID, id, diskMB, pressure.Error())
+		deleted++
 	}
 }
 

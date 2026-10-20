@@ -56,9 +56,9 @@ type Config struct {
 	// tenants on this host (AH_MAX_SANDBOXES_TOTAL, default 20, 0 = no host cap).
 	MaxSandboxesTotal int
 
-	// Sandbox hardening (phase 2). Every setting is off by default, which
-	// keeps the phase 1 behaviour: no egress, the container runtime and a
-	// workspace volume.
+	// Sandbox hardening (phase 2). Egress and the sandbox runtime are off by
+	// default (no egress, the container runtime); the tmpfs workspace is on
+	// by default so a sandbox cannot fill the host disk.
 	//
 	// SandboxEgressNetwork (AH_SANDBOX_EGRESS_NETWORK) names the bridge that
 	// sandboxes with egress "internet" attach to. Empty disables egress.
@@ -73,9 +73,18 @@ type Config struct {
 	// SandboxRuntime (AH_SANDBOX_RUNTIME) is the OCI runtime sandboxes run
 	// under, e.g. runsc-sbx. Empty uses ContainerRuntime.
 	SandboxRuntime string
-	// SandboxWorkspaceTmpfs (AH_SANDBOX_WORKSPACE_TMPFS) makes each sandbox's
-	// /workspace a tmpfs of its disk_mb instead of a named volume.
+	// SandboxWorkspaceTmpfs (AH_SANDBOX_WORKSPACE_TMPFS, default true) makes
+	// each sandbox's /workspace a tmpfs of its disk_mb instead of a named
+	// volume with no size limit. Set false to keep the volume.
 	SandboxWorkspaceTmpfs bool
+	// SandboxMaxConcurrentPulls (AH_SANDBOX_MAX_CONCURRENT_PULLS, default
+	// DefaultSandboxMaxConcurrentPulls) caps sandbox image pulls in flight
+	// across all tenants.
+	SandboxMaxConcurrentPulls int
+	// SandboxMaxImageMB (AH_SANDBOX_MAX_IMAGE_MB, default
+	// DefaultSandboxMaxImageMB) is the largest image a sandbox create may
+	// pull from a public registry; larger images are removed and refused.
+	SandboxMaxImageMB int
 }
 
 // Container runtimes accepted in AH_CONTAINER_RUNTIME.
@@ -100,6 +109,12 @@ const (
 
 // DefaultMaxSandboxesTotal is the default host-wide sandbox cap.
 const DefaultMaxSandboxesTotal = 20
+
+// Sandbox image pull defaults.
+const (
+	DefaultSandboxMaxConcurrentPulls = 2
+	DefaultSandboxMaxImageMB         = 4096
+)
 
 // DefaultSandboxEgressSubnet is the default sandbox egress bridge subnet. It
 // must match docker.DefaultSandboxEgressSubnet (checked by a cmd/ah test);
@@ -130,6 +145,10 @@ func Default() Config {
 		GCPruneDocker:         true,
 		MaxSandboxesTotal:     DefaultMaxSandboxesTotal,
 		SandboxEgressSubnet:   DefaultSandboxEgressSubnet,
+
+		SandboxWorkspaceTmpfs:     true,
+		SandboxMaxConcurrentPulls: DefaultSandboxMaxConcurrentPulls,
+		SandboxMaxImageMB:         DefaultSandboxMaxImageMB,
 	}
 }
 
@@ -181,7 +200,17 @@ func LoadFromEnv() (Config, error) {
 		SandboxEgressSubnet:            strings.TrimSpace(envOr("AH_SANDBOX_EGRESS_SUBNET", DefaultSandboxEgressSubnet)),
 		SandboxEgressSkipFirewallCheck: envOrBool("AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK", false, &errs),
 		SandboxRuntime:                 strings.TrimSpace(os.Getenv("AH_SANDBOX_RUNTIME")),
-		SandboxWorkspaceTmpfs:          envOrBool("AH_SANDBOX_WORKSPACE_TMPFS", false, &errs),
+		SandboxWorkspaceTmpfs:          envOrBool("AH_SANDBOX_WORKSPACE_TMPFS", true, &errs),
+		SandboxMaxConcurrentPulls:      envOrInt("AH_SANDBOX_MAX_CONCURRENT_PULLS", DefaultSandboxMaxConcurrentPulls, &errs),
+		SandboxMaxImageMB:              envOrInt("AH_SANDBOX_MAX_IMAGE_MB", DefaultSandboxMaxImageMB, &errs),
+	}
+	if cfg.SandboxMaxConcurrentPulls < 1 {
+		errs = append(errs, fmt.Errorf("AH_SANDBOX_MAX_CONCURRENT_PULLS must be >= 1, got %d", cfg.SandboxMaxConcurrentPulls))
+		cfg.SandboxMaxConcurrentPulls = DefaultSandboxMaxConcurrentPulls
+	}
+	if cfg.SandboxMaxImageMB < 1 {
+		errs = append(errs, fmt.Errorf("AH_SANDBOX_MAX_IMAGE_MB must be >= 1, got %d", cfg.SandboxMaxImageMB))
+		cfg.SandboxMaxImageMB = DefaultSandboxMaxImageMB
 	}
 	if cfg.SandboxRuntime != "" && !runtimeNamePattern.MatchString(cfg.SandboxRuntime) {
 		errs = append(errs, fmt.Errorf("AH_SANDBOX_RUNTIME=%q is not a valid Docker runtime name", cfg.SandboxRuntime))

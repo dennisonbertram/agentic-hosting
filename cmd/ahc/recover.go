@@ -94,7 +94,7 @@ The new key is shown exactly once — save it immediately.`,
 	}
 
 	cmd.Flags().StringVar(&emailFlag, "email", "", "Registered email address (required)")
-	cmd.Flags().StringVar(&adminToken, "admin-token", "", "Admin token, sent as X-Admin-Token (overrides $AH_ADMIN_TOKEN)")
+	cmd.Flags().StringVar(&adminToken, "admin-token", "", "Admin token, sent as X-Admin-Token (overrides $AH_ADMIN_TOKEN). Prefer $AH_ADMIN_TOKEN: this flag exposes the token in shell history and ps")
 	cmd.Flags().StringVar(&bootstrapToken, "bootstrap-token", "", "Bootstrap token (overrides $AH_BOOTSTRAP_TOKEN)")
 	cmd.Flags().BoolVar(&saveFlag, "save", false, "Save recovered API key to ~/.ah/config.json")
 	return cmd

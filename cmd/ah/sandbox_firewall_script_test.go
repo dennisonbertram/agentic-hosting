@@ -116,7 +116,7 @@ func TestSandboxEgressFirewallScript_ReinstallNeverOpensAWindow(t *testing.T) {
 	simulate(t, installed, lines)
 
 	isBridgeDrop := func(f []string) bool {
-		return flagValue(f, "-i") == "ah-sbx-egress" && flagValue(f, "-j") == "DROP" && isPlainRule(f)
+		return flagValue(f, "-i") == "ah-sbx-egress" && flagValue(f, "-j") == "DROP" && isPlainRule(f, "-i")
 	}
 	guarded := 0
 	for k := 0; k <= len(lines); k++ {

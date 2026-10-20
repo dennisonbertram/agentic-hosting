@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -375,4 +376,114 @@ func TestHandleKeyRecover_FullKeyring(t *testing.T) {
 		assert.Empty(t, resp.Warning, "no warning when keyring has space")
 		assert.Empty(t, resp.RevokedKeyID, "no revoked key when keyring has space")
 	})
+}
+
+// recoveryTenant creates an active tenant with n active keys and returns its store.
+func recoveryTenant(t *testing.T, tenantID, email string, n int) *db.Store {
+	t.Helper()
+	stateDB := testutil.NewStateDB(t)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES (?, ?, ?, 'active', 1, 1)`, tenantID, tenantID, email)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, tenantID)
+	require.NoError(t, err)
+	for i := 0; i < n; i++ {
+		_, err := stateDB.Exec(
+			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			fmt.Sprintf("key-%s-%03d", tenantID, i), tenantID, "k", fmt.Sprintf("p%07d", i), "hash", int64(1000+i))
+		require.NoError(t, err)
+	}
+	return &db.Store{StateDB: stateDB}
+}
+
+func activeKeyCount(t *testing.T, store *db.Store, tenantID string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, store.StateDB.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`, tenantID).Scan(&n))
+	return n
+}
+
+// Regression: the key limit is enforced inside the INSERT, so concurrent
+// recoveries for a tenant one key short of the limit cannot push it past
+// maxKeysPerTenant.
+func TestHandleKeyRecover_ConcurrentNeverExceedsLimit(t *testing.T) {
+	resetLimitersForTest()
+	const adminToken = "test-admin-token-for-concurrent-recovery"
+	store := recoveryTenant(t, "tenant-conc", "conc@example.com", maxKeysPerTenant-1)
+	srv := NewServer(ServerConfig{
+		Store: store, MasterKey: []byte("0123456789abcdef0123456789abcdef"), DevMode: true,
+		AdminTokens: []string{adminToken},
+	})
+	body, _ := json.Marshal(KeyRecoverRequest{Email: "conc@example.com"})
+
+	const workers = 6
+	codes := make(chan int, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := recoverRequest(fmt.Sprintf("10.0.9.%d", i+1), body)
+			req.Header.Set("X-Admin-Token", adminToken)
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+			codes <- rr.Code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		assert.Equal(t, http.StatusCreated, code)
+	}
+	assert.Equal(t, maxKeysPerTenant, activeKeyCount(t, store, "tenant-conc"))
+}
+
+// Regression: a tenant already over the limit is brought back to it by a
+// recovery, not left over it.
+func TestHandleKeyRecover_OverLimitIsBroughtBackToLimit(t *testing.T) {
+	resetLimitersForTest()
+	const bootstrapToken = "test-bootstrap-token-for-over-limit-recovery"
+	store := recoveryTenant(t, "tenant-over", "over@example.com", maxKeysPerTenant+2)
+	srv := NewServer(ServerConfig{
+		Store: store, MasterKey: []byte("0123456789abcdef0123456789abcdef"), DevMode: true,
+		BootstrapTokens: []string{bootstrapToken},
+	})
+	body, _ := json.Marshal(KeyRecoverRequest{Email: "over@example.com", BootstrapToken: bootstrapToken})
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, recoverRequest("10.0.9.50", body))
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var resp KeyRecoverResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+	assert.Equal(t, "key-tenant-over-000", resp.RevokedKeyID)
+	assert.Equal(t, maxKeysPerTenant, activeKeyCount(t, store, "tenant-over"))
+}
+
+// Regression: every successful recovery writes an AUDIT line with the
+// tenant, the new key ID, the auth type, the client IP and the revoked key,
+// and never the token.
+func TestHandleKeyRecover_AuditsKeyCreation(t *testing.T) {
+	resetLimitersForTest()
+	const adminToken = "test-admin-token-for-recovery-audit-xx"
+	store := recoveryTenant(t, "tenant-audit", "audit@example.com", 0)
+	srv := NewServer(ServerConfig{
+		Store: store, MasterKey: []byte("0123456789abcdef0123456789abcdef"), DevMode: true,
+		AdminTokens: []string{adminToken},
+	})
+	logBuf := captureLog(t)
+	body, _ := json.Marshal(KeyRecoverRequest{Email: "audit@example.com"})
+	req := recoverRequest("10.0.9.60", body)
+	req.Header.Set("X-Admin-Token", adminToken)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var resp KeyRecoverResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+
+	out := logBuf.String()
+	assert.Contains(t, out, fmt.Sprintf("AUDIT: action=recovery.key_created tenant=tenant-audit key=%s auth=admin ip=10.0.9.60 revoked_key=none", resp.ID))
+	assert.NotContains(t, out, resp.Key, "the token is never logged")
+	assert.NotContains(t, out, adminToken)
 }

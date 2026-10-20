@@ -148,6 +148,11 @@ case "$mode" in
     ;;
   existing)
     check 'running as root' "$(is_root)" 'use sudo'
+    # /var/lib/ah is owned by the ah user, which could swap master.key for a
+    # symlink; the root chown/chmod repair below must never follow one.
+    check '/var/lib/ah/master.key is a regular file, not a symlink' \
+      "$([[ -f $root/var/lib/ah/master.key && ! -L $root/var/lib/ah/master.key ]] && echo 1 || echo 0)" \
+      'inspect it and restore the real key file; the permission repair never follows a symlink'
     check 'docker' "$(have docker)" 'Docker was expected from the original install'
     check 'systemctl' "$(have systemctl)"
     go_ok=0; { [[ -x $root/usr/local/go/bin/go ]] || command -v go >/dev/null 2>&1; } && go_ok=1
@@ -343,7 +348,11 @@ else
   fi
 
   log 'repairing permissions'
-  chown ah:ah /var/lib/ah /var/lib/ah/master.key
+  # Re-checked right before the repair: chown/chmod as root must not follow
+  # a symlink the ah user planted in its own /var/lib/ah.
+  [[ -f /var/lib/ah/master.key && ! -L /var/lib/ah/master.key ]] ||
+    die '/var/lib/ah/master.key is not a regular file (symlink or other type); refusing to change its owner or mode'
+  chown -h ah:ah /var/lib/ah /var/lib/ah/master.key
   chmod 0750 /var/lib/ah
   chmod 0600 /var/lib/ah/master.key
   chown root:root /etc/default/ah

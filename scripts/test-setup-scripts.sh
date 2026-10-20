@@ -92,7 +92,17 @@ has "$tmp/out" '8. sandbox hardening: add runtime runsc-sbx (runsc --overlay2=ro
 has "$tmp/out" 'AH_SANDBOX_RUNTIME=runsc-sbx and AH_SANDBOX_WORKSPACE_TMPFS=true'
 has "$tmp/out" 'Sandbox egress stays off'
 has "$tmp/out" 'python3 (daemon.json merge for --sandbox-hardening)'
-pass 'setup-linux.sh --dry-run (fresh, partial, existing, non-Ubuntu, --sandbox-hardening)'
+has "$tmp/out" '[ok]   /var/lib/ah/master.key is a regular file, not a symlink'
+# Regression: a master.key symlink (planted by the ah user) is refused before
+# the root chown/chmod repair could follow it.
+: > "$fake/etc/shadow-target"
+rm "$fake/var/lib/ah/master.key"; ln -s "$fake/etc/shadow-target" "$fake/var/lib/ah/master.key"
+AH_SETUP_ROOT=$fake "$linux" --dry-run > "$tmp/out" 2>&1
+has "$tmp/out" 'mode=existing'
+has "$tmp/out" '[miss] /var/lib/ah/master.key is a regular file, not a symlink'
+has "$tmp/out" 'a real run would stop here'
+rm "$fake/var/lib/ah/master.key"; : > "$fake/var/lib/ah/master.key"
+pass 'setup-linux.sh --dry-run (fresh, partial, existing, non-Ubuntu, --sandbox-hardening, master.key symlink)'
 
 # --- setup-linux.sh daemon.json merge (the embedded python) ----------------
 if command -v python3 >/dev/null 2>&1; then
@@ -186,6 +196,10 @@ AH_SANDBOX_DIR=$tmp/sb "$sandbox" down --dry-run > "$tmp/out" 2>&1
 has "$tmp/out" "would delete $tmp/sb"
 [[ ! -e $tmp/sb ]] || fail 'sandbox.sh --dry-run created its state dir'
 if AH_SANDBOX_DIR=relative "$sandbox" up --dry-run > "$tmp/out" 2>&1; then fail 'sandbox.sh accepted a relative state dir'; fi
+# Regression: the demo's secrets reach python through the environment, not
+# argv (visible to every local user in ps).
+has "$sandbox" 'os.environ["OPENROUTER_API_KEY"]'
+lacks "$sandbox" '"OPENROUTER_API_KEY":sys.argv'
 pass 'sandbox.sh --dry-run'
 
 # --- sandbox.sh status (regression: exit 0 while running without a demo) --

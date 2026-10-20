@@ -127,6 +127,9 @@ type Manager struct {
 	sandboxEgressNetwork  string // egress bridge name; "" = egress "internet" refused
 	sandboxRuntime        string // OCI runtime for sandboxes; "" = the client's runtime
 	sandboxWorkspaceTmpfs bool   // /workspace is a tmpfs of disk_mb, no volume
+	// Sandbox image pulls (see sandbox_images.go).
+	sandboxPullSem    chan struct{} // host-wide limit on concurrent sandbox pulls
+	sandboxMaxImageMB int           // largest public image a sandbox may pull
 }
 
 // SetExternalTLSTerminated configures preview routes for deployments where a
@@ -143,10 +146,12 @@ func NewManager(db *sql.DB, docker docker.Client, baseDomain, traefikConfigDir s
 		panic("environments: NewManager requires non-nil docker client")
 	}
 	return &Manager{
-		db:               db,
-		docker:           docker,
-		baseDomain:       baseDomain,
-		traefikConfigDir: traefikConfigDir,
+		db:                db,
+		docker:            docker,
+		baseDomain:        baseDomain,
+		traefikConfigDir:  traefikConfigDir,
+		sandboxPullSem:    make(chan struct{}, defaultSandboxMaxConcurrentPulls),
+		sandboxMaxImageMB: defaultSandboxMaxImageMB,
 	}
 }
 
@@ -249,6 +254,9 @@ type createSpec struct {
 	runtime          string // OCI runtime override
 	workspaceTmpfsMB int    // >0: tmpfs /workspace of this size, no volume
 	egressNetwork    string // attach only to this egress bridge, not the tenant network
+	// prepareImage, when set, makes the image available on the cold-start
+	// path (after the quota INSERT) instead of RunEnvironment pulling it.
+	prepareImage func(ctx context.Context) error
 }
 
 // created is what create returns to the kind-specific wrappers.
@@ -386,6 +394,16 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 
 	if !usedPool {
 		// Cold-start path: create a new volume and run a fresh container.
+		if spec.prepareImage != nil {
+			if err := spec.prepareImage(ctx); err != nil {
+				m.updateStatus(ctx, id, "failed")
+				var apiErr *apierr.APIError
+				if errors.As(err, &apiErr) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("run %s: %w", label, err)
+			}
+		}
 		if volumeName != "" {
 			if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
 				m.updateStatus(ctx, id, "failed")
@@ -407,6 +425,7 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 			UseImageCmd: spec.useImageCmd,
 			LocalImage:  spec.localImage,
 
+			ImagePrepared:    spec.prepareImage != nil,
 			Runtime:          spec.runtime,
 			WorkspaceTmpfsMB: spec.workspaceTmpfsMB,
 			EgressNetwork:    spec.egressNetwork != "",

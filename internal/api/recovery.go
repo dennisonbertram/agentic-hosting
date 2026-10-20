@@ -91,49 +91,6 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check how many non-revoked keys the tenant has.
-	var keyCount int
-	if err := s.store.StateDB.QueryRow(
-		`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL`,
-		tenantID,
-	).Scan(&keyCount); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	// If the keyring is full, auto-revoke the oldest key to make room.
-	// Recovery is a last-resort operation — it should always succeed for a
-	// legitimate tenant, even if they have filled all key slots.
-	var revokedKeyID string
-	if keyCount >= maxKeysPerTenant {
-		// Prefer revoking an expired key first (least disruptive).
-		revokedID, err := s.store.RevokeOldestExpired(tenantID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if revokedID == "" {
-			// No expired keys — revoke the oldest key by created_at.
-			revokedID, err = s.store.RevokeOldest(tenantID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal error")
-				return
-			}
-		}
-		if revokedID == "" {
-			// Should be unreachable: keyCount >= 20 but nothing to revoke.
-			writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached; revoke unused keys first")
-			return
-		}
-		revokedKeyID = revokedID
-		log.Printf("AUDIT: action=recovery.key_auto_revoked tenant=%s revoked_key=%s reason=keyring_full", tenantID, revokedKeyID)
-
-		// Evict the revoked key from the auth cache so it stops working immediately.
-		if s.authInvalidator != nil {
-			s.authInvalidator.InvalidateKey(revokedKeyID)
-		}
-	}
-
 	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -143,15 +100,79 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	keyName := fmt.Sprintf("recovery-%s", time.Now().UTC().Format("20060102"))
 
-	_, err = s.store.StateDB.Exec(
-		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		key.id, tenantID, keyName, key.prefix, key.hash, now,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create recovery key")
-		return
+	// The key limit is checked inside the INSERT (as in handleKeyCreate), so
+	// concurrent recoveries cannot both pass a separate count and push the
+	// tenant past maxKeysPerTenant. If the keyring is full, the oldest key
+	// is revoked and the guarded INSERT retried. Recovery is a last-resort
+	// operation: it should always succeed for a legitimate tenant, even with
+	// every key slot in use. The retries are bounded so a tenant somehow over
+	// the limit is brought back to it, never looped on forever.
+	var revokedKeyID string
+	for attempt := 0; ; attempt++ {
+		res, err := s.store.StateDB.Exec(
+			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+			 SELECT ?, ?, ?, ?, ?, ?
+			 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL) < ?`,
+			key.id, tenantID, keyName, key.prefix, key.hash, now,
+			tenantID, maxKeysPerTenant,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create recovery key")
+			return
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create recovery key")
+			return
+		} else if n == 1 {
+			break
+		}
+		if attempt >= maxKeysPerTenant {
+			writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached; revoke unused keys first")
+			return
+		}
+
+		// Keyring full: prefer revoking an expired key (least disruptive),
+		// otherwise the oldest key by created_at.
+		revokedID, err := s.store.RevokeOldestExpired(tenantID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if revokedID == "" {
+			revokedID, err = s.store.RevokeOldest(tenantID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+		}
+		if revokedID == "" {
+			// Nothing left to revoke, yet the INSERT still saw a full keyring.
+			writeError(w, http.StatusConflict, "quota exceeded: maximum API keys reached; revoke unused keys first")
+			return
+		}
+		if revokedKeyID == "" {
+			revokedKeyID = revokedID
+		}
+		log.Printf("AUDIT: action=recovery.key_auto_revoked tenant=%s revoked_key=%s reason=keyring_full", tenantID, revokedID)
+
+		// Evict the revoked key from the auth cache so it stops working immediately.
+		if s.authInvalidator != nil {
+			s.authInvalidator.InvalidateKey(revokedID)
+		}
 	}
+
+	// Record every use of the operator credential to issue a tenant key.
+	// Never log key.token.
+	authType := "bootstrap"
+	if len(s.adminTokens) > 0 {
+		authType = "admin" // requireAdmin accepts only admin tokens when any are set
+	}
+	revokedForLog := revokedKeyID
+	if revokedForLog == "" {
+		revokedForLog = "none"
+	}
+	log.Printf("AUDIT: action=recovery.key_created tenant=%s key=%s auth=%s ip=%s revoked_key=%s",
+		tenantID, key.id, authType, trustedRealIP(r), revokedForLog)
 
 	// This is the only time the raw key is shown.
 	resp := KeyRecoverResponse{

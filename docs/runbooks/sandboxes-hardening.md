@@ -4,18 +4,24 @@
 > unit tests and scripts are done, but nobody has yet run the
 > [host verification checklist](#host-verification-checklist) on the real
 > Hetzner host (gVisor netstack, DOCKER-USER, cgroup accounting). Do not
-> enable either feature for real tenants until every checklist item passes,
-> then remove this banner and the "unverified" notes in `docs-site/src/content/docs/api.md`
+> enable egress or `runsc-sbx` for real tenants until every checklist item
+> passes. The tmpfs workspace is now on by default (an unbounded volume let
+> one sandbox fill the host disk); run checklist items 16 to 18 after the
+> upgrade, and set `AH_SANDBOX_WORKSPACE_TMPFS=false` if item 18 fails. Once
+> everything passes, remove this banner and the "unverified" notes in `docs-site/src/content/docs/api.md`
 > and `.claude/skills/agentic-hosting/references/api-reference.md` in the same PR.
 
-Disposable sandboxes ship with no internet access and a `/workspace` volume
-with no size limit. Two operator opt-ins change that. Both are **off by
-default**; with nothing configured, sandboxes behave exactly as before.
+Disposable sandboxes ship with no internet access and a tmpfs `/workspace`
+bounded by `disk_mb`. Internet egress and the memory-backed sandbox runtime
+are operator opt-ins, **off by default**. The tmpfs workspace is **on by
+default** (`AH_SANDBOX_WORKSPACE_TMPFS=true`); an operator can set it to
+`false` to go back to a `/workspace` volume with no size limit.
 
 | Feature | Settings (`/etc/default/ah`) | What a tenant sees |
 |---|---|---|
 | Internet egress | `AH_SANDBOX_EGRESS_NETWORK=ah-sbx-egress` (or `--sandbox-egress-network`), optional `AH_SANDBOX_EGRESS_SUBNET`, the host firewall rules, and per tenant `sandbox_egress_allowed=1` | `egress: "internet"` creates work; otherwise 403 |
-| Hard disk limits | `AH_SANDBOX_RUNTIME=runsc-sbx`, `AH_SANDBOX_WORKSPACE_TMPFS=true` | `disk_mb` on create; writes past it fail with ENOSPC; responses show `disk_mb` |
+| Hard disk limits | `AH_SANDBOX_WORKSPACE_TMPFS` (default `true`), plus `AH_SANDBOX_RUNTIME=runsc-sbx` for the root filesystem | `disk_mb` on create; writes past it fail with ENOSPC; responses show `disk_mb` |
+| Image pull limits | `AH_SANDBOX_MAX_CONCURRENT_PULLS` (default 2), `AH_SANDBOX_MAX_IMAGE_MB` (default 4096) | creates wait for a pull slot; larger `image` sources get 400 `image too large` |
 
 Commands below run on the production host as root (`sudo -i`) from the
 repository checkout, unless they start with `ahc`, which runs anywhere with
@@ -34,8 +40,8 @@ in `CLAUDE.md` before you connect.
   filesystem layer in sandbox memory instead of on the host disk, so root
   filesystem writes are charged to the container's memory cgroup and bounded
   by `memory_mb`.
-- With `AH_SANDBOX_WORKSPACE_TMPFS=true`, `/workspace` is a tmpfs of `disk_mb`
-  (no Docker volume is created or removed). Writes beyond `disk_mb` fail with
+- With `AH_SANDBOX_WORKSPACE_TMPFS=true` (the default), `/workspace` is a
+  tmpfs of `disk_mb` (no Docker volume is created or removed). Writes beyond `disk_mb` fail with
   "No space left on device". The tmpfs is also sandbox memory, so `disk_mb`
   is bounded by `memory_mb`.
 - `disk_mb` on create: 16 to min(`memory_mb`, tenant `max_sandbox_disk_mb`
@@ -43,6 +49,34 @@ in `CLAUDE.md` before you connect.
   tmpfs workspaces `disk_mb` is rejected with 400 and reported as 0.
 - Environments, services, databases and the warm pool are not affected.
   Sandboxes with these settings never use the warm pool.
+- Without `runsc-sbx`, the container's writable root filesystem is still on
+  the host disk with no hard limit. The disk watchdog below is the backstop.
+
+### Disk watchdog and image pulls
+
+These are always on; sandboxes are disposable.
+
+- **Disk watchdog.** On every pass (every 30s) the sandbox reaper runs the
+  sandbox disk check on the data dir (`AH_DATA_DIR`) and the Docker root
+  (`AH_DOCKER_DATA_DIR`). While either is at the 90% block threshold (the
+  same threshold that refuses creates, deploys and builds) it deletes running
+  sandboxes through the normal teardown, largest `disk_mb` first (oldest
+  first among equals), re-checking after each, until usage is below 90% or
+  none are left. Each deletion logs
+  `AUDIT: action=sandbox.disk_pressure_deleted tenant=… sandbox=… disk_mb=…`.
+  Environments, services and databases are never touched.
+- **Image pulls.** Every sandbox image pull waits for one of
+  `AH_SANDBOX_MAX_CONCURRENT_PULLS` host-wide slots (default 2). After pulling
+  an `image` source, ah reads the image size; over `AH_SANDBOX_MAX_IMAGE_MB`
+  (default 4096) the create fails with 400 `image too large` and the image is
+  removed if that create pulled it. The disk check runs again after every
+  pull; a pull that took the disk to 90% fails the create with 503.
+- **Template images** are used from the local image store without contacting
+  the registry (they are pulled only when missing), so template sandboxes
+  keep working when Docker Hub rate-limits or is down. Pre-pull them, and
+  pin them, after changing a template. `image` sources are always pulled:
+  that pull is what stops a tenant from running an image that exists only on
+  this host.
 
 ### Enable
 
@@ -90,21 +124,34 @@ journalctl -u ah -n 100 --no-pager | grep -E 'sandboxes:|AH_SANDBOX'
 # want: sandboxes: egress disabled; runtime runsc-sbx; workspace tmpfs true
 ```
 
-Optional per-tenant cap (admin token):
+Optional per-tenant cap (admin token). The header is read from a process
+substitution so the token never appears in `curl`'s argv (visible in `ps`):
 
 ```bash
 . /etc/default/ah
-curl -s -X PATCH -H 'X-Forwarded-Proto: https' -H "X-Admin-Token: $AH_ADMIN_TOKEN" \
+curl -s -X PATCH -H 'X-Forwarded-Proto: https' -H @<(printf 'X-Admin-Token: %s\n' "$AH_ADMIN_TOKEN") \
   -H 'Content-Type: application/json' -d '{"max_sandbox_disk_mb":512}' \
   http://127.0.0.1:8080/v1/tenants/<tenant-id>/quotas
 ```
 
 ### Disable
 
-Remove `AH_SANDBOX_RUNTIME` and `AH_SANDBOX_WORKSPACE_TMPFS` from
-`/etc/default/ah` and `systemctl restart ah`. Existing tmpfs sandboxes keep
-running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
-`daemon.json` is harmless and can stay.
+Remove `AH_SANDBOX_RUNTIME` from `/etc/default/ah` and `systemctl restart ah`
+to go back to the container runtime. To give sandboxes a `/workspace` volume
+with no size limit again, set `AH_SANDBOX_WORKSPACE_TMPFS=false` (removing the
+line keeps the tmpfs default). Existing tmpfs sandboxes keep running until
+their TTL. The `runsc-sbx` entry in `daemon.json` is harmless and can stay.
+
+### Capacity planning
+
+Keep `max_sandboxes` times the number of tenants allowed sandboxes at or
+below `AH_MAX_SANDBOXES_TOTAL` (default 20; per-tenant default
+`max_sandboxes` 5). The host cap is shared first come, first served: with the
+defaults, four tenants can hold every slot for up to their maximum lifetime
+(`max_sandbox_lifetime_seconds`, default 24h) and every other tenant gets
+`host sandbox capacity reached; try again later`. Lower `max_sandboxes` per
+tenant (admin `PATCH /v1/tenants/<id>/quotas`) or raise the host cap (if the
+host has the memory and disk for it) when you add tenants.
 
 ---
 
@@ -215,10 +262,13 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
    a reboot none runs until ah (and its drop-in) has started and a tenant
    creates a new one.
 
-   The check runs only at ah start. After anything that flushes or reorders
-   `INPUT`, `FORWARD` or `DOCKER-USER` (ufw/firewalld reload, fail2ban
-   restart, a Docker restart with firewalld) run `systemctl restart ah`,
-   which reinstalls the rules and re-checks them.
+   > **ah checks the egress firewall only at startup.** It does not notice
+   > rules that disappear while it runs. After **any** firewall reload or
+   > change, anything that flushes or reorders `INPUT`, `FORWARD` or
+   > `DOCKER-USER` (ufw/firewalld reload, `iptables-restore`,
+   > `netfilter-persistent reload`, fail2ban restart, a Docker restart with
+   > firewalld), run `systemctl restart ah`. That reinstalls the rules and
+   > re-checks them; until then running egress sandboxes may be unfiltered.
 
 3. Install the systemd drop-in and set the network:
 
@@ -238,7 +288,7 @@ running until their TTL; new ones get a volume again. The `runsc-sbx` entry in
 
    ```bash
    . /etc/default/ah
-   curl -s -X PATCH -H 'X-Forwarded-Proto: https' -H "X-Admin-Token: $AH_ADMIN_TOKEN" \
+   curl -s -X PATCH -H 'X-Forwarded-Proto: https' -H @<(printf 'X-Admin-Token: %s\n' "$AH_ADMIN_TOKEN") \
      -H 'Content-Type: application/json' -d '{"sandbox_egress_allowed":1}' \
      http://127.0.0.1:8080/v1/tenants/<tenant-id>/quotas
    ```
@@ -370,5 +420,5 @@ If any **must fail** item succeeds, disable egress immediately (see Disable),
 keep the banner, and file the finding. If item 5 (DNS) fails, egress cannot be
 used as is: confirm with `ahc sandbox exec egress-a -- cat /etc/resolv.conf`
 and record it; do not switch the resolver to a public IP without a review.
-If item 18 or 19 shows no cgroup charge, keep `AH_SANDBOX_WORKSPACE_TMPFS`
-off: the tmpfs would then be unaccounted host memory.
+If item 18 or 19 shows no cgroup charge, set `AH_SANDBOX_WORKSPACE_TMPFS=false`:
+the tmpfs would then be unaccounted host memory.

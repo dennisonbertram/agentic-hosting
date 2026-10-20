@@ -226,6 +226,17 @@ func TestSetupSandboxEgress_FirewallMissingDisablesEgress(t *testing.T) {
 		"user chain jump before jump": func(r map[string]string) {
 			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -j ufw-user-forward\n-A DOCKER-USER -i ah-sbx-egress -j AH-SBX-EGRESS\n"
 		},
+		// Regressions: a jump narrowed to one destination, or a drop
+		// narrowed to another interface, is not the required rule.
+		"jump narrowed to a destination": func(r map[string]string) {
+			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -i ah-sbx-egress -d 203.0.113.9/32 -j AH-SBX-EGRESS\n"
+		},
+		"drop narrowed to an interface": func(r map[string]string) {
+			r["iptables AH-SBX-EGRESS"] = strings.Replace(r["iptables AH-SBX-EGRESS"], "-A AH-SBX-EGRESS -d 10.0.0.0/8 -j DROP", "-A AH-SBX-EGRESS -i eth0 -d 10.0.0.0/8 -j DROP", 1)
+		},
+		"input drop narrowed to a destination": func(r map[string]string) {
+			r["iptables INPUT"] = "-P INPUT ACCEPT\n-A INPUT -i ah-sbx-egress -d 10.250.0.1/32 -j DROP\n"
+		},
 		"jump narrowed to tcp": func(r map[string]string) {
 			r["iptables DOCKER-USER"] = "-N DOCKER-USER\n-A DOCKER-USER -i ah-sbx-egress -p tcp -j AH-SBX-EGRESS\n"
 		},
@@ -318,7 +329,7 @@ func TestConfigureSandboxHardening_DefaultsTouchNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, target.egress)
 	assert.Empty(t, target.runtime)
-	assert.False(t, target.tmpfs)
+	assert.True(t, target.tmpfs, "the bounded tmpfs workspace is the default")
 	assert.Empty(t, d.lookups, "no Docker calls with the defaults")
 	assert.Zero(t, d.ensureHits)
 	assert.Empty(t, logged)
@@ -370,11 +381,15 @@ func TestDefaultSandboxEgressSubnetMatches(t *testing.T) {
 }
 
 func TestIsPlainRule(t *testing.T) {
-	assert.True(t, isPlainRule(strings.Fields("-A INPUT -i b -j DROP")))
-	assert.True(t, isPlainRule(strings.Fields("-A INPUT -i b -m comment --comment x -j DROP")))
-	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -p tcp -j DROP")))
-	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -m tcp -j DROP")))
-	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i")))
+	assert.True(t, isPlainRule(strings.Fields("-A INPUT -i b -j DROP"), "-i"))
+	assert.True(t, isPlainRule(strings.Fields("-A INPUT -i b -m comment --comment x -j DROP"), "-i"))
+	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -p tcp -j DROP"), "-i"))
+	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i b -m tcp -j DROP"), "-i"))
+	assert.False(t, isPlainRule(strings.Fields("-A INPUT -i"), "-i"))
+	// Regression: each check allows only its own selector.
+	assert.False(t, isPlainRule(strings.Fields("-A DOCKER-USER -i b -d 203.0.113.9/32 -j AH-SBX-EGRESS"), "-i"))
+	assert.True(t, isPlainRule(strings.Fields("-A AH-SBX-EGRESS -d 10.0.0.0/8 -j DROP"), "-d"))
+	assert.False(t, isPlainRule(strings.Fields("-A AH-SBX-EGRESS -i eth0 -d 10.0.0.0/8 -j DROP"), "-d"))
 }
 
 func TestFirewallOrder_DropsAndLogsAheadAreFine(t *testing.T) {

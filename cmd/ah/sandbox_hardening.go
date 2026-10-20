@@ -222,7 +222,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 		return nil, err
 	}
 	if !ruleFirstEffective(dockerUser, func(f []string) bool {
-		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == sandboxEgressChain && isPlainRule(f)
+		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == sandboxEgressChain && isPlainRule(f, "-i")
 	}) {
 		return nil, missing(fmt.Sprintf("DOCKER-USER -i %s -j %s", bridge, sandboxEgressChain))
 	}
@@ -236,7 +236,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 	for i, line := range chain {
 		f := strings.Fields(line)
 		target := flagValue(f, "-j")
-		if target == "DROP" && flagValue(f, "-d") != "" && isPlainRule(f) {
+		if target == "DROP" && flagValue(f, "-d") != "" && isPlainRule(f, "-d") {
 			// "-A CHAIN -d CIDR -j DROP": an unconditional drop of that destination.
 			if _, seen := drops[flagValue(f, "-d")]; !seen {
 				drops[flagValue(f, "-d")] = i
@@ -258,7 +258,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 		return nil, err
 	}
 	if !ruleFirstEffective(input, func(f []string) bool {
-		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f)
+		return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f, "-i")
 	}) {
 		return nil, missing(fmt.Sprintf("INPUT -i %s -j DROP", bridge))
 	}
@@ -271,7 +271,7 @@ func checkSandboxEgressFirewall(ctx context.Context, bridge, goos string, run co
 			continue
 		}
 		if !ruleFirstEffective(rules, func(f []string) bool {
-			return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f)
+			return flagValue(f, "-i") == bridge && flagValue(f, "-j") == "DROP" && isPlainRule(f, "-i")
 		}) {
 			warnings = append(warnings, fmt.Sprintf("WARNING: ip6tables %s has no '-i %s -j DROP' rule (defence in depth; IPv6 is disabled on the bridge)", chain, bridge))
 		}
@@ -324,15 +324,18 @@ func isEstablishedReturn(fields []string) bool {
 }
 
 // isPlainRule reports whether an iptables -S rule ("-A CHAIN ...") matches
-// only on the input interface and/or destination (plus an optional comment),
-// so it is not narrowed to a protocol, port or source.
-func isPlainRule(fields []string) bool {
+// only on match, the one selector its check allows ("-i" for the
+// DOCKER-USER jump and the INPUT drops, "-d" for the egress chain drops),
+// plus its target and an optional comment. A rule also narrowed to a
+// protocol, port, source, destination or interface is not the rule the
+// check is looking for: it lets other traffic through.
+func isPlainRule(fields []string, match string) bool {
 	if len(fields) < 2 || len(fields)%2 != 0 {
 		return false
 	}
 	for i := 2; i+1 < len(fields); i += 2 {
 		switch fields[i] {
-		case "-i", "-d", "-j", "--comment":
+		case match, "-j", "--comment":
 		case "-m":
 			if fields[i+1] != "comment" {
 				return false

@@ -296,14 +296,16 @@ Body: {"source":{"type":"image","image":"python:3.12-slim"},"ttl_seconds":1800}
 #   {"source":{"type":"service","service_id":"..."},"run":"idle"}            # service's current image
 #   optional: name, run (idle|app), include_env, memory_mb (128..2048), cpu_millicores (100..2000),
 #             egress ("none" | "internet": 403 unless server + tenant allow it),
-#             disk_mb (only on servers with tmpfs workspaces, else 400; 16..min(memory_mb, max_sandbox_disk_mb))
+#             disk_mb (tmpfs workspace, the default; 400 on servers that opted out; 16..min(memory_mb, max_sandbox_disk_mb))
 # → 201 {"id":"...","name":"sbx-1a2b3c4d","status":"running","source":{"type":"image","ref":"python:3.12-slim"},
-#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,"disk_mb":0,
+#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,"disk_mb":256,
 #        "ttl_seconds":1800,"created_at":unix,"expires_at":unix,"max_expires_at":unix,"last_activity_at":unix}
 # ttl_seconds: 60..min(max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds) (defaults 14400, 86400).
 #   Omitted: 1800, lowered to that bound if the tenant's bound is smaller. Explicit out-of-range → 400.
 # memory_mb / cpu_millicores omitted: template value (else 512 / 1000), lowered to the tenant maximum.
-# disk_mb: 0 = /workspace is a volume (no hard limit). >0 = tmpfs of that size, counted against memory_mb.
+# disk_mb: >0 = tmpfs of that size (default half of memory_mb), counted against memory_mb. 0 = volume (server opted out).
+# Image sources: 400 "image too large" over the server's limit (default 4096 MB); 503 if the pull filled the disk.
+# Sandboxes are disposable: at 90% host disk the server deletes running sandboxes, largest disk_mb first.
 # Create limiter headers: X-Sandbox-Create-RateLimit-Limit/-Remaining (X-RateLimit-* stay the general limit).
 # Images: Docker Hub, or your own 127.0.0.1:5000 build/snapshot images. Other tenants' resources → 404.
 
@@ -325,7 +327,7 @@ Body: {"ttl_seconds":3600}
 # 400 past max lifetime; 409 when not running / already expired
 ```
 
-Egress and tmpfs workspaces are operator opt-ins and are unverified on the production host until the checklist in docs/runbooks/sandboxes-hardening.md has been run. Egress sandboxes' network bytes show in `GET /v1/tenant/usage/metrics?kind=sandbox`.
+Egress is an operator opt-in; tmpfs workspaces are on by default. Both are unverified on the production host until the checklist in docs/runbooks/sandboxes-hardening.md has been run. Egress sandboxes' network bytes show in `GET /v1/tenant/usage/metrics?kind=sandbox`.
 
 Notes: a sandbox forked with `include_env` gets values like `DATABASE_URL` but is not attached to database networks, so those connections fail. Exec needs the `timeout` binary in the image (distroless → exit 127). Expired sandboxes are deleted within ~30s; stopped/failed ones after 10 minutes. Environment routes return 404 for sandbox IDs and vice versa.
 

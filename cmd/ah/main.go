@@ -21,6 +21,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
@@ -199,6 +200,12 @@ func main() {
 	}
 	defer dockerClient.Close()
 
+	// Without gVisor (a --dev runc fallback for the workloads or the
+	// sandboxes), the API must not be reachable from a network.
+	if err := checkListenIsolation(context.Background(), *listenAddr, cfg.ContainerRuntime, cfg.SandboxRuntime, dockerClient); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+
 	// Verify gVisor runtime is available (fail closed in production)
 	if cfg.ContainerRuntime == config.RuntimeRunsc {
 		if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
@@ -256,6 +263,12 @@ func main() {
 	envMgr.SetSandboxSources(snapshotSandboxSource{mgr: snapMgr}, serviceSandboxSource{mgr: svcMgr})
 	envMgr.SetMaxSandboxesTotal(*maxSandboxesTotal)
 	log.Printf("sandboxes: host cap %d (0 = none)", *maxSandboxesTotal)
+	// Sandbox image pulls are bounded host-wide; the disk check (create, and
+	// the reaper's disk watchdog) covers the data dir and the Docker root.
+	envMgr.SetSandboxPullLimits(cfg.SandboxMaxConcurrentPulls, cfg.SandboxMaxImageMB)
+	diskPaths := cfg.DiskCheckPaths()
+	envMgr.SetSandboxDiskCheck(func() error { return diskcheck.CheckAll(diskPaths, 80, 90) })
+	log.Printf("sandboxes: at most %d concurrent image pulls, images up to %d MB", cfg.SandboxMaxConcurrentPulls, cfg.SandboxMaxImageMB)
 	// Phase 2 hardening, all opt-in: a missing sandbox runtime is fatal; an
 	// egress network without verified firewall rules stays disabled (403).
 	if err := configureSandboxHardening(context.Background(), cfg, strings.TrimSpace(*sandboxEgressNetwork), *devMode,

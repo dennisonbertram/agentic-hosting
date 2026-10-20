@@ -141,7 +141,7 @@ Bootstrap. Body fields (all optional, must be within min and cap):
 | `sandbox_egress_allowed` | 0 | 1 | 0 |
 | `max_sandbox_disk_mb` | 16 | 8192 | 1024 |
 
-`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed: 1` lets the tenant create sandboxes with `egress: "internet"`, but only on a server whose operator has enabled sandbox egress (`--sandbox-egress-network`); elsewhere it has no effect and those requests get 403. `max_sandbox_disk_mb` caps a sandbox's `disk_mb`; it only matters on a server with tmpfs sandbox workspaces (`AH_SANDBOX_WORKSPACE_TMPFS`).
+`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed: 1` lets the tenant create sandboxes with `egress: "internet"`, but only on a server whose operator has enabled sandbox egress (`--sandbox-egress-network`); elsewhere it has no effect and those requests get 403. `max_sandbox_disk_mb` caps a sandbox's `disk_mb`; it only matters on a server with tmpfs sandbox workspaces (`AH_SANDBOX_WORKSPACE_TMPFS`, on by default).
 
 Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`, `api_rate_limit`.
 
@@ -380,15 +380,15 @@ Environment routes only see environments: a sandbox ID returns 404 here, and `GE
 
 ## Sandboxes (disposable)
 
-A sandbox is a throwaway container with a TTL. The server deletes it (container, `/workspace` volume and record) when the TTL expires; there is no stop/start. Isolation is the same as an environment: the configured workload runtime (`runsc` / gVisor in production), all capabilities dropped, `no-new-privileges`, 256 PIDs, memory = swap, CPU limit, `noexec` `/tmp`. An operator can run sandboxes under a separate gVisor runtime (`AH_SANDBOX_RUNTIME`, see below).
+A sandbox is a throwaway container with a TTL. The server deletes it (container, any `/workspace` volume and record) when the TTL expires; there is no stop/start. Isolation is the same as an environment: the configured workload runtime (`runsc` / gVisor in production), all capabilities dropped, `no-new-privileges`, 256 PIDs, memory = swap, CPU limit, `noexec` `/tmp`. An operator can run sandboxes under a separate gVisor runtime (`AH_SANDBOX_RUNTIME`, see below).
 
 **Network:** egress `none` by default. The sandbox is attached only to the tenant's internal network (`Internal`, inter-container traffic off): no internet, no other tenant containers, no other tenants. A sandbox forked with `include_env` gets values such as `DATABASE_URL` but is not attached to database networks, so those connections fail.
 
 **Internet egress (opt-in):** `egress: "internet"` works only when both the operator has set `--sandbox-egress-network` / `AH_SANDBOX_EGRESS_NETWORK` (and ah verified the host firewall rules at startup) **and** the tenant's `sandbox_egress_allowed` quota is 1. Otherwise it is 403: `egress "internet" is not available on this server` or `... is not enabled for this tenant`. An egress sandbox is attached **only** to the shared egress bridge, never to the tenant network: it can reach the public internet, but host firewall rules drop traffic to private ranges (RFC 1918, 100.64/10), link-local addresses including cloud metadata (169.254.169.254), loopback, multicast and the host itself; inter-container traffic on the bridge is off and IPv6 is disabled. Egress sandboxes always cold start (no warm pool). Their network bytes are metered and show in `GET /v1/tenant/usage/metrics?kind=sandbox` (`network_rx_bytes`, `network_tx_bytes`; the first 60s sample is a baseline). Operators: docs/runbooks/sandboxes-hardening.md. Status: unverified on the production host until the runbook's host verification checklist has been run.
 
-**Hard disk limit (opt-in):** on a server with `AH_SANDBOX_WORKSPACE_TMPFS=true`, `/workspace` is a tmpfs of `disk_mb` instead of a volume, so writes beyond `disk_mb` fail with "No space left on device". Under gVisor the tmpfs is sandbox memory, so `disk_mb` counts against `memory_mb`. With the operator's `runsc-sbx` runtime (`--overlay2=root:memory`) writes to the root filesystem are memory-backed too and bounded by `memory_mb`. On other servers `disk_mb` is 0 in responses (a volume with no hard size limit) and sending `disk_mb` is 400. Status: unverified on the production host (in particular that gVisor charges the tmpfs and memory overlay to the sandbox's memory cgroup).
+**Hard disk limit (default):** `/workspace` is a tmpfs of `disk_mb` (default half of `memory_mb`) instead of a volume, so writes beyond `disk_mb` fail with "No space left on device". Under gVisor the tmpfs is sandbox memory, so `disk_mb` counts against `memory_mb`. With the operator's `runsc-sbx` runtime (`--overlay2=root:memory`) writes to the root filesystem are memory-backed too and bounded by `memory_mb`. An operator can opt out with `AH_SANDBOX_WORKSPACE_TMPFS=false`; on such a server `disk_mb` is 0 in responses (a volume with no hard size limit) and sending `disk_mb` is 400. Sandboxes are disposable: while the host disk is at the 90% block threshold the server deletes running sandboxes, largest `disk_mb` first, until usage drops below it. Status: unverified on the production host (in particular that gVisor charges the tmpfs and memory overlay to the sandbox's memory cgroup).
 
-**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas and separate name namespaces: a sandbox may share a name with an environment, and names are unique only within each kind (409 names the conflicting kind).
+**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create and again after the image pull (503 `insufficient disk space`); image pulls are limited host-wide (`AH_SANDBOX_MAX_CONCURRENT_PULLS`, default 2), so a create may wait for a pull slot; an `image` source larger than `AH_SANDBOX_MAX_IMAGE_MB` (default 4096) is 400 `image too large`; `template` sources use the server's local copy of the template image without contacting the registry; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas and separate name namespaces: a sandbox may share a name with an environment, and names are unique only within each kind (409 names the conflicting kind).
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -425,7 +425,7 @@ A sandbox is a throwaway container with a TTL. The server deletes it (container,
 | `memory_mb` | 128 to min(2048, tenant `max_memory_mb`). Omitted: template value, else 512, lowered to that maximum when the tenant's maximum is smaller (400 only if the maximum is below 128). An explicit value outside the range is 400 |
 | `cpu_millicores` | 100 to min(2000, tenant `max_cpu_cores` × 1000). Omitted: template value, else 1000, lowered to that maximum the same way. An explicit value outside the range is 400 |
 | `egress` | `none` (default) or `internet`. `internet` → 403 unless the server and the tenant both allow it (see above) |
-| `disk_mb` | Only on servers with tmpfs workspaces (otherwise 400). 16 to min(`memory_mb`, tenant `max_sandbox_disk_mb`, default 1024). Omitted: half of `memory_mb`, within that range |
+| `disk_mb` | Only on servers with tmpfs workspaces, the default (otherwise 400). 16 to min(`memory_mb`, tenant `max_sandbox_disk_mb`, default 1024). Omitted: half of `memory_mb`, within that range |
 
 Every resolved image goes through the service image allowlist: Docker Hub images, or this tenant's own `127.0.0.1:5000/ah/<tenant>-*` build images and `127.0.0.1:5000/snapshots/<tenant>:*` snapshot images. `localhost/…` and other registries → 400. A snapshot or service owned by another tenant → 404. A service with no built image → 409. A service source reads the service's current image directly and does not create a snapshot.
 
@@ -437,13 +437,13 @@ Response (201; `GET` returns the same shape, `list` an array):
   "source": {"type": "snapshot", "ref": "<snapshot_id>"},
   "image": "127.0.0.1:5000/snapshots/<tenant>:<id>",
   "run": "app", "egress": "none",
-  "memory_mb": 512, "cpu_millicores": 1000, "disk_mb": 0, "ttl_seconds": 1800,
+  "memory_mb": 512, "cpu_millicores": 1000, "disk_mb": 256, "ttl_seconds": 1800,
   "created_at": 1760000000, "expires_at": 1760001800,
   "max_expires_at": 1760086400, "last_activity_at": 1760000000
 }
 ```
 
-No `container_id`, volume name or env values are returned. `disk_mb` is 0 when `/workspace` is a volume (no hard size limit).
+No `container_id`, volume name or env values are returned. `disk_mb` is the tmpfs `/workspace` size, or 0 on a server that uses volumes (no hard size limit).
 
 The create limiter reports its state in `X-Sandbox-Create-RateLimit-Limit` (requests per second, `0.333` = 20/minute) and `X-Sandbox-Create-RateLimit-Remaining`; `X-RateLimit-*` keep describing the general per-tenant API limit.
 

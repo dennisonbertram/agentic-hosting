@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Sandboxes can no longer fill the host disk.** `AH_SANDBOX_WORKSPACE_TMPFS` now defaults to `true` (a tmpfs `/workspace` of `disk_mb`, default half of `memory_mb`; set `false` for the old unbounded volume). The sandbox reaper also deletes running sandboxes, largest `disk_mb` first, while the data dir or Docker root is at the 90% block threshold (`AUDIT: action=sandbox.disk_pressure_deleted`).
+- **Sandbox image pulls are bounded.** At most `AH_SANDBOX_MAX_CONCURRENT_PULLS` (default 2) pulls run host-wide; an `image` source over `AH_SANDBOX_MAX_IMAGE_MB` (default 4096) is 400 `image too large` and removed if that create pulled it; the disk check runs again after the pull (503). Template sandboxes use the local template image without contacting the registry, so registry rate limits no longer break them; `image` sources are still always pulled.
+- Key recovery enforces the 20-key limit inside the INSERT, so concurrent recoveries cannot push a tenant past it, and every recovery logs `AUDIT: action=recovery.key_created` (tenant, key ID, auth type, client IP, revoked key; never the token).
+- The egress firewall check accepts the DOCKER-USER jump and INPUT drops only with `-i`, and the egress-chain drops only with `-d`, so a narrowed copy of a rule no longer passes as the real one.
+- `ah` refuses a non-loopback `--listen-addr` when workloads or sandboxes run without gVisor (`runc` in `--dev`).
+- `setup-linux.sh` refuses to repair `/var/lib/ah/master.key` permissions unless it is a regular file (a symlink planted by the `ah` user was followed by root's `chown`/`chmod`), and uses `chown -h`.
+- Secrets stay out of argv: `scripts/sandbox.sh` passes `OPENROUTER_API_KEY` to python through the environment, the runbooks read `X-Admin-Token` from a process substitution, and `ahc recover --admin-token` help recommends `$AH_ADMIN_TOKEN`.
+
 ### Fixed
 
 - **Deploys are serialized across the API and build pipeline.** The build pipeline and API used separate service managers, so a build-triggered deploy could overlap a restart or circuit reset of the same service. They now share one.
@@ -29,7 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Disposable sandboxes** (`/v1/sandboxes`, `ahc sandbox`). Short-lived gVisor containers created from a template, a public image, one of the tenant's snapshots, or a copy of one of the tenant's services. Endpoints: create, list, get, exec, logs, extend, delete. Every sandbox has a TTL (`ttl_seconds`, at most `max_sandbox_ttl_seconds`) and an absolute lifetime (`max_sandbox_lifetime_seconds`); a reaper deletes expired sandboxes, and extend and expiry cannot both win. Limits: `max_sandboxes` per tenant (default 5), `--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL` per host (default 20), and a per-tenant create rate limit (reported in `X-Sandbox-Create-RateLimit-*`). By default sandboxes have no network egress and cannot reach other containers. Env values from a source (`include_env`) are never returned by the API. `ahc sandbox run` creates a sandbox, runs one command and always deletes it. Usage is metered with `resource_kind=sandbox` (`?kind=sandbox` on metrics). Environment and sandbox names are unique per kind.
 - **Opt-in sandbox internet egress** (off by default). Requires the operator flag `--sandbox-egress-network` / `AH_SANDBOX_EGRESS_NETWORK`, the tenant quota `sandbox_egress_allowed=1`, and firewall rules installed by `docs/ops/sandbox-egress-firewall.sh`, which ah checks (presence and order) at startup. If any of these is missing, `egress: "internet"` returns 403. Egress sandboxes are never restarted by Docker and are deleted at startup if egress is disabled. **Not yet verified on a production host**; see `docs/runbooks/sandboxes-hardening.md`.
-- **Optional hard disk limits for sandboxes** (off by default): `AH_SANDBOX_RUNTIME` (a registered gVisor runtime such as `runsc-sbx` with an in-memory overlay) and `AH_SANDBOX_WORKSPACE_TMPFS` (`/workspace` as a tmpfs of `disk_mb`, bounded by `max_sandbox_disk_mb`). `setup-linux.sh --sandbox-hardening` registers the runtime. **Not yet verified on a production host.**
+- **Hard disk limits for sandboxes**: `AH_SANDBOX_WORKSPACE_TMPFS` (on by default: `/workspace` as a tmpfs of `disk_mb`, bounded by `max_sandbox_disk_mb`) and the optional `AH_SANDBOX_RUNTIME` (a registered gVisor runtime such as `runsc-sbx` with an in-memory overlay). `setup-linux.sh --sandbox-hardening` registers the runtime. **Not yet verified on a production host.**
 - `ahc recover --admin-token` (and `$AH_ADMIN_TOKEN`) for installs that set `AH_ADMIN_TOKEN`.
 - `ahc` resolvers accept a unique ID prefix of 4+ hex characters (as printed by `list`).
 - `config.LoadFromEnv` rejects malformed integer/duration settings at startup (they used to fall back to defaults silently); durations accept a whole-day suffix such as `90d`.

@@ -247,7 +247,7 @@ GET /v1/databases/:dbID
 
 # Get decrypted connection string
 GET /v1/databases/:dbID/connection-string
-# → {"connection_string":"postgres://user:pass@127.0.0.1:5432/dbname"}
+# → {"connection_string":"postgres://user:pass@ah-db-<databaseID>:5432/ah?sslmode=disable"}
 
 # Delete database (irreversible — destroys container and data volume)
 DELETE /v1/databases/:dbID

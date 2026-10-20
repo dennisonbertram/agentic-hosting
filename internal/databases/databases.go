@@ -95,6 +95,7 @@ func NewManager(db *sql.DB, dockerClient docker.Client, masterKey []byte) *Manag
 		masterKey: masterKey,
 	}
 	mgr.ReconcileStale()
+	mgr.migrateLoopbackURLs()
 	return mgr
 }
 
@@ -209,9 +210,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		case "postgres":
 			dbName = "ah"
 			username = "ah"
-			connStr = fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable", username, password, port, dbName)
+			connStr = buildConnectionString(req.Type, id, username, password, dbName)
 		case "redis":
-			connStr = fmt.Sprintf("redis://:%s@127.0.0.1:%d/0", password, port)
+			connStr = buildConnectionString(req.Type, id, "", password, "")
 		}
 
 		connStrEnc, encErr := crypto.Encrypt([]byte(connStr), m.masterKey)
@@ -226,9 +227,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		res, err = m.db.ExecContext(ctx,
 			`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
 			 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
-			 SELECT ?, ?, ?, ?, 'provisioning', '127.0.0.1', ?, ?, ?, ?, ?, ?, ?, ?
+			 SELECT ?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed') < ?`,
-			id, tenantID, req.Name, req.Type, port, dbName, username,
+			id, tenantID, req.Name, req.Type, docker.DatabaseAlias(id), port, dbName, username,
 			passwordEnc, connStrEnc, volumeName, now, now, tenantID, maxDatabases,
 		)
 		if err == nil {
@@ -256,7 +257,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	// Run container
 	var containerID string
-	containerID, err = m.runContainer(ctx, req.Type, containerName, volumeName, port, dbName, username, password)
+	containerID, err = m.runContainer(ctx, req.Type, tenantID, id, containerName, volumeName, port, dbName, username, password)
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
 		_ = m.docker.RemoveVolume(ctx, volumeName)
@@ -320,8 +321,8 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		Name:             req.Name,
 		Type:             req.Type,
 		Status:           "ready",
-		Host:             "127.0.0.1",
-		Port:             port,
+		Host:             docker.DatabaseAlias(id),
+		Port:             EnginePort(req.Type),
 		DBName:           dbName,
 		Username:         username,
 		ConnectionString: connStr,
@@ -359,6 +360,7 @@ func (m *Manager) Get(ctx context.Context, tenantID, dbID string) (*Database, er
 	if err != nil {
 		return nil, fmt.Errorf("get database: %w", err)
 	}
+	exposeEngineAddress(d)
 	return d, nil
 }
 
@@ -392,6 +394,7 @@ func (m *Manager) ListPaginated(ctx context.Context, tenantID string, limit, off
 			&d.Host, &d.Port, &d.DBName, &d.Username, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan database: %w", err)
 		}
+		exposeEngineAddress(d)
 		result = append(result, d)
 	}
 	return result, rows.Err()
@@ -480,6 +483,7 @@ func (m *Manager) Delete(ctx context.Context, tenantID, dbID string) error {
 		return fmt.Errorf("delete database record: %w", err)
 	}
 
+	m.removeDatabaseNetwork(ctx, tenantID, dbID)
 	return nil
 }
 
@@ -615,11 +619,15 @@ func containerNameFor(tenantID, id string) string {
 	return fmt.Sprintf("ah-db-%s-%s", tenantID, id[:16])
 }
 
-func (m *Manager) runContainer(ctx context.Context, dbType, name, volume string, port int, dbName, user, password string) (string, error) {
-	if dbType == "redis" {
-		return m.runRedis(ctx, name, volume, port, password)
+func (m *Manager) runContainer(ctx context.Context, dbType, tenantID, dbID, name, volume string, port int, dbName, user, password string) (string, error) {
+	netName := docker.DatabaseNetworkName(tenantID, dbID)
+	if _, err := m.docker.EnsureDatabaseNetwork(ctx, netName); err != nil {
+		return "", fmt.Errorf("ensure database network: %w", err)
 	}
-	return m.runPostgres(ctx, name, volume, port, dbName, user, password)
+	if dbType == "redis" {
+		return m.runRedis(ctx, name, volume, port, password, netName, docker.DatabaseAlias(dbID))
+	}
+	return m.runPostgres(ctx, name, volume, port, dbName, user, password, netName, docker.DatabaseAlias(dbID))
 }
 
 // StartAllForTenant recreates the containers of a tenant's stopped databases
@@ -661,7 +669,7 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 			continue
 		}
 		password := string(pw)
-		containerID, err := m.runContainer(ctx, d.typ, containerNameFor(tenantID, d.id), d.volume, d.port, d.dbName, d.user, password)
+		containerID, err := m.runContainer(ctx, d.typ, tenantID, d.id, containerNameFor(tenantID, d.id), d.volume, d.port, d.dbName, d.user, password)
 		if err != nil {
 			log.Printf("databases: StartAllForTenant run container for %s: %v", d.id, err)
 			m.updateStatus(ctx, d.id, "failed")
@@ -707,7 +715,7 @@ func (m *Manager) removeContainer(ctx context.Context, containerID string) {
 	_ = m.docker.RemoveContainer(ctx, containerID)
 }
 
-func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password string) (string, error) {
+func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password, networkName, networkAlias string) (string, error) {
 	return m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
 		Name:          name,
 		Image:         "postgres:16-alpine",
@@ -718,12 +726,14 @@ func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int
 			"POSTGRES_USER":     user,
 			"POSTGRES_PASSWORD": password,
 		},
-		VolumeName: volume,
-		MountPath:  "/var/lib/postgresql/data",
+		VolumeName:   volume,
+		MountPath:    "/var/lib/postgresql/data",
+		NetworkName:  networkName,
+		NetworkAlias: networkAlias,
 	})
 }
 
-func (m *Manager) runRedis(ctx context.Context, name, volume string, port int, password string) (string, error) {
+func (m *Manager) runRedis(ctx context.Context, name, volume string, port int, password, networkName, networkAlias string) (string, error) {
 	return m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
 		Name:          name,
 		Image:         "redis:7-alpine",
@@ -733,6 +743,8 @@ func (m *Manager) runRedis(ctx context.Context, name, volume string, port int, p
 		Cmd:           []string{"redis-server", "--requirepass", password},
 		VolumeName:    volume,
 		MountPath:     "/data",
+		NetworkName:   networkName,
+		NetworkAlias:  networkAlias,
 	})
 }
 

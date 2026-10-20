@@ -212,7 +212,9 @@ curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/restart" \
   -H "Authorization: Bearer $AH_KEY"
 ```
 
-Never print the full connection string to the user — show host:port only.
+The connection string host is `ah-db-<databaseID>` on the engine port (`5432` / `6379`). It resolves only inside containers attached to that database's `ah-dbnet-<tenant>-<db>` network. Deploy and restart attach the service when its env contains the alias. Do not `curl` the URL from the host; host-loopback publish is for control-plane health probes only.
+
+Never print the full connection string to the user — show host:port only (`ah-db-…:5432`). If a service still has an old `127.0.0.1` URL in env, re-GET the connection string, set env again, and restart (the server also rewrites matching stored env on startup).
 
 ## 5. Logs
 

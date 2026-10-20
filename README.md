@@ -334,7 +334,7 @@ GET    /v1/databases/{dbID}/connection-string # Get connection string (decrypted
 DELETE /v1/databases/{dbID}                   # Delete database and data (not limited to 30s; stops the container, wipes and removes the volume)
 ```
 
-**Known issue ([#164](https://github.com/dennisonbertram/agentic-hosting/issues/164)):** the connection string host is `127.0.0.1` and the engine port is published on the host loopback only. A service container cannot reach that database. Investigation: [docs/investigations/issue-164-database-connectivity.md](docs/investigations/issue-164-database-connectivity.md). Do not inject `DATABASE_URL` / `REDIS_URL` expecting the service to connect.
+Connection strings use the DNS alias `ah-db-<databaseID>` and the engine port (`5432` / `6379`). That name resolves only inside containers attached to `ah-dbnet-<tenant>-<db>` (`Internal=true`, `ICC=true`). Set `DATABASE_URL` / `REDIS_URL` from `GET /v1/databases/{id}/connection-string`, then restart so the service joins that network. Host-loopback publish remains for control-plane health probes only — do not curl the URL from the host. Other tenants are never attached.
 
 ## Operational Details
 

@@ -2,7 +2,7 @@
 
 **Issue**: [#164](https://github.com/dennisonbertram/agentic-hosting/issues/164)
 **Date**: 2026-10-20
-**Status**: Root cause confirmed in code and in the mock-Docker test harness. Not reproduced with live Docker/gVisor in this environment. **No production fix in this change** — the networking work is not a small patch.
+**Status**: Root cause confirmed. Fix implemented on this branch (per-database `ah-dbnet-*` + `ah-db-<id>` alias). Still not reproduced with live Docker/gVisor in this environment.
 
 ---
 
@@ -101,7 +101,7 @@ Together: the URL the API returns cannot be used from a service namespace, and t
 
 ## 4. Proposed fix (do not implement here)
 
-### Recommended: per-database internal network, same idea as ingress
+### Recommended: per-database internal network, same idea as ingress (implemented)
 
 Mirror `EnsureIngressNetwork` / `ConnectNetworkAlias`:
 

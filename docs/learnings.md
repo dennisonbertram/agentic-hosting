@@ -75,3 +75,7 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **Host `SELECT 1` is not a service-path test.** `waitForPostgres` / `waitForRedis` dial host loopback; that is the control plane, not a gVisor service namespace.
 - **Default-bridge ICC** means two database containers can reach each other’s *container* IPs even though published ports are loopback-only. Passwords are the real cross-DB isolation today.
 - **Hostname-only or HostIP-only patches will not fix the issue.** Need overlay DNS + ICC=true on a network that is not the shared tenant bridge (or accept intra-tenant lateral movement).
+- **Fix shipped as per-database `ah-dbnet-*` (Internal + ICC) + `ah-db-<id>` alias.** Tenant bridges stay ICC=false. Host loopback publish stays for probes. Attach is env-link (alias in service env), so another tenant cannot join even with a copied URL.
+- **Tradeoff:** two services on the same DB network can talk to each other. Same class as Traefik ingress pair networks.
+- **`service_env` is a separate ciphertext.** Rewriting `databases.connection_string_encrypted` is not enough; matching env values must be rewritten too, and the running container still needs a restart to pick up the new URL and join the network.
+- **Network names must stay ≤63 characters.** Full tenant ID + db ID overflows (`ah-dbnet-` + 32 + 1 + 32 = 73). Truncate the tenant ID first; keep the globally unique database ID.

@@ -31,25 +31,37 @@ func TestDatabaseHostConfig_Hardened(t *testing.T) {
 	}
 }
 
-// TestIssue164_DatabasePublishedOnHostLoopbackOnly documents the topology that
-// makes a service container unable to reach its managed database (#164).
-// databaseHostConfig publishes the engine port on 127.0.0.1 and does not set
-// NetworkMode, so the container lands on Docker's default bridge rather than
-// the tenant's internal network. A service on ah-tenant-<id> (Internal=true,
-// ICC=false) has its own loopback, so 127.0.0.1 in DATABASE_URL is itself.
-func TestIssue164_DatabasePublishedOnHostLoopbackOnly(t *testing.T) {
-	h := databaseHostConfig(RunDatabaseConfig{HostPort: 5456, ContainerPort: 5432, VolumeName: "v", MountPath: "/data"}, "5432/tcp")
+// TestIssue164_DatabaseKeepsHostLoopbackAndJoinsDatabaseNetwork is the fixed
+// topology for #164: health probes still use 127.0.0.1 (never 0.0.0.0), and
+// managed databases sit on ah-dbnet-* instead of the default bridge.
+func TestIssue164_DatabaseKeepsHostLoopbackAndJoinsDatabaseNetwork(t *testing.T) {
+	netName := DatabaseNetworkName("tenant-1", "db-1")
+	h := databaseHostConfig(RunDatabaseConfig{
+		HostPort: 5456, ContainerPort: 5432, VolumeName: "v", MountPath: "/data",
+		NetworkName: netName, NetworkAlias: DatabaseAlias("db-1"),
+	}, "5432/tcp")
 	bindings := h.PortBindings[nat.Port("5432/tcp")]
 	if len(bindings) != 1 {
 		t.Fatalf("PortBindings[5432/tcp] = %#v, want one loopback binding", bindings)
 	}
 	if bindings[0].HostIP != "127.0.0.1" {
-		t.Errorf("HostIP = %q, want 127.0.0.1 (issue #164: service containers cannot use this address)", bindings[0].HostIP)
+		t.Errorf("HostIP = %q, want 127.0.0.1 for control-plane probes", bindings[0].HostIP)
+	}
+	if bindings[0].HostIP == "0.0.0.0" {
+		t.Fatal("must not bind the engine on 0.0.0.0")
 	}
 	if bindings[0].HostPort != "5456" {
 		t.Errorf("HostPort = %q, want 5456", bindings[0].HostPort)
 	}
-	if h.NetworkMode != "" {
-		t.Errorf("NetworkMode = %q, want empty (default bridge, not a tenant network)", h.NetworkMode)
+	if string(h.NetworkMode) != netName {
+		t.Errorf("NetworkMode = %q, want %q", h.NetworkMode, netName)
+	}
+
+	kanban := databaseHostConfig(RunDatabaseConfig{HostPort: 7200, ContainerPort: 3000, VolumeName: "v", MountPath: "/data"}, "3000/tcp")
+	if kanban.NetworkMode != "" {
+		t.Errorf("kanban NetworkMode = %q, want empty (loopback-only, no dbnet)", kanban.NetworkMode)
+	}
+	if kanban.PortBindings[nat.Port("3000/tcp")][0].HostIP != "127.0.0.1" {
+		t.Fatal("kanban must stay on host loopback")
 	}
 }

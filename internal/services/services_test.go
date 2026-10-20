@@ -804,3 +804,100 @@ func TestDeployImage_RemoveFailureFallsBackToNameCleanup(t *testing.T) {
 	require.NoError(t, mgr.DeployImage(ctx, "tenant-1", svc.ID, "img:2", ""))
 	assert.Equal(t, []string{"ah-tenant-1-" + svc.ID}, mock.StopAndRemoveByNameCalls)
 }
+
+func TestIssue164_DeployAttachesOnlyMatchingTenantDatabaseNetwork(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+
+	ownDB := "db0123456789abcdef0123456789abcd"
+	otherDB := "dbother000000000000000000000001"
+	_, err := mgr.db.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-1', 'appdb', 'postgres', 'ready', ?, 5456, 'ah', 'ah', 'x', 'x', 'vol', 1, 1)`,
+		ownDB, docker.DatabaseAlias(ownDB),
+	)
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES ('tenant-2', 'Other', 'o@example.com', 'active', 1, 1)`,
+	)
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(`INSERT INTO tenant_quotas (tenant_id, max_services) VALUES ('tenant-2', 10)`)
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-2', 'otherdb', 'postgres', 'ready', ?, 5457, 'ah', 'ah', 'x', 'x', 'vol2', 1, 1)`,
+		otherDB, docker.DatabaseAlias(otherDB),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.SetEnv(ctx, "tenant-1", svc.ID, map[string]string{
+		"DATABASE_URL": "postgres://ah:pw@" + docker.DatabaseAlias(ownDB) + ":5432/ah?sslmode=disable",
+		"STOLEN_URL":   "postgres://ah:pw@" + docker.DatabaseAlias(otherDB) + ":5432/ah?sslmode=disable",
+	}))
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+
+	wantNet := docker.DatabaseNetworkName("tenant-1", ownDB)
+	assert.Contains(t, mock.EnsureDatabaseNetworkCalls, wantNet)
+	assert.NotContains(t, mock.EnsureDatabaseNetworkCalls, docker.DatabaseNetworkName("tenant-2", otherDB))
+	assert.Contains(t, mock.ConnectNetworkCalls, [2]string{"dbnet-" + wantNet, "mock-container-" + svc.ID})
+}
+
+func TestIssue164_OtherTenantServiceCannotJoinDatabaseNetwork(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, _ := newTestMgr(t, mock, "")
+	ctx := context.Background()
+
+	ownDB := "db0123456789abcdef0123456789abcd"
+	_, err := mgr.db.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-1', 'appdb', 'postgres', 'ready', ?, 5456, 'ah', 'ah', 'x', 'x', 'vol', 1, 1)`,
+		ownDB, docker.DatabaseAlias(ownDB),
+	)
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES ('tenant-2', 'Other', 'o@example.com', 'active', 1, 1)`,
+	)
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(`INSERT INTO tenant_quotas (tenant_id, max_services) VALUES ('tenant-2', 10)`)
+	require.NoError(t, err)
+
+	other, err := mgr.Create(ctx, "tenant-2", CreateRequest{Name: "other-app", Image: "nginx:latest", Port: 8080})
+	require.NoError(t, err)
+	require.NoError(t, mgr.SetEnv(ctx, "tenant-2", other.ID, map[string]string{
+		"DATABASE_URL": "postgres://ah:pw@" + docker.DatabaseAlias(ownDB) + ":5432/ah?sslmode=disable",
+	}))
+	require.NoError(t, mgr.Deploy(ctx, "tenant-2", other.ID))
+
+	assert.NotContains(t, mock.EnsureDatabaseNetworkCalls, docker.DatabaseNetworkName("tenant-1", ownDB))
+	for _, call := range mock.ConnectNetworkCalls {
+		assert.NotContains(t, call[0], "ah-dbnet-tenant-1")
+	}
+}
+
+func TestIssue164_RestartAttachesDatabaseNetwork(t *testing.T) {
+	mock := &testutil.MockDockerClient{}
+	mgr, _, svc := newTestMgr(t, mock, "")
+	ctx := context.Background()
+	dbID := "db0123456789abcdef0123456789abcd"
+	_, err := mgr.db.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-1', 'appdb', 'postgres', 'ready', ?, 5456, 'ah', 'ah', 'x', 'x', 'vol', 1, 1)`,
+		dbID, docker.DatabaseAlias(dbID),
+	)
+	require.NoError(t, err)
+	require.NoError(t, mgr.Deploy(ctx, "tenant-1", svc.ID))
+	require.NoError(t, mgr.SetEnv(ctx, "tenant-1", svc.ID, map[string]string{
+		"DATABASE_URL": "postgres://ah:pw@" + docker.DatabaseAlias(dbID) + ":5432/ah?sslmode=disable",
+	}))
+	mock.EnsureDatabaseNetworkCalls = nil
+	mock.ConnectNetworkCalls = nil
+	require.NoError(t, mgr.Restart(ctx, "tenant-1", svc.ID))
+	wantNet := docker.DatabaseNetworkName("tenant-1", dbID)
+	assert.Contains(t, mock.EnsureDatabaseNetworkCalls, wantNet)
+	assert.Contains(t, mock.ConnectNetworkCalls, [2]string{"dbnet-" + wantNet, "mock-container-" + svc.ID})
+}

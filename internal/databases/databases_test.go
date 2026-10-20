@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -396,28 +397,29 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	assert.Equal(t, []string{"postgres:16-alpine", "postgres:16-alpine"}, dockerClient.PullImageCalls)
 }
 
-// TestIssue164_CreateConnectionStringUsesHostLoopbackAndSkipsTenantNetwork
-// reproduces issue #164: the API returns a connection string whose host is
-// 127.0.0.1, stored that way in the databases row, and Create never attaches
-// the container to the tenant network. Combined with databaseHostConfig
-// publishing only on host loopback, a service container cannot use this URL.
-func TestIssue164_CreateConnectionStringUsesHostLoopbackAndSkipsTenantNetwork(t *testing.T) {
+// TestIssue164_CreateUsesDatabaseAliasAndPerDatabaseNetwork is the fixed
+// behavior for #164: the connection string uses ah-db-<id> and the engine
+// port, and Create places the container on ah-dbnet-<tenant>-<db>.
+func TestIssue164_CreateUsesDatabaseAliasAndPerDatabaseNetwork(t *testing.T) {
 	for _, tc := range []struct {
 		dbType     string
 		wantScheme string
 		wantPath   string
+		enginePort int
 		fakeReady  func(t *testing.T, port int)
 	}{
 		{
 			dbType:     "postgres",
 			wantScheme: "postgres://",
 			wantPath:   "/ah?sslmode=disable",
+			enginePort: 5432,
 			fakeReady:  startFakePostgresOnPort,
 		},
 		{
 			dbType:     "redis",
 			wantScheme: "redis://",
 			wantPath:   "/0",
+			enginePort: 6379,
 			fakeReady:  startFakeRedisOnPort,
 		},
 	} {
@@ -435,26 +437,115 @@ func TestIssue164_CreateConnectionStringUsesHostLoopbackAndSkipsTenantNetwork(t 
 			require.NoError(t, err)
 			require.Equal(t, "ready", db.Status)
 
-			assert.Equal(t, "127.0.0.1", db.Host, "Create response host")
+			alias := docker.DatabaseAlias(db.ID)
+			assert.Equal(t, alias, db.Host)
+			assert.Equal(t, tc.enginePort, db.Port)
 			require.True(t, strings.HasPrefix(db.ConnectionString, tc.wantScheme), db.ConnectionString)
-			assert.Contains(t, db.ConnectionString, "@127.0.0.1:")
-			assert.True(t, strings.HasSuffix(db.ConnectionString, strconv.Itoa(db.Port)+tc.wantPath), db.ConnectionString)
+			assert.Contains(t, db.ConnectionString, "@"+alias+":"+strconv.Itoa(tc.enginePort))
+			assert.NotContains(t, db.ConnectionString, "127.0.0.1")
+			assert.True(t, strings.HasSuffix(db.ConnectionString, strconv.Itoa(tc.enginePort)+tc.wantPath), db.ConnectionString)
 
 			var storedHost string
-			require.NoError(t, stateDB.QueryRow(`SELECT host FROM databases WHERE id = ?`, db.ID).Scan(&storedHost))
-			assert.Equal(t, "127.0.0.1", storedHost)
+			var storedPort int
+			require.NoError(t, stateDB.QueryRow(`SELECT host, port FROM databases WHERE id = ?`, db.ID).Scan(&storedHost, &storedPort))
+			assert.Equal(t, alias, storedHost)
+			assert.NotZero(t, storedPort, "host probe port remains allocated")
 
 			got, err := mgr.GetConnectionString(context.Background(), "tenant-1", db.ID)
 			require.NoError(t, err)
 			assert.Equal(t, db.ConnectionString, got, "stored connection string must match create response")
 
-			assert.Empty(t, mock.EnsureNetworkCalls, "Create must not create a tenant/data network for the database")
-			assert.Empty(t, mock.EnsureIngressNetworkCalls)
-			assert.Empty(t, mock.ConnectNetworkCalls, "database container is not attached to any extra network")
-			assert.Empty(t, mock.ConnectNetworkAliasCalls)
-			assert.Equal(t, 1, mock.RunDatabaseCalls)
+			wantNet := docker.DatabaseNetworkName("tenant-1", db.ID)
+			assert.Contains(t, mock.EnsureDatabaseNetworkCalls, wantNet)
+			assert.NotContains(t, mock.EnsureNetworkCalls, docker.TenantNetworkName("tenant-1"),
+				"database must not join the ICC=false tenant bridge")
+			require.Len(t, mock.RunDatabaseConfigs, 1)
+			assert.Equal(t, wantNet, mock.RunDatabaseConfigs[0].NetworkName)
+			assert.Equal(t, alias, mock.RunDatabaseConfigs[0].NetworkAlias)
+			assert.Equal(t, tc.enginePort, mock.RunDatabaseConfigs[0].ContainerPort)
 		})
 	}
+}
+
+func TestIssue164_OtherTenantCannotJoinDatabaseNetwork(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 1)`,
+		"tenant-2", "Other", "other@example.com",
+	)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id, max_databases) VALUES (?, ?)`, "tenant-2", 5)
+	require.NoError(t, err)
+
+	mock := &testutil.MockDockerClient{
+		RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			startFakePostgresOnPort(t, cfg.HostPort)
+			return "container-" + cfg.Name, nil
+		},
+	}
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+	a, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "a-db", Type: "postgres"})
+	require.NoError(t, err)
+	b, err := mgr.Create(context.Background(), "tenant-2", CreateRequest{Name: "b-db", Type: "postgres"})
+	require.NoError(t, err)
+
+	netA := docker.DatabaseNetworkName("tenant-1", a.ID)
+	netB := docker.DatabaseNetworkName("tenant-2", b.ID)
+	assert.NotEqual(t, netA, netB)
+	assert.Contains(t, mock.EnsureDatabaseNetworkCalls, netA)
+	assert.Contains(t, mock.EnsureDatabaseNetworkCalls, netB)
+	assert.NotEqual(t, mock.RunDatabaseConfigs[0].NetworkName, mock.RunDatabaseConfigs[1].NetworkName)
+	assert.NotContains(t, mock.EnsureDatabaseNetworkCalls, docker.DatabaseNetworkName("tenant-2", a.ID))
+	assert.NotContains(t, mock.EnsureDatabaseNetworkCalls, docker.DatabaseNetworkName("tenant-1", b.ID))
+}
+
+func TestMigrateLoopbackURLsRewritesDatabaseAndServiceEnv(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	dbID := "db0123456789abcdef0123456789abcd"
+	oldURL := "postgres://ah:secretpw@127.0.0.1:5456/ah?sslmode=disable"
+	connEnc, err := crypto.Encrypt([]byte(oldURL), key)
+	require.NoError(t, err)
+	passEnc, err := crypto.Encrypt([]byte("secretpw"), key)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-1', 'legacy', 'postgres', 'ready', '127.0.0.1', 5456, 'ah', 'ah', ?, ?, 'vol', 10, 10)`,
+		dbID, passEnc, connEnc,
+	)
+	require.NoError(t, err)
+
+	_, err = stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, created_at, updated_at)
+		 VALUES ('svc-legacy', 'tenant-1', 'app', 'running', 'nginx:latest', 8080, 1, 1)`,
+	)
+	require.NoError(t, err)
+	envEnc, err := crypto.Encrypt([]byte(oldURL), key)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO service_env (service_id, key, value_encrypted, created_at, updated_at)
+		 VALUES ('svc-legacy', 'DATABASE_URL', ?, 1, 1)`, envEnc,
+	)
+	require.NoError(t, err)
+
+	mgr := NewManager(stateDB, &testutil.MockDockerClient{}, key)
+	got, err := mgr.GetConnectionString(context.Background(), "tenant-1", dbID)
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://ah:secretpw@"+docker.DatabaseAlias(dbID)+":5432/ah?sslmode=disable", got)
+
+	var host string
+	require.NoError(t, stateDB.QueryRow(`SELECT host FROM databases WHERE id = ?`, dbID).Scan(&host))
+	assert.Equal(t, docker.DatabaseAlias(dbID), host)
+
+	var envEnc2 string
+	require.NoError(t, stateDB.QueryRow(`SELECT value_encrypted FROM service_env WHERE service_id = ? AND key = ?`,
+		"svc-legacy", "DATABASE_URL").Scan(&envEnc2))
+	plain, err := crypto.Decrypt(envEnc2, key)
+	require.NoError(t, err)
+	assert.Equal(t, got, string(plain))
 }
 
 func startFakePostgresOnPort(t *testing.T, port int) {
@@ -586,6 +677,7 @@ func TestDelete_WipesVolumeBeforeRemoval(t *testing.T) {
 		"WipeVolume must be called before RemoveVolume")
 	assert.Equal(t, expectedVolume, wipeVolume,
 		"WipeVolume must receive the database's volume name")
+	assert.Contains(t, dockerClient.RemoveNetworkCalls, docker.DatabaseNetworkName("tenant-1", db.ID))
 }
 
 // ---------------------------------------------------------------------------

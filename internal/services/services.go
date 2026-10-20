@@ -738,6 +738,13 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container start failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
 	}
+	if err := m.attachDatabaseNetworks(ctx, tenantID, containerID, envVars); err != nil {
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("database network attach failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
+		return apierr.DeployFailed(fmt.Errorf("attach database networks: %w", err))
+	}
 
 	{
 		now := time.Now().Unix()
@@ -932,6 +939,15 @@ func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
 	if err != nil {
 		_ = m.docker.StopContainer(ctx, svc.ContainerID)
 		return fmt.Errorf("restore service ingress network: %w", err)
+	}
+	envVars, envErr := m.getEnvVars(ctx, serviceID)
+	if envErr != nil {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		return fmt.Errorf("load env vars for database networks: %w", envErr)
+	}
+	if err := m.attachDatabaseNetworks(ctx, tenantID, svc.ContainerID, envVars); err != nil {
+		_ = m.docker.StopContainer(ctx, svc.ContainerID)
+		return fmt.Errorf("restore database networks: %w", err)
 	}
 	if err := m.writeTraefikRoute(serviceID, tenantID, svc.DNSLabel, m.baseDomain, port); err != nil {
 		_ = m.docker.StopContainer(ctx, svc.ContainerID)
@@ -1149,6 +1165,15 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 			log.Printf("WARNING: failed to delete traefik route for service %s after restart failure: %v", serviceID, traefikErr)
 		}
 		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
+	}
+	if err := m.attachDatabaseNetworks(opCtx, tenantID, containerID, envVars); err != nil {
+		_ = m.docker.StopContainer(opCtx, containerID)
+		_ = m.docker.RemoveContainer(opCtx, containerID)
+		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
+		if traefikErr := m.deleteTraefikRoute(serviceID); traefikErr != nil {
+			log.Printf("WARNING: failed to delete traefik route for service %s after restart attach failure: %v", serviceID, traefikErr)
+		}
+		return apierr.DeployFailed(fmt.Errorf("attach database networks: %w", err))
 	}
 
 	dbUpdRes, dbUpdErr := m.db.ExecContext(opCtx,

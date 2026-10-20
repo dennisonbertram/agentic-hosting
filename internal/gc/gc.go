@@ -153,7 +153,7 @@ func (g *GC) collectOnce(ctx context.Context) error {
 		removed += n
 	}
 
-	// 5. Orphaned tenant and per-workload ingress networks.
+	// 5. Orphaned tenant, per-workload ingress, and per-database networks.
 	orphanedNets, netErr := g.findOrphanedNetworks(ctx)
 	if netErr != nil {
 		log.Printf("gc: orphaned network check failed: %v", netErr)
@@ -363,10 +363,11 @@ const minNetworkAge = 15 * time.Minute
 // minImageAge protects images from a build or snapshot that is not yet recorded in the DB.
 const minImageAge = time.Hour
 
-// findOrphanedNetworks lists tenant and per-workload ingress networks with no
-// workload endpoint, older than minNetworkAge and not owned by a persisted
-// workload. A single Traefik endpoint is also orphaned. Tenant networks contain
-// only workloads; ingress networks contain Traefik plus one workload while active.
+// findOrphanedNetworks lists tenant, per-workload ingress, and per-database
+// networks with no workload endpoint, older than minNetworkAge and not owned
+// by a persisted workload. A single Traefik endpoint is also orphaned. Tenant
+// networks contain only workloads; ingress networks contain Traefik plus one
+// workload while active; database networks contain the engine plus linked services.
 func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, error) {
 	ownedNetworks, err := g.persistedWorkloadNetworks(ctx)
 	if err != nil {
@@ -379,7 +380,7 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 
 	var orphaned []docker.NetworkInfo
 	for _, net := range networks {
-		if !strings.HasPrefix(net.Name, "ah-tenant-") && !strings.HasPrefix(net.Name, "ah-ingress-") {
+		if !strings.HasPrefix(net.Name, "ah-tenant-") && !strings.HasPrefix(net.Name, "ah-ingress-") && !strings.HasPrefix(net.Name, "ah-dbnet-") {
 			continue
 		}
 		if _, owned := ownedNetworks[net.Name]; owned {
@@ -472,6 +473,26 @@ func (g *GC) persistedWorkloadNetworks(ctx context.Context) (map[string]struct{}
 	}
 	if err := environments.Close(); err != nil {
 		return nil, fmt.Errorf("close environment ingress owners: %w", err)
+	}
+
+	databases, err := g.db.QueryContext(ctx, `SELECT tenant_id, id FROM databases WHERE status != 'failed'`)
+	if err != nil {
+		return nil, fmt.Errorf("query database network ownership: %w", err)
+	}
+	for databases.Next() {
+		var tenantID, dbID string
+		if err := databases.Scan(&tenantID, &dbID); err != nil {
+			_ = databases.Close()
+			return nil, fmt.Errorf("scan database network owner: %w", err)
+		}
+		owned[docker.DatabaseNetworkName(tenantID, dbID)] = struct{}{}
+	}
+	if err := databases.Err(); err != nil {
+		_ = databases.Close()
+		return nil, fmt.Errorf("read database network owners: %w", err)
+	}
+	if err := databases.Close(); err != nil {
+		return nil, fmt.Errorf("close database network owners: %w", err)
 	}
 	return owned, nil
 }

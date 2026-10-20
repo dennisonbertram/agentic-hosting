@@ -63,6 +63,38 @@ func TestCreate_MarkFailedErrorKeepsNetwork(t *testing.T) {
 	assert.Empty(t, mock.RemoveNetworkCalls, "a DB error must not be treated as 'row gone'")
 }
 
+// If the provisioning -> ready transition fails with a database error after a
+// healthy probe, the row may still exist and own its per-database network.
+// Create must mark it failed (freeing quota), remove the container and volume,
+// and keep the network for Delete rather than treating the row as gone.
+func TestCreate_ReadyTransitionErrorMarksFailedAndKeepsNetwork(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedDatabaseTestData(t, stateDB, 5)
+	_, err := stateDB.Exec(`CREATE TRIGGER fail_ready BEFORE UPDATE OF status ON databases
+		WHEN NEW.status = 'ready'
+		BEGIN SELECT RAISE(ABORT, 'injected ready failure'); END`)
+	require.NoError(t, err)
+	mock := &testutil.MockDockerClient{
+		RunDatabaseFn: func(_ context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+			startFakeRedisOnPort(t, cfg.HostPort)
+			return "c-unready", nil
+		},
+	}
+	m := NewManager(stateDB, mock, testKey)
+
+	_, err = m.Create(context.Background(), "tenant-1", CreateRequest{Name: "unready", Type: "redis"})
+	require.ErrorContains(t, err, "mark database ready failed")
+	assert.NotContains(t, err.Error(), "deleted during provisioning")
+	assert.Contains(t, mock.RemoveContainerCalls, "c-unready")
+	assert.Len(t, mock.RemoveVolumeCalls, 1)
+	require.Len(t, mock.EnsureDatabaseNetworkCalls, 1)
+	assert.Empty(t, mock.RemoveNetworkCalls, "the surviving row still owns its network")
+
+	var status string
+	require.NoError(t, stateDB.QueryRow(`SELECT status FROM databases WHERE name = 'unready'`).Scan(&status))
+	assert.Equal(t, "failed", status)
+}
+
 func TestMarkFailed_ReportsRowGoneOnlyWhenMissing(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	seedDatabaseTestData(t, stateDB, 5)

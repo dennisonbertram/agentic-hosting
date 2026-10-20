@@ -90,6 +90,24 @@ func TestBuildLogDrainer_BareCRStreamsProgressAndCRLFCountsOnce(t *testing.T) {
 	}
 	d.flush(cb)
 	assert.Equal(t, []string{"10%", "20%", "30%", "done", "", "last"}, got)
+
+	// Blank lines in CRLF output must survive just as they do in LF output,
+	// including when the CRLF pair is split across reads.
+	for _, chunks := range [][]string{
+		{"a\r\n\r\nb\n"},
+		{"a\r", "", "\n\r", "", "\nb\n"},
+		{"a\n\nb\n"},
+	} {
+		d := &buildLogDrainer{reader: bufio.NewReader(&chunkReader{chunks: chunks})}
+		var lines []string
+		cb := func(l string) { lines = append(lines, l) }
+		for i := 0; i < len(chunks)+1; i++ {
+			_, err := d.drain(cb)
+			require.NoError(t, err)
+		}
+		d.flush(cb)
+		assert.Equal(t, []string{"a", "", "b"}, lines, "chunks %q", chunks)
+	}
 }
 
 // errAfterReader returns data, then a non-EOF error.

@@ -298,9 +298,11 @@ type buildLogDrainer struct {
 	reader  *bufio.Reader
 	pending []byte
 	discard bool
-	// afterCR is set when the previous byte was a '\r', so the '\n' of a
-	// CRLF pair does not emit a second, empty line.
-	afterCR bool
+	// crEmitted is set when the previous byte was a '\r' that ended a
+	// non-empty line, so the '\n' of that CRLF pair does not emit a second,
+	// empty line. A CRLF with nothing pending (a blank CRLF line) still emits
+	// an empty line on its '\n', matching LF output.
+	crEmitted bool
 }
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
@@ -322,16 +324,17 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 			return read, err
 		}
 		read++
-		afterCR := d.afterCR
-		d.afterCR = b == '\r'
+		crEmitted := d.crEmitted
+		d.crEmitted = false
 		switch {
 		case b == '\r':
 			if len(d.pending) > 0 {
 				d.emit(logCb)
+				d.crEmitted = true
 			}
 			continue
 		case b == '\n':
-			if !afterCR {
+			if !crEmitted {
 				d.emit(logCb)
 			}
 			continue

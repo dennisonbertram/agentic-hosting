@@ -32,6 +32,7 @@ import (
 type Client interface {
 	EnsureNetwork(ctx context.Context, name string) (string, error)
 	EnsureIngressNetwork(ctx context.Context, name string) (string, error)
+	EnsureDatabaseNetwork(ctx context.Context, name string) (string, error)
 	ConnectNetwork(ctx context.Context, networkID, containerID string) error
 	ConnectNetworkAlias(ctx context.Context, networkID, containerID, alias string) error
 	NetworkDisconnect(ctx context.Context, networkID, containerID string) error
@@ -140,6 +141,13 @@ func (c *DockerClient) EnsureNetwork(ctx context.Context, name string) (string, 
 // routed workload. ICC is enabled on this dedicated pair network so the proxy
 // can reach the workload; tenant and pool networks retain ICC=false.
 func (c *DockerClient) EnsureIngressNetwork(ctx context.Context, name string) (string, error) {
+	return c.ensureBridgeNetwork(ctx, name, true)
+}
+
+// EnsureDatabaseNetwork creates an internal bridge used only by one managed
+// database and the tenant services that have its connection string. ICC is
+// enabled so those workloads can reach the engine; tenant bridges stay ICC=false.
+func (c *DockerClient) EnsureDatabaseNetwork(ctx context.Context, name string) (string, error) {
 	return c.ensureBridgeNetwork(ctx, name, true)
 }
 
@@ -296,6 +304,60 @@ func EnvironmentIngressAlias(tenantID, environmentID string) string {
 // ingress networks, used during tenant cleanup.
 func TenantIngressNetworkPrefix(tenantID string) string {
 	return "ah-ingress-" + tenantID + "-"
+}
+
+const (
+	databaseNetworkPrefix = "ah-dbnet-"
+	databaseAliasPrefix   = "ah-db-"
+	dockerDNSLabelLimit   = 63
+)
+
+// DatabaseNetworkName returns the per-database internal network
+// (Internal=true, ICC=true). The name is kept at or under Docker's 63-character
+// DNS-label limit by shortening the tenant ID first; the database ID is
+// globally unique and is kept as complete as possible.
+func DatabaseNetworkName(tenantID, dbID string) string {
+	name := databaseNetworkPrefix + tenantID + "-" + dbID
+	if len(name) <= dockerDNSLabelLimit {
+		return name
+	}
+	maxDB := dockerDNSLabelLimit - len(databaseNetworkPrefix)
+	if maxDB < 1 {
+		return databaseNetworkPrefix
+	}
+	if len(dbID) >= maxDB {
+		return databaseNetworkPrefix + dbID[:maxDB]
+	}
+	maxTenant := dockerDNSLabelLimit - len(databaseNetworkPrefix) - 1 - len(dbID)
+	if maxTenant < 0 {
+		maxTenant = 0
+	}
+	if len(tenantID) > maxTenant {
+		tenantID = tenantID[:maxTenant]
+	}
+	return databaseNetworkPrefix + tenantID + "-" + dbID
+}
+
+// DatabaseAlias is the network-scoped DNS name used in connection strings.
+// Database IDs are globally unique, so the tenant ID is omitted to stay under
+// Docker's 63-character DNS-label limit.
+func DatabaseAlias(dbID string) string {
+	alias := databaseAliasPrefix + dbID
+	if len(alias) > dockerDNSLabelLimit {
+		return alias[:dockerDNSLabelLimit]
+	}
+	return alias
+}
+
+// TenantDatabaseNetworkPrefix is the prefix of a tenant's per-database networks.
+func TenantDatabaseNetworkPrefix(tenantID string) string {
+	name := DatabaseNetworkName(tenantID, "")
+	return strings.TrimSuffix(name, "-") + "-"
+}
+
+// IsDatabaseNetwork reports whether name is a managed per-database network.
+func IsDatabaseNetwork(name string) bool {
+	return strings.HasPrefix(name, databaseNetworkPrefix)
 }
 
 // ResourceLimits holds per-container resource constraints from tenant quotas.
@@ -686,6 +748,8 @@ type RunDatabaseConfig struct {
 	MountPath     string
 	Labels        map[string]string // optional: overrides default labels when set
 	User          string            // optional: container user (e.g. "0:0")
+	NetworkName   string            // optional: primary network (managed DBs use ah-dbnet-*)
+	NetworkAlias  string            // optional: DNS alias on NetworkName
 }
 
 // CreateVolume creates a named Docker volume.
@@ -797,8 +861,11 @@ const (
 var databaseCaps = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"}
 
 // databaseHostConfig builds the hardened host config for database containers.
+// Host publish stays on 127.0.0.1 for control-plane health probes. Never bind
+// 0.0.0.0. When NetworkName is set, that internal network is primary so the
+// container is not left on Docker's default bridge.
 func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostConfig {
-	return &container.HostConfig{
+	h := &container.HostConfig{
 		Runtime: "runsc",
 		PortBindings: nat.PortMap{
 			nat.Port(portStr): []nat.PortBinding{
@@ -824,6 +891,10 @@ func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostCo
 		CapDrop: []string{"ALL"},
 		CapAdd:  databaseCaps,
 	}
+	if cfg.NetworkName != "" {
+		h.NetworkMode = container.NetworkMode(cfg.NetworkName)
+	}
+	return h
 }
 
 // pullOrUseLocal pulls img to refresh mutable tags, but tolerates a failed pull
@@ -879,7 +950,16 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 		containerCfg.Cmd = cfg.Cmd
 	}
 
-	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, cfg.Name)
+	var networking *network.NetworkingConfig
+	if cfg.NetworkName != "" && cfg.NetworkAlias != "" {
+		networking = &network.NetworkingConfig{
+			EndpointsConfig: map[string]*network.EndpointSettings{
+				cfg.NetworkName: {Aliases: []string{cfg.NetworkAlias}},
+			},
+		}
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, networking, nil, cfg.Name)
 	if err != nil {
 		return "", fmt.Errorf("create database container: %w", err)
 	}

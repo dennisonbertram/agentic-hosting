@@ -1,6 +1,6 @@
 # Database Provisioning — UX Path Stories
 
-Database provisioning enables tenants to provision managed Postgres and Redis databases with automatic volume management, health checking, and secure deletion. All databases run in gVisor-isolated containers on the tenant's private network, with encrypted credentials and connection strings.
+Database provisioning enables tenants to provision managed Postgres and Redis databases with automatic volume management, health checking, and secure deletion. All databases run in gVisor-isolated containers on a per-database internal network (`ah-dbnet-<tenant>-<db>`), with encrypted credentials and connection strings.
 
 ## Story 1: Provision a Postgres Database
 
@@ -28,8 +28,8 @@ Content-Type: application/json
   "name": "chatbot_state_db",
   "type": "postgres",
   "status": "provisioning",
-  "host": "127.0.0.1",
-  "port": 5456,
+  "host": "ah-db-a1b2c3d4e5f6g7h8",
+  "port": 5432,
   "db_name": "ah",
   "username": "ah",
   "created_at": 1710946800,
@@ -39,8 +39,8 @@ Content-Type: application/json
 
 ### Timeline
 - **T+0s:** Request arrives; quota check inside IMMEDIATE transaction; port 5456 claimed and DB record inserted with status `provisioning`
-- **T+1s:** Docker volume `ah-db-a1b2c3d4e5f6g7h8` created; Postgres container starts on `ah-db-tenantid-dbid`
-- **T+3s:** Health check begins: Postgres protocol StartupMessage sent to 127.0.0.1:5456
+- **T+1s:** Docker volume `ah-db-a1b2c3d4e5f6g7h8` created; internal network `ah-dbnet-<tenant>-<db>` created (`Internal=true`, `ICC=true`); Postgres starts with DNS alias `ah-db-a1b2c3d4e5f6g7h8`
+- **T+3s:** Health check begins: Postgres protocol StartupMessage sent to host loopback `127.0.0.1:5456` (probe port, not the client URL)
 - **T+4s:** Container responds with AuthenticationOK; health check succeeds
 - **T+5s:** Status updated to `ready`; connection string encrypted and returned
 - **T+6s:** Agent service can now connect via environment variable
@@ -48,7 +48,7 @@ Content-Type: application/json
 ### Key Details
 - **Port allocation is atomic:** UNIQUE constraint on `(tenant_id, port)` prevents race conditions
 - **Health check uses protocol probe:** Raw TCP StartupMessage detects when Postgres process is initialized (not just container TCP accept)
-- **Connection string encrypted:** Format is `postgres://ah:PASSWORD@127.0.0.1:5456/ah?sslmode=disable`; password never returned in list response
+- **Connection string encrypted:** Format is `postgres://ah:PASSWORD@ah-db-<dbID>:5432/ah?sslmode=disable`; password never returned in list response. The URL is for containers on that database network, not for curl from the host.
 - **Stale reconciliation:** On startup, databases stuck in `provisioning` for >3600s are marked `failed`
 
 ---
@@ -79,8 +79,8 @@ Content-Type: application/json
   "name": "embeddings_cache",
   "type": "redis",
   "status": "provisioning",
-  "host": "127.0.0.1",
-  "port": 6467,
+  "host": "ah-db-x9y8z7w6v5u4t3s2",
+  "port": 6379,
   "db_name": null,
   "username": null,
   "created_at": 1710946920,
@@ -97,7 +97,7 @@ Content-Type: application/json
 
 ### Connection String
 ```
-redis://:PASSWORD@127.0.0.1:6467/0
+redis://:PASSWORD@ah-db-x9y8z7w6v5u4t3s2:6379/0
 ```
 
 ### Key Details
@@ -130,7 +130,7 @@ done
 {
   "id": "a1b2c3d4e5f6g7h8",
   "status": "provisioning",
-  "port": 5456
+  "port": 5432
 }
 ```
 
@@ -139,8 +139,8 @@ done
 {
   "id": "a1b2c3d4e5f6g7h8",
   "status": "ready",
-  "port": 5456,
-  "host": "127.0.0.1",
+  "port": 5432,
+  "host": "ah-db-a1b2c3d4e5f6g7h8",
   "db_name": "ah",
   "username": "ah"
 }
@@ -173,7 +173,7 @@ Authorization: Bearer different-key.secret
 ### Response (200 OK)
 ```json
 {
-  "connection_string": "postgres://ah:7f3a9d2e1b4c6f8e0a5d2c9f1b3e5a7c@127.0.0.1:5456/ah?sslmode=disable"
+  "connection_string": "postgres://ah:7f3a9d2e1b4c6f8e0a5d2c9f1b3e5a7c@ah-db-a1b2c3d4e5f6g7h8:5432/ah?sslmode=disable"
 }
 ```
 
@@ -198,7 +198,7 @@ GET /v1/databases/a1b2c3d4e5f6g7h8/connection-string
 Response:
 ```json
 {
-  "connection_string": "postgres://ah:...@127.0.0.1:5456/ah?sslmode=disable"
+  "connection_string": "postgres://ah:...@ah-db-a1b2c3d4e5f6g7h8:5432/ah?sslmode=disable"
 }
 ```
 
@@ -209,14 +209,14 @@ Authorization: Bearer app-key.secret
 Content-Type: application/json
 
 {
-  "DATABASE_URL": "postgres://ah:7f3a9d2e1b4c6f8e0a5d2c9f1b3e5a7c@127.0.0.1:5456/ah?sslmode=disable"
+  "DATABASE_URL": "postgres://ah:7f3a9d2e1b4c6f8e0a5d2c9f1b3e5a7c@ah-db-a1b2c3d4e5f6g7h8:5432/ah?sslmode=disable"
 }
 ```
 
 Response (200 OK):
 ```json
 {
-  "DATABASE_URL": "postgres://ah:****@127.0.0.1:5456/ah?sslmode=disable"
+  "DATABASE_URL": "postgres://ah:****@ah-db-a1b2c3d4e5f6g7h8:5432/ah?sslmode=disable"
 }
 ```
 
@@ -228,7 +228,7 @@ Authorization: Bearer app-key.secret
 
 ### Key Details
 - **Encryption at rest:** Env var stored encrypted in database; only decrypted when service container starts
-- **Tenant network isolation:** Service and database both on `ah-tenant-acme` network; no cross-tenant communication possible
+- **Database network isolation:** Restart attaches the service to `ah-dbnet-<tenant>-<db>` when env contains `ah-db-<id>`. Other tenants never join that network.
 - **Max 100 env vars per service:** Quota enforced on SET endpoint
 - **Secrets not returned in GET:** Service env GET returns masked values (`****`) for secrets; only service container receives plaintext
 - **Restart required:** Env var changes only apply on container start; running containers keep old values until restart
@@ -256,8 +256,8 @@ Authorization: Bearer audit-key.secret
     "name": "chatbot_state_db",
     "type": "postgres",
     "status": "ready",
-    "host": "127.0.0.1",
-    "port": 5456,
+    "host": "ah-db-a1b2c3d4e5f6g7h8",
+    "port": 5432,
     "db_name": "ah",
     "username": "ah",
     "created_at": 1710946800,
@@ -269,8 +269,8 @@ Authorization: Bearer audit-key.secret
     "name": "embeddings_cache",
     "type": "redis",
     "status": "ready",
-    "host": "127.0.0.1",
-    "port": 6467,
+    "host": "ah-db-x9y8z7w6v5u4t3s2",
+    "port": 6379,
     "db_name": null,
     "username": null,
     "created_at": 1710946920,
@@ -444,13 +444,14 @@ except Exception as e:
 ```
 
 ### Result
-**Success (expected):** Service and database are on the same `ah-tenant-acme` internal network; connection succeeds at application startup.
+**Success (expected):** The service is attached to `ah-dbnet-<tenant>-<db>` (`Internal=true`, `ICC=true`) and connects via `ah-db-<dbID>:5432`.
 
 ### Key Details
-- **Network topology:** Both service and database connected to `ah-tenant-X` bridge network (Internal=true, ICC=false means service cannot reach other tenants' databases)
-- **Host resolution:** Container-to-container uses service name (DNS inside Docker bridge), but ah uses direct IP (127.0.0.1) with host ports for simplicity
-- **Port binding:** Database port bound to 127.0.0.1 only (not 0.0.0.0); no external access possible
-- **Traefik isolation:** Traefik is also connected to the tenant network but does NOT proxy database traffic (only HTTP services)
+- **Network topology:** Each database has its own internal network. Tenant services that have the connection string are attached on deploy/restart. Other tenants never join.
+- **Host resolution:** Connection string uses the DNS alias `ah-db-<dbID>` and the container port. It does not work from the host.
+- **Port binding:** Engine port is also published on `127.0.0.1` only (never `0.0.0.0`) so the control plane can probe health.
+- **Lateral movement:** Two services on the same database network can reach each other (ICC=true). That is the same class of tradeoff as the Traefik ingress pair.
+- **Traefik isolation:** Traefik is not on the database network and does not proxy database traffic.
 
 ---
 
@@ -465,7 +466,7 @@ except Exception as e:
 - **Algorithm:** AES-256-GCM (authenticated encryption; tamper-evident)
 - **Stored columns:**
   - `password_encrypted`: Random 32-byte hex password passed to container, encrypted before storage
-  - `connection_string_encrypted`: Full URI (`postgres://ah:PASSWORD@127.0.0.1:PORT/ah`) encrypted before storage
+  - `connection_string_encrypted`: Full URI (`postgres://ah:PASSWORD@ah-db-<dbID>:5432/ah`) encrypted before storage
 - **Decryption on-demand:**
   - Connection string: Decrypted when `GET /databases/{dbID}/connection-string` called
   - Password: Never returned; only used internally during create
@@ -537,7 +538,7 @@ except Exception as e:
 - **Default user:** `ah` (cannot be changed)
 - **Auth:** Username + password
 - **Port range:** 5432–6000 (5432 default; incremented on collision)
-- **Connection string:** `postgres://ah:PASSWORD@127.0.0.1:PORT/ah?sslmode=disable`
+- **Connection string:** `postgres://ah:PASSWORD@ah-db-<dbID>:5432/ah?sslmode=disable`
 - **Volume mount:** `/var/lib/postgresql/data`
 - **Use cases:** Transactional data, relational queries, ACID guarantees, JSON support
 
@@ -545,7 +546,7 @@ except Exception as e:
 - **Image:** redis:7-alpine
 - **Authentication:** Password-only (no username)
 - **Port range:** 6379–7000 (6379 default; incremented on collision)
-- **Connection string:** `redis://:PASSWORD@127.0.0.1:PORT/0`
+- **Connection string:** `redis://:PASSWORD@ah-db-<dbID>:6379/0`
 - **Volume mount:** `/data`
 - **Default DB:** 0 (Redis db 0; hardcoded in connection string)
 - **Use cases:** Caching, sessions, rate limiting, pub/sub (no pub/sub exposed yet; agent code must use other means)

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Managed databases are reachable from tenant services (#164).** Each database gets `ah-dbnet-<tenant>-<db>` (`Internal=true`, `ICC=true`) with DNS alias `ah-db-<id>`. Connection strings use that alias and the container port (`5432` / `6379`). Deploy and restart attach services whose env contains the alias. Host-loopback publish is kept for health probes and never binds `0.0.0.0`. GC knows `ah-dbnet-*`. Existing encrypted URLs and matching `service_env` copies are rewritten on startup; running containers still need a restart.
+
 ### Added
 
 - **API CORS allowlist** so the Pages dashboard can call `https://api.agentic.hosting`. Defaults: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io` (`AH_CORS_ORIGINS` / `--cors-origins`). OPTIONS preflight is handled before auth. `Authorization`, `Content-Type`, and `Idempotency-Key` are allowed. `Vary: Origin` is set. `*` and credentialed wildcards are rejected.

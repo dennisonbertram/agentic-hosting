@@ -334,6 +334,8 @@ GET    /v1/databases/{dbID}/connection-string # Get connection string (decrypted
 DELETE /v1/databases/{dbID}                   # Delete database and data (not limited to 30s; stops the container, wipes and removes the volume)
 ```
 
+Connection strings use the DNS alias `ah-db-<databaseID>` and the engine port (`5432` / `6379`). That name resolves only inside containers attached to `ah-dbnet-<tenant>-<db>` (`Internal=true`, `ICC=true`). Set `DATABASE_URL` / `REDIS_URL` from `GET /v1/databases/{id}/connection-string`, then restart so the service joins that network. Host-loopback publish remains for control-plane health probes only — do not curl the URL from the host. Other tenants are never attached.
+
 ## Operational Details
 
 ### File Layout

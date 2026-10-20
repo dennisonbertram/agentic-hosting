@@ -122,6 +122,13 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("container start failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("run container: %w", err)
 	}
+	if err := m.attachDatabaseNetworks(ctx, tenantID, containerID, envVars); err != nil {
+		_ = m.docker.StopContainer(ctx, containerID)
+		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("database network attach failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
+		return fmt.Errorf("attach database networks: %w", err)
+	}
 
 	now := time.Now().Unix()
 	url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)

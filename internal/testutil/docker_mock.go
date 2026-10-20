@@ -25,10 +25,12 @@ type MockDockerClient struct {
 	mu sync.Mutex // guards the *Calls recorders written by concurrent tests
 
 	// EnsureNetwork
-	EnsureNetworkFn           func(ctx context.Context, name string) (string, error)
-	EnsureNetworkCalls        []string // network names passed
-	EnsureIngressNetworkFn    func(ctx context.Context, name string) (string, error)
-	EnsureIngressNetworkCalls []string // dedicated routed-workload network names
+	EnsureNetworkFn            func(ctx context.Context, name string) (string, error)
+	EnsureNetworkCalls         []string // network names passed
+	EnsureIngressNetworkFn     func(ctx context.Context, name string) (string, error)
+	EnsureIngressNetworkCalls  []string // dedicated routed-workload network names
+	EnsureDatabaseNetworkFn    func(ctx context.Context, name string) (string, error)
+	EnsureDatabaseNetworkCalls []string // per-database ICC=true network names
 
 	// ConnectNetwork
 	ConnectNetworkFn         func(ctx context.Context, networkID, containerID string) error
@@ -126,8 +128,9 @@ type MockDockerClient struct {
 	WipeVolumeCalls []string // volume names wiped
 
 	// RunDatabase
-	RunDatabaseFn    func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error)
-	RunDatabaseCalls int
+	RunDatabaseFn      func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error)
+	RunDatabaseCalls   int
+	RunDatabaseConfigs []docker.RunDatabaseConfig
 
 	// StopAndRemoveByName
 	StopAndRemoveByNameFn    func(ctx context.Context, name string) error
@@ -198,6 +201,16 @@ func (m *MockDockerClient) EnsureIngressNetwork(ctx context.Context, name string
 		return m.EnsureIngressNetworkFn(ctx, name)
 	}
 	return "ingress-" + name, nil
+}
+
+func (m *MockDockerClient) EnsureDatabaseNetwork(ctx context.Context, name string) (string, error) {
+	m.mu.Lock()
+	m.EnsureDatabaseNetworkCalls = append(m.EnsureDatabaseNetworkCalls, name)
+	m.mu.Unlock()
+	if m.EnsureDatabaseNetworkFn != nil {
+		return m.EnsureDatabaseNetworkFn(ctx, name)
+	}
+	return "dbnet-" + name, nil
 }
 
 func (m *MockDockerClient) ConnectNetwork(ctx context.Context, networkID, containerID string) error {
@@ -461,6 +474,7 @@ func (m *MockDockerClient) WipeVolume(ctx context.Context, name string) error {
 func (m *MockDockerClient) RunDatabase(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
 	m.mu.Lock()
 	m.RunDatabaseCalls++
+	m.RunDatabaseConfigs = append(m.RunDatabaseConfigs, cfg)
 	m.mu.Unlock()
 	if m.RunDatabaseFn != nil {
 		return m.RunDatabaseFn(ctx, cfg)

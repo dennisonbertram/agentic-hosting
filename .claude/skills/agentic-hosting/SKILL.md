@@ -213,13 +213,15 @@ CONN=$(curl -s -H "Authorization: Bearer $AH_KEY" \
   $AH_URL/v1/databases/$DB_ID/connection-string \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["connection_string"])')
 
-# Wire to service, then restart
+# Wire to service, then restart (restart attaches the service to ah-dbnet-*)
 curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/env \
   -H "Authorization: Bearer $AH_KEY" -H "Content-Type: application/json" \
   -d "{\"DATABASE_URL\": \"$CONN\"}"
 curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/restart \
   -H "Authorization: Bearer $AH_KEY"
 ```
+
+The URL host is `ah-db-<databaseID>` (port `5432` / `6379`). It works only from that tenant's containers on the database network — not from the host. Never print the full string; show host:port only. Re-GET and re-SET env if a service still has a `127.0.0.1` copy, then restart.
 
 ---
 

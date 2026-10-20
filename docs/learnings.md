@@ -67,3 +67,15 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **ReadonlyRootfs breaks stock nginx.** ah tmpfs covers `/tmp` `/var/run` `/var/tmp` `/run` but not `/var/cache/nginx`. `nginx:alpine` crash-loops under the default security profile. Use a writable-cache image or extra tmpfs; this is independent of InstaBox.
 - **Idle pause is a PaaS footgun.** InstaBox pauses after 30 idle minutes and **public URL hits do not wake the box**. A control plane must `auto-suspend 0`.
 - **Incorrect assumption:** “4 vCPU / 8 GB / Docker / root / public URLs ⇒ stock ah install just works.” Isolation (gVisor) is fine on systrap; **ingress, init, disk, idle pause, and warm pool** are the real mismatches.
+
+## 2026-10-20 — managed database connectivity (#164)
+
+- **Incorrect assumption (ux-paths + some docs):** service and database both sit on `ah-tenant-X`, so `DATABASE_URL` works after env + restart. Create stores `127.0.0.1`, `RunDatabase` publishes that loopback port on the default bridge, and Create never calls `EnsureNetwork` / `ConnectNetwork`.
+- **Second blocker:** tenant bridges are `Internal=true` and `ICC=false`. Putting the DB on `ah-tenant-*` without enabling ICC still drops service-to-database TCP. Ingress already solved this for Traefik with a dedicated ICC=true pair network.
+- **Host `SELECT 1` is not a service-path test.** `waitForPostgres` / `waitForRedis` dial host loopback; that is the control plane, not a gVisor service namespace.
+- **Default-bridge ICC** means two database containers can reach each other’s *container* IPs even though published ports are loopback-only. Passwords are the real cross-DB isolation today.
+- **Hostname-only or HostIP-only patches will not fix the issue.** Need overlay DNS + ICC=true on a network that is not the shared tenant bridge (or accept intra-tenant lateral movement).
+- **Fix shipped as per-database `ah-dbnet-*` (Internal + ICC) + `ah-db-<id>` alias.** Tenant bridges stay ICC=false. Host loopback publish stays for probes. Attach is env-link (alias in service env), so another tenant cannot join even with a copied URL.
+- **Tradeoff:** two services on the same DB network can talk to each other. Same class as Traefik ingress pair networks.
+- **`service_env` is a separate ciphertext.** Rewriting `databases.connection_string_encrypted` is not enough; matching env values must be rewritten too, and the running container still needs a restart to pick up the new URL and join the network.
+- **Network names must stay ≤63 characters.** Full tenant ID + db ID overflows (`ah-dbnet-` + 32 + 1 + 32 = 73). Truncate the tenant ID first; keep the globally unique database ID.

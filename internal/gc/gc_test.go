@@ -367,8 +367,8 @@ func TestFindOrphanedNetworksFailsClosedWhenOwnershipQueryFails(t *testing.T) {
 // Regression tests — TestNetworkCleanup_Regression
 // ---------------------------------------------------------------------------
 
-// Regression: non-ah-tenant networks must never be removed by GC.
-// Only networks matching the "ah-tenant-*" prefix are candidates.
+// Regression: networks that are not ah-tenant-*, ah-ingress-*, or ah-dbnet-*
+// must never be removed by GC.
 func TestNetworkCleanup_Regression_NonTenantNetworksPreserved(t *testing.T) {
 	stateDB := testutil.NewStateDB(t)
 	mock := &testutil.MockDockerClient{
@@ -389,6 +389,40 @@ func TestNetworkCleanup_Regression_NonTenantNetworksPreserved(t *testing.T) {
 
 	assert.Empty(t, mock.NetworkDisconnectCalls, "should not disconnect any non-tenant networks")
 	assert.Empty(t, mock.RemoveNetworkCalls, "should not remove any non-tenant networks")
+}
+
+func TestCollectOnce_RemovesOrphanedDatabaseNetworksAndKeepsOwned(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES ('tenant-1', 'T', 't@example.com', 'active', 1, 1)`,
+	)
+	require.NoError(t, err)
+	ownedDB := "db0123456789abcdef0123456789abcd"
+	_, err = stateDB.Exec(
+		`INSERT INTO databases (id, tenant_id, name, type, status, host, port, db_name, username,
+		 password_encrypted, connection_string_encrypted, volume_name, created_at, updated_at)
+		 VALUES (?, 'tenant-1', 'appdb', 'postgres', 'ready', 'ah-db-x', 5456, 'ah', 'ah', 'x', 'x', 'vol', 1, 1)`,
+		ownedDB,
+	)
+	require.NoError(t, err)
+
+	ownedName := docker.DatabaseNetworkName("tenant-1", ownedDB)
+	orphanName := "ah-dbnet-tenant-1-deleteddb0000000000000000000001"
+	mock := &testutil.MockDockerClient{
+		NetworkListFn: func(ctx context.Context) ([]docker.NetworkInfo, error) {
+			return []docker.NetworkInfo{
+				{ID: "net-owned", Name: ownedName, Containers: 0},
+				{ID: "net-orphan", Name: orphanName, Containers: 0},
+				{ID: "net-wrong-prefix", Name: "ah-database-net", Containers: 0},
+			}, nil
+		},
+	}
+
+	g := New(stateDB, mock, 5*time.Minute, t.TempDir())
+	require.NoError(t, g.collectOnce(context.Background()))
+	assert.Contains(t, mock.RemoveNetworkCalls, orphanName)
+	assert.NotContains(t, mock.RemoveNetworkCalls, ownedName)
+	assert.NotContains(t, mock.RemoveNetworkCalls, "ah-database-net")
 }
 
 // Regression: ah-tenant-* networks with zero active services (0 or 1 container

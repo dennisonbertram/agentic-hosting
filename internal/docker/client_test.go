@@ -216,6 +216,35 @@ func TestPerWorkloadIngressNetworkNames(t *testing.T) {
 	}
 }
 
+func TestDatabaseNetworkNameAndAliasFitDockerDNSLabelLimit(t *testing.T) {
+	tenantID := "0123456789abcdef0123456789abcdef"
+	dbID := "fedcba9876543210fedcba9876543210"
+	name := DatabaseNetworkName(tenantID, dbID)
+	alias := DatabaseAlias(dbID)
+	if len(name) > 63 {
+		t.Fatalf("database network name exceeds 63 chars: %q (%d)", name, len(name))
+	}
+	if len(alias) > 63 {
+		t.Fatalf("database alias exceeds 63 chars: %q (%d)", alias, len(alias))
+	}
+	if !strings.HasPrefix(name, "ah-dbnet-") {
+		t.Fatalf("network name = %q", name)
+	}
+	if alias != "ah-db-"+dbID {
+		t.Fatalf("alias = %q", alias)
+	}
+	if !strings.Contains(name, dbID) {
+		t.Fatalf("network name dropped the globally unique database id: %q", name)
+	}
+	other := DatabaseNetworkName("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dbID)
+	if name == other {
+		t.Fatal("different tenants must not share a database network name")
+	}
+	if !IsDatabaseNetwork(name) || IsDatabaseNetwork("ah-tenant-"+tenantID) {
+		t.Fatal("IsDatabaseNetwork prefix check failed")
+	}
+}
+
 func TestPerWorkloadIngressAliasesFitDockerDNSLabelLimit(t *testing.T) {
 	fullID := "0123456789abcdef0123456789abcdef"
 	serviceAlias := ServiceIngressAlias("tenant-with-a-long-id", fullID)
@@ -240,6 +269,10 @@ func TestBridgeNetworkCreateOptionsKeepTenantIsolationAndAllowIngressPair(t *tes
 	ingress := bridgeNetworkCreateOptions(true)
 	if !ingress.Internal || ingress.Driver != "bridge" || ingress.Options["com.docker.network.bridge.enable_icc"] != "true" {
 		t.Fatalf("ingress pair network options do not allow internal proxy traffic: %#v", ingress)
+	}
+	dbnet := bridgeNetworkCreateOptions(true)
+	if !dbnet.Internal || dbnet.Options["com.docker.network.bridge.enable_icc"] != "true" {
+		t.Fatalf("database network options must match ingress (Internal + ICC): %#v", dbnet)
 	}
 }
 

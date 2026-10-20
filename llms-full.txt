@@ -1582,7 +1582,7 @@ A sandbox is a throwaway container with a TTL. The server deletes it (container,
 
 **Network:** egress `none` only. The sandbox is attached only to the tenant's internal network (`Internal`, inter-container traffic off): no internet, no other tenant containers, no other tenants. A sandbox forked with `include_env` gets values such as `DATABASE_URL` but is not attached to database networks, so those connections fail.
 
-**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas.
+**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas and separate name namespaces: a sandbox may share a name with an environment, and names are unique only within each kind (409 names the conflicting kind).
 
 | Method | Path | Notes |
 |--------|------|-------|

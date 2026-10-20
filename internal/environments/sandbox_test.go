@@ -645,6 +645,42 @@ func TestSandboxLogs(t *testing.T) {
 	require.ErrorIs(t, err, apierr.ErrNotFound)
 }
 
+// Regression: environments and sandboxes share a table but not a name
+// namespace. An environment named "scratch" must not block a sandbox named
+// "scratch" (and the reverse), while names stay unique within each kind.
+func TestSandbox_NamesAreUniquePerKind(t *testing.T) {
+	mgr, _, _, _ := newSandboxManager(t)
+	ctx := context.Background()
+
+	env, err := mgr.Create(ctx, testTenantID, CreateRequest{Name: "scratch"})
+	require.NoError(t, err)
+	sbx, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "scratch", Source: SandboxSource{Type: "template"}})
+	require.NoError(t, err)
+	assert.Equal(t, "scratch", sbx.Name)
+
+	// Same kind, same name: still a conflict, and the message names the kind.
+	_, err = mgr.Create(ctx, testTenantID, CreateRequest{Name: "scratch"})
+	assertAPICode(t, err, 409)
+	assert.Contains(t, err.Error(), "environment with name")
+	_, err = mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "scratch", Source: SandboxSource{Type: "template"}})
+	assertAPICode(t, err, 409)
+	assert.Contains(t, err.Error(), "sandbox with name")
+
+	// A failed sandbox awaiting the reaper does not block an environment name.
+	failed, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Name: "doomed", Source: SandboxSource{Type: "template"}})
+	require.NoError(t, err)
+	_, err = mgr.db.Exec(`UPDATE environments SET status = 'failed' WHERE id = ?`, failed.ID)
+	require.NoError(t, err)
+	_, err = mgr.Create(ctx, testTenantID, CreateRequest{Name: "doomed"})
+	require.NoError(t, err)
+
+	// Kind scoping still holds for the shared names.
+	_, err = mgr.Get(ctx, testTenantID, sbx.ID)
+	require.ErrorIs(t, err, apierr.ErrNotFound)
+	_, err = mgr.GetSandbox(ctx, testTenantID, env.ID)
+	require.ErrorIs(t, err, apierr.ErrNotFound)
+}
+
 func assertAPICode(t *testing.T, err error, code int) {
 	t.Helper()
 	require.Error(t, err)

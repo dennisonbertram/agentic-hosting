@@ -10,6 +10,12 @@ ALTER TABLE environments ADD COLUMN cpu_millicores INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE environments ADD COLUMN egress TEXT NOT NULL DEFAULT 'none';
 ALTER TABLE environments ADD COLUMN max_expires_at INTEGER;
 CREATE INDEX IF NOT EXISTS idx_environments_kind_status ON environments(kind, status, lease_expires_at);
+-- Environments and sandboxes are listed and fetched separately, so names are
+-- unique per (tenant, kind): an environment named "scratch" must not block a
+-- sandbox named "scratch" (or the reverse), including a failed sandbox that
+-- the reaper has not removed yet.
+DROP INDEX IF EXISTS idx_environments_tenant_name;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_environments_tenant_kind_name ON environments(tenant_id, kind, name);
 
 ALTER TABLE tenant_quotas ADD COLUMN max_sandboxes INTEGER NOT NULL DEFAULT 5;
 ALTER TABLE tenant_quotas ADD COLUMN max_sandbox_ttl_seconds INTEGER NOT NULL DEFAULT 14400;

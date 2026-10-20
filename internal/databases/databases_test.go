@@ -312,6 +312,7 @@ func TestCreate_PullFailureWithLocalImageProceeds(t *testing.T) {
 		ImageExistsFn: func(context.Context, string) (bool, error) { return true, nil },
 	}
 	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+	mgr.healthTimeout = 200 * time.Millisecond // no engine listens; don't wait the default 30s
 	_, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "cached", Type: "postgres"})
 	if err != nil {
 		assert.NotContains(t, err.Error(), "pull database image")

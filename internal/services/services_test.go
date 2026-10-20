@@ -354,20 +354,6 @@ func TestPublicURL(t *testing.T) {
 	})
 }
 
-func TestTraefikLabels_ReturnsEmpty(t *testing.T) {
-	// traefikLabels now returns an empty map because routing is handled
-	// by the file provider (writeTraefikRoute), not Docker labels.
-	t.Run("with baseDomain returns empty", func(t *testing.T) {
-		labels := traefikLabels("svc-123", "my-app", "example.com", 8080)
-		assert.Empty(t, labels)
-	})
-
-	t.Run("without baseDomain returns empty", func(t *testing.T) {
-		labels := traefikLabels("svc-123", "my-app", "", 8080)
-		assert.Empty(t, labels)
-	})
-}
-
 func TestWriteTraefikRoute(t *testing.T) {
 	t.Run("writes correct config", func(t *testing.T) {
 		stateDB := testutil.NewStateDB(t)

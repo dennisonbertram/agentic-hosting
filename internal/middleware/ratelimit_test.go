@@ -258,7 +258,10 @@ func TestRateLimit_PerTenantIsolationUnderLoad(t *testing.T) {
 // rate limiter correctly maintains separate buckets for many distinct tenants
 // (not just 2-3).
 func TestRateLimit_MultipleTenantsConcurrentBuckets(t *testing.T) {
-	rl := NewRateLimiter(100, 1) // burst=1 per tenant
+	// burst=1 per tenant and a negligible refill rate: at 100/s a bucket
+	// refilled within 10ms, so under -race the 50-request loop below gave
+	// the first tenants a fresh token and the test failed.
+	rl := NewRateLimiter(0.001, 1)
 	handler := newRateLimitHandler(rl)
 
 	// 50 distinct tenants each send 1 request — all should pass

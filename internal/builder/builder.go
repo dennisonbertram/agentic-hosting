@@ -154,6 +154,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 		if _, err := drainer.drain(logCb); err != nil {
 			cleanBuildDir = false
 			stopBuildWorker(req.BuildID)
+			drainer.flush(logCb)
 			return fmt.Errorf("read build log: %w", err)
 		}
 		if ctx.Err() != nil {
@@ -165,6 +166,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				return fmt.Errorf("build cancelled: %w (worker stop failed)", ctx.Err())
 			}
 			_, _ = drainer.drain(logCb)
+			drainer.flush(logCb)
 			return ctx.Err()
 		}
 		status, err := brokerStatus(ctx, req.BuildID)
@@ -186,12 +188,14 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				n, drainErr := drainer.drain(logCb)
 				if drainErr != nil {
 					cleanBuildDir = false
+					drainer.flush(logCb)
 					return fmt.Errorf("read completed build log: %w", drainErr)
 				}
 				if n == 0 {
 					break
 				}
 			}
+			drainer.flush(logCb)
 			if stopErr := stopBuildWorker(req.BuildID); stopErr != nil {
 				cleanBuildDir = false
 				return fmt.Errorf("stop completed build worker: %w", stopErr)
@@ -294,10 +298,20 @@ type buildLogDrainer struct {
 	reader  *bufio.Reader
 	pending []byte
 	discard bool
+	// crEmitted is set when the previous byte was a '\r' that ended a
+	// non-empty line, so the '\n' of that CRLF pair does not emit a second,
+	// empty line. A CRLF with nothing pending (a blank CRLF line) still emits
+	// an empty line on its '\n', matching LF output.
+	crEmitted bool
 }
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
 // line. This keeps log streaming from starving cancellation and unit polling.
+// A line still being written by the worker (no newline yet at EOF) is held
+// until a later drain completes it, or until flush once the worker is done;
+// emitting it at EOF would split one log line in two. A bare '\r' (progress
+// output that redraws one line) also ends a line, so such output keeps
+// streaming instead of piling up until the 16 KiB cap; CRLF counts once.
 func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 	const maxPass, maxLine = 64 * 1024, 16 * 1024
 	read := 0
@@ -305,22 +319,24 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 		b, err := d.reader.ReadByte()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(d.pending) > 0 && logCb != nil {
-					logCb(sanitizeLogLine(string(d.pending)))
-					d.pending = d.pending[:0]
-				}
 				return read, nil
 			}
 			return read, err
 		}
 		read++
-		if b == '\n' {
-			line := strings.TrimSuffix(string(d.pending), "\r")
-			if logCb != nil {
-				logCb(sanitizeLogLine(line))
+		crEmitted := d.crEmitted
+		d.crEmitted = false
+		switch {
+		case b == '\r':
+			if len(d.pending) > 0 {
+				d.emit(logCb)
+				d.crEmitted = true
 			}
-			d.pending = d.pending[:0]
-			d.discard = false
+			continue
+		case b == '\n':
+			if !crEmitted {
+				d.emit(logCb)
+			}
 			continue
 		}
 		if !d.discard {
@@ -332,6 +348,22 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 		}
 	}
 	return read, nil
+}
+
+// flush emits a trailing unterminated line, if any. Call it only once the
+// worker can no longer write.
+func (d *buildLogDrainer) flush(logCb func(string)) {
+	if len(d.pending) > 0 {
+		d.emit(logCb)
+	}
+}
+
+func (d *buildLogDrainer) emit(logCb func(string)) {
+	if logCb != nil {
+		logCb(sanitizeLogLine(strings.TrimSuffix(string(d.pending), "\r")))
+	}
+	d.pending = d.pending[:0]
+	d.discard = false
 }
 
 // RunWorker executes one manifest. It is only called by ah-build@.service,

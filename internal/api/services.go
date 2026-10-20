@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
-	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/go-chi/chi/v5"
@@ -81,19 +80,31 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Deploy asynchronously — return immediately with status "deploying".
-	// Use a bounded context (10 min) to prevent goroutine leaks from stuck deploys.
+	s.respondDeploying(w, tenantID, svc, "deploy")
+}
+
+// respondDeploying starts svc's first deploy in the background and returns
+// 201 with status "deploying" without waiting for it. The deploy gets a
+// bounded context (10 min) so a stuck deploy cannot leak its goroutine.
+func (s *Server) respondDeploying(w http.ResponseWriter, tenantID string, svc *services.Service, what string) {
+	s.backgroundDeploys.Add(1)
 	go func(tid, sid string) {
+		defer s.backgroundDeploys.Done()
 		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
-			log.Printf("deploy failed for service %s: %v", sid, err)
-			return
+			log.Printf("%s failed for service %s: %v", what, sid, err)
 		}
 	}(tenantID, svc.ID)
 
 	svc.Status = "deploying"
 	writeJSON(w, http.StatusCreated, svc)
+}
+
+// waitBackgroundDeploys blocks until every deploy started by
+// respondDeploying has returned.
+func (s *Server) waitBackgroundDeploys() {
+	s.backgroundDeploys.Wait()
 }
 
 // handleServiceCreateFromSnapshot creates a new service from an existing snapshot.
@@ -165,19 +176,9 @@ func (s *Server) handleServiceCreateFromSnapshot(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Deploy asynchronously. The image is already in the local registry so this
-	// should be nearly instant (<5s) since no Nixpacks build or remote pull is needed.
-	go func(tid, sid string) {
-		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
-			log.Printf("deploy from snapshot failed for service %s: %v", sid, err)
-			return
-		}
-	}(tenantID, svc.ID)
-
-	svc.Status = "deploying"
-	writeJSON(w, http.StatusCreated, svc)
+	// The image is already in the local registry so this should be nearly
+	// instant (<5s) since no Nixpacks build or remote pull is needed.
+	s.respondDeploying(w, tenantID, svc, "deploy from snapshot")
 }
 
 func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
@@ -363,16 +364,20 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
-				w.Write(buf[:n])
+				// Stop once the client is gone or its write deadline passed;
+				// otherwise a follow stream keeps reading the container's logs
+				// (and holds a long-route slot) for as long as it runs.
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
 				f.Flush()
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
-	} else {
-		io.Copy(w, reader)
 	}
+	_, _ = io.Copy(w, reader)
 }
 
 func (s *Server) handleServiceEnvGet(w http.ResponseWriter, r *http.Request) {
@@ -581,15 +586,3 @@ func (s *Server) handleDeploymentCancel(w http.ResponseWriter, r *http.Request) 
 
 	writeJSON(w, http.StatusOK, updated)
 }
-
-// requireDeploymentStore is a guard that returns false if deploymentStore is nil.
-func (s *Server) requireDeploymentStore(w http.ResponseWriter) bool {
-	if s.deploymentStore == nil {
-		writeError(w, http.StatusServiceUnavailable, "deployment management is not available")
-		return false
-	}
-	return true
-}
-
-// cancelledDeploymentResponse wraps a cancelled deployment for JSON response.
-type cancelledDeploymentResponse = deployments.Deployment

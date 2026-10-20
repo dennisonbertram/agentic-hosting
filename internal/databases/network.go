@@ -75,7 +75,7 @@ func (m *Manager) migrateLoopbackURLs() {
 	defer cancel()
 
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, type, COALESCE(host, ''), port, COALESCE(connection_string_encrypted, '')
+		`SELECT id, tenant_id, type, status, COALESCE(host, ''), port, COALESCE(connection_string_encrypted, '')
 		 FROM databases WHERE port IS NOT NULL`)
 	if err != nil {
 		log.Printf("databases: migrate loopback URLs query failed: %v", err)
@@ -84,13 +84,13 @@ func (m *Manager) migrateLoopbackURLs() {
 	defer rows.Close()
 
 	type row struct {
-		id, tenantID, typ, host, connEnc string
-		port                             int
+		id, tenantID, typ, status, host, connEnc string
+		port                                     int
 	}
 	var dbs []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.tenantID, &r.typ, &r.host, &r.port, &r.connEnc); err != nil {
+		if err := rows.Scan(&r.id, &r.tenantID, &r.typ, &r.status, &r.host, &r.port, &r.connEnc); err != nil {
 			log.Printf("databases: migrate loopback URLs scan failed: %v", err)
 			continue
 		}
@@ -133,6 +133,12 @@ func (m *Manager) migrateLoopbackURLs() {
 				}
 			}
 		}
+		// A failed row's host port is free for reuse (the unique port index
+		// excludes failed rows), so a service_env value on that port may point at
+		// a live database. Only live rows own their port.
+		if r.status == "failed" {
+			continue
+		}
 		n, err := m.rewriteServiceEnvLoopback(ctx, r.tenantID, oldAddr, newAddr)
 		if err != nil {
 			log.Printf("databases: migrate service_env for %s: %v", r.id, err)
@@ -145,11 +151,36 @@ func (m *Manager) migrateLoopbackURLs() {
 	}
 }
 
+// rewriteLoopbackAddress replaces each occurrence of oldAddr ("host:port") in
+// value with newAddr. An occurrence followed by another digit names a different
+// port (127.0.0.1:5432 inside 127.0.0.1:54321) and is left alone.
 func rewriteLoopbackAddress(value, oldAddr, newAddr string) (string, bool) {
-	if oldAddr == "" || !strings.Contains(value, oldAddr) {
+	if oldAddr == "" {
 		return value, false
 	}
-	return strings.ReplaceAll(value, oldAddr, newAddr), true
+	var b strings.Builder
+	changed := false
+	rest := value
+	for {
+		i := strings.Index(rest, oldAddr)
+		if i < 0 {
+			break
+		}
+		end := i + len(oldAddr)
+		b.WriteString(rest[:i])
+		if end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			b.WriteString(oldAddr)
+		} else {
+			b.WriteString(newAddr)
+			changed = true
+		}
+		rest = rest[end:]
+	}
+	if !changed {
+		return value, false
+	}
+	b.WriteString(rest)
+	return b.String(), true
 }
 
 func (m *Manager) rewriteServiceEnvLoopback(ctx context.Context, tenantID, oldAddr, newAddr string) (int, error) {

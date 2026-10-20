@@ -22,8 +22,12 @@ type lruEntry[K comparable, V any] struct {
 	index     int    // heap index
 }
 
-// New creates an LRU cache with the given maximum size.
+// New creates an LRU cache with the given maximum size. A size below 1 is
+// treated as 1: a zero-capacity cache would pop from an empty heap and panic.
 func New[K comparable, V any](maxSize int) *LRU[K, V] {
+	if maxSize < 1 {
+		maxSize = 1
+	}
 	return &LRU[K, V]{
 		items:   make(map[K]*lruEntry[K, V]),
 		h:       make(lruHeap[K, V], 0),
@@ -148,4 +152,3 @@ func (h *lruHeap[K, V]) Pop() any {
 	*h = old[:n-1]
 	return e
 }
-

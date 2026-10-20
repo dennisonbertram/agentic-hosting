@@ -75,7 +75,10 @@ func newTestManager(t *testing.T, stateDB *sql.DB, dockerClient *testutil.MockDo
 		portStart:          DefaultPortStart,
 		portEnd:            DefaultPortEnd,
 	}
-	// Don't call ReconcileStale in tests — no stale records to reconcile
+	// Don't call ReconcileStale in tests — no stale records to reconcile.
+	// Wait for background provisioning before the test's DB and fake servers
+	// are torn down, so a leftover goroutine cannot leak into the next test.
+	t.Cleanup(mgr.waitBackground)
 	return mgr
 }
 
@@ -110,6 +113,7 @@ func newTestManagerWithPortRange(t *testing.T, stateDB *sql.DB, dockerClient *te
 		portStart:          portStart,
 		portEnd:            portEnd,
 	}
+	t.Cleanup(mgr.waitBackground)
 	return mgr
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/dennisonbertram/agentic-hosting/internal/databases"
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
 	"github.com/dennisonbertram/agentic-hosting/internal/deployments"
+	"github.com/dennisonbertram/agentic-hosting/internal/diskcheck"
 	"github.com/dennisonbertram/agentic-hosting/internal/docker"
 	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/gc"
@@ -32,7 +33,12 @@ import (
 )
 
 func main() {
-	cfg := config.FromEnv()
+	// Fail fast on invalid settings: silently defaulting e.g. a retention
+	// value would let snapshot GC delete data the operator meant to keep.
+	cfg, cfgErr := config.LoadFromEnv()
+	if cfgErr != nil {
+		log.Fatalf("FATAL: invalid configuration: %v", cfgErr)
+	}
 
 	// Check for subcommands before flag.Parse
 	if len(os.Args) > 1 {
@@ -45,7 +51,7 @@ func main() {
 			runBackup(dbPath)
 			return
 		case "rotate-key":
-			runRotateKey(os.Args[2:])
+			runRotateKey(os.Args[2:], cfg.DBPath)
 			return
 		case "build-broker":
 			runBuildBroker()
@@ -64,10 +70,15 @@ func main() {
 	dbPath := flag.String("db-path", cfg.DBPath, "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", cfg.MasterKeyPath, "Path to master encryption key")
 	baseDomain := flag.String("base-domain", cfg.BaseDomain, "Base domain for public service URLs (e.g. example.com)")
-	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist")
+	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist (\"none\" disables CORS)")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
+	maxSandboxesTotal := flag.Int("max-sandboxes-total", cfg.MaxSandboxesTotal, "Host-wide cap on disposable sandboxes across all tenants (0 = no host cap; env AH_MAX_SANDBOXES_TOTAL)")
+	sandboxEgressNetwork := flag.String("sandbox-egress-network", cfg.SandboxEgressNetwork, "Bridge network for sandboxes with egress \"internet\" (empty = egress disabled; env AH_SANDBOX_EGRESS_NETWORK). Requires the host firewall rules from docs/ops/sandbox-egress-firewall.sh")
 	flag.Parse()
+	if *maxSandboxesTotal < 0 {
+		log.Fatalf("--max-sandboxes-total must be >= 0, got %d", *maxSandboxesTotal)
+	}
 
 	// Validate --base-domain if provided.
 	if *baseDomain != "" {
@@ -133,6 +144,16 @@ func main() {
 		log.Fatalf("--open-registration requires --dev")
 	}
 
+	// Workload runtime: runsc (gVisor) unless a dev sandbox explicitly opts
+	// into the runc fallback. Never weakened silently or outside --dev.
+	runtimeWarnings, err := checkContainerRuntime(cfg.ContainerRuntime, *devMode)
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	for _, line := range runtimeWarnings {
+		log.Print(line)
+	}
+
 	// In production (non-dev) mode, refuse to bind to non-loopback addresses.
 	// The server must be behind a TLS-terminating reverse proxy on loopback.
 	if !*devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
@@ -173,20 +194,28 @@ func main() {
 	defer store.Close()
 
 	// Create Docker client
-	dockerClient, err := docker.NewClient()
+	dockerClient, err := docker.NewClientWithRuntime(cfg.ContainerRuntime)
 	if err != nil {
 		log.Fatalf("failed to create Docker client: %v", err)
 	}
 	defer dockerClient.Close()
 
+	// Without gVisor (a --dev runc fallback for the workloads or the
+	// sandboxes), the API must not be reachable from a network.
+	if err := checkListenIsolation(context.Background(), *listenAddr, cfg.ContainerRuntime, cfg.SandboxRuntime, dockerClient); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+
 	// Verify gVisor runtime is available (fail closed in production)
-	if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
-		if !*devMode {
-			log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+	if cfg.ContainerRuntime == config.RuntimeRunsc {
+		if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
+			if !*devMode {
+				log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+			}
+			log.Printf("WARNING: %v. Containers will fail to start without gVisor (set AH_CONTAINER_RUNTIME=runc for a dev-only sandbox).", err)
+		} else {
+			log.Printf("gVisor (runsc) runtime verified")
 		}
-		log.Printf("WARNING: %v. Containers will fail to start without gVisor.", err)
-	} else {
-		log.Printf("gVisor (runsc) runtime verified")
 	}
 
 	// Create Nixpacks builder and build manager
@@ -198,11 +227,14 @@ func main() {
 	// Create deployment store for tracking deployment history
 	deployStore := deployments.NewStore(store.StateDB)
 
+	// One service manager shared by the build pipeline and the API so build
+	// deploys and API deploy/restart/reset serialize on the same per-service
+	// locks and share one deploy semaphore/queue.
+	svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
+	svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
+
 	var buildMgr *builds.Manager
 	if nixBuilder != nil {
-		// Create service manager early to get DeployImage function
-		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
-		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 
@@ -216,13 +248,37 @@ func main() {
 	envMgr := environments.NewManager(store.StateDB, dockerClient, *baseDomain, cfg.TraefikConfigDir)
 	envMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 	envPool := environments.NewPoolManager(store.StateDB, dockerClient, environments.PoolConfig{
-		Enabled:      true,
+		Enabled:      cfg.WarmPoolEnabled,
 		PoolSize:     2,
 		MaxTotal:     6,
 		RefillPeriod: 60 * time.Second,
 	})
 	envMgr.SetPool(envPool)
 	go envPool.Run(context.Background())
+
+	// Disposable sandboxes: sources, host cap and the TTL reaper. The
+	// snapshot manager is stateless, so the one used for GC retention below
+	// is shared.
+	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])
+	envMgr.SetSandboxSources(snapshotSandboxSource{mgr: snapMgr}, serviceSandboxSource{mgr: svcMgr})
+	envMgr.SetMaxSandboxesTotal(*maxSandboxesTotal)
+	log.Printf("sandboxes: host cap %d (0 = none)", *maxSandboxesTotal)
+	// Sandbox image pulls are bounded host-wide; the disk check (create, and
+	// the reaper's disk watchdog) covers the data dir and the Docker root.
+	envMgr.SetSandboxPullLimits(cfg.SandboxMaxConcurrentPulls, cfg.SandboxMaxImageMB)
+	diskPaths := cfg.DiskCheckPaths()
+	envMgr.SetSandboxDiskCheck(func() error { return diskcheck.CheckAll(diskPaths, 80, 90) })
+	log.Printf("sandboxes: at most %d concurrent image pulls, images up to %d MB", cfg.SandboxMaxConcurrentPulls, cfg.SandboxMaxImageMB)
+	// Phase 2 hardening, all opt-in: a missing sandbox runtime is fatal; an
+	// egress network without verified firewall rules stays disabled (403).
+	if err := configureSandboxHardening(context.Background(), cfg, strings.TrimSpace(*sandboxEgressNetwork), *devMode,
+		dockerClient, envMgr, sandboxEgressOptions{}, log.Printf); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	envMgr.LogSandboxHardening()
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	go envMgr.RunSandboxReaper(reaperCtx, 30*time.Second)
 
 	// Usage metering collector (60s samples of running services)
 	meterCtx, meterCancel := context.WithCancel(context.Background())
@@ -232,7 +288,15 @@ func main() {
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
 	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
-	corsAllow := config.ParseCORSOrigins(*corsOrigins)
+	// Only re-parse when --cors-origins was given: cfg.CORSOrigins may be a
+	// deliberately empty allowlist (AH_CORS_ORIGINS=none), which joins to ""
+	// and would otherwise re-parse as the defaults.
+	corsAllow := cfg.CORSOrigins
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cors-origins" {
+			corsAllow = config.ParseCORSOrigins(*corsOrigins)
+		}
+	})
 	if len(corsAllow) == 0 {
 		log.Printf("CORS: disabled (empty allowlist)")
 	} else {
@@ -249,6 +313,7 @@ func main() {
 		OpenRegistration:      *openRegistration,
 		Docker:                dockerClient,
 		BuildManager:          buildMgr,
+		ServiceManager:        svcMgr,
 		DeploymentStore:       deployStore,
 		DatabaseManager:       dbMgr,
 		KanbanManager:         kanbanMgr,
@@ -259,6 +324,7 @@ func main() {
 		DataDir:               filepath.Dir(*dbPath),
 		ExternalTLSTerminated: cfg.ExternalTLSTerminated,
 		CORSOrigins:           corsAllow,
+		ContainerRuntime:      dockerClient.Runtime(),
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).
@@ -278,6 +344,9 @@ func main() {
 	log.Printf("ah listening on %s", addr)
 	if *devMode {
 		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled")
+		if cfg.ContainerRuntime != config.RuntimeRunsc {
+			log.Printf("WARNING: workloads run under %s, not gVisor — local dev sandbox only", cfg.ContainerRuntime)
+		}
 	} else {
 		log.Printf("HTTPS enforcement is ON. The server must be behind a TLS-terminating proxy (e.g. Traefik) that connects via loopback (127.0.0.1). X-Forwarded-Proto is only trusted from loopback RemoteAddr.")
 	}
@@ -292,9 +361,12 @@ func main() {
 	gcCtx, gcCancel := context.WithCancel(context.Background())
 	defer gcCancel()
 	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute, cfg.BuildDir)
+	garbageCollector.SetDockerPrune(cfg.GCPruneDocker)
+	if !cfg.GCPruneDocker {
+		log.Printf("gc: daemon-wide dangling image and anonymous volume prune disabled (AH_GC_PRUNE_DOCKER=false)")
+	}
 
 	// Wire snapshot retention into GC
-	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])
 	garbageCollector.SetSnapshotCleaner(snapMgr, cfg.SnapshotMaxPerService, cfg.SnapshotMaxAge)
 
 	go garbageCollector.Run(gcCtx)
@@ -304,6 +376,7 @@ func main() {
 	reconcilerCancel()
 	gcCancel()
 	meterCancel()
+	reaperCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

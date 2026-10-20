@@ -22,7 +22,6 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
@@ -48,6 +47,7 @@ type Client interface {
 	InspectContainer(ctx context.Context, containerID string) (*ContainerInfo, error)
 	PullImage(ctx context.Context, img string) error
 	ImageExists(ctx context.Context, img string) (bool, error)
+	ImageSize(ctx context.Context, img string) (int64, error)
 	TagImage(ctx context.Context, source, target string) error
 	RemoveImage(ctx context.Context, imageRef string) error
 	ListContainersByLabel(ctx context.Context, label, value string) ([]string, error)
@@ -104,16 +104,39 @@ var _ Client = (*DockerClient)(nil)
 
 // DockerClient wraps the Docker Engine API client with ah-specific defaults.
 type DockerClient struct {
-	cli *client.Client
+	cli     *client.Client
+	runtime string // OCI runtime for workload containers; DefaultRuntime unless overridden
 }
 
-// NewClient creates a Docker API client using the default socket.
+// DefaultRuntime is the gVisor runtime used for every workload container.
+const DefaultRuntime = "runsc"
+
+// NewClient creates a Docker API client using the default socket and the
+// gVisor (runsc) runtime.
 func NewClient() (*DockerClient, error) {
+	return NewClientWithRuntime(DefaultRuntime)
+}
+
+// NewClientWithRuntime is NewClient with an explicit OCI runtime for tenant,
+// database, environment and wipe containers. Callers outside a dev sandbox
+// must pass DefaultRuntime; cmd/ah only allows anything else with --dev.
+func NewClientWithRuntime(runtime string) (*DockerClient, error) {
+	if strings.TrimSpace(runtime) == "" {
+		return nil, fmt.Errorf("docker client: container runtime must not be empty")
+	}
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &DockerClient{cli: cli}, nil
+	return &DockerClient{cli: cli, runtime: runtime}, nil
+}
+
+// Runtime returns the OCI runtime this client starts workload containers with.
+func (c *DockerClient) Runtime() string {
+	if c.runtime == "" {
+		return DefaultRuntime
+	}
+	return c.runtime
 }
 
 // Close releases the Docker client resources.
@@ -378,7 +401,7 @@ type ResourceLimits struct {
 //   - Health checks are left to the image author; ah does not inject a shell
 //     probe because many minimal images do not ship curl/wget.
 func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
-	name := containerName(tenantID, serviceID)
+	name := ServiceContainerName(tenantID, serviceID)
 
 	if port <= 0 {
 		port = 8000
@@ -407,7 +430,7 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	hostCfg := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: c.Runtime(),
 		Resources: container.Resources{
 			Memory:     memoryBytes,
 			NanoCPUs:   nanoCPUs,
@@ -445,12 +468,12 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	if err := c.ConnectNetworkAlias(ctx, ingressID, resp.ID, ServiceIngressAlias(tenantID, serviceID)); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("connect service to ingress network: %w", err)
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("start container: %w", err)
 	}
 
@@ -458,6 +481,22 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// rollbackTimeout bounds the removal of a half-created container.
+const rollbackTimeout = 15 * time.Second
+
+// rollbackRemove force-removes a container created by a Run* call that then
+// failed. It uses a fresh bounded context: the failure is often the caller's
+// ctx being cancelled or past its deadline, and reusing that ctx would make
+// the removal fail at once and leave an untracked container holding the
+// deterministic name.
+func (c *DockerClient) rollbackRemove(ctx context.Context, id string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	if err := c.cli.ContainerRemove(rctx, id, container.RemoveOptions{Force: true}); err != nil {
+		log.Printf("docker: rollback remove of container %.12s failed: %v (GC will retry)", id, err)
+	}
+}
 
 func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string) *container.Config {
 	env := make([]string, 0, len(envVars))
@@ -483,25 +522,6 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 		},
 		Labels: labels,
 	}
-}
-
-// findTraefikContainer finds the platform Traefik container by exact name.
-// Only matches the container named "paas-traefik" to prevent tenant containers
-// from being mistaken for Traefik (e.g. by deploying a traefik image).
-func (c *DockerClient) findTraefikContainer(ctx context.Context) (string, error) {
-	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
-	if err != nil {
-		return "", err
-	}
-	for _, ctr := range containers {
-		for _, name := range ctr.Names {
-			// Docker prefixes container names with "/".
-			if name == "/paas-traefik" || name == "paas-traefik" {
-				return ctr.ID, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("traefik container not found (expected container named paas-traefik)")
 }
 
 // StopContainer stops a running container with a 10s timeout.
@@ -669,6 +689,15 @@ func (c *DockerClient) ImageExists(ctx context.Context, img string) (bool, error
 	return false, err
 }
 
+// ImageSize returns the size in bytes of a local image (all its layers).
+func (c *DockerClient) ImageSize(ctx context.Context, img string) (int64, error) {
+	inspect, _, err := c.cli.ImageInspectWithRaw(ctx, img)
+	if err != nil {
+		return 0, fmt.Errorf("inspect image %s: %w", img, err)
+	}
+	return inspect.Size, nil
+}
+
 // TagImage adds a new tag to an existing image.
 func (c *DockerClient) TagImage(ctx context.Context, source, target string) error {
 	return c.cli.ImageTag(ctx, source, target)
@@ -717,9 +746,10 @@ func (c *DockerClient) GetContainerName(ctx context.Context, containerID string)
 	return info.Name
 }
 
-// containerName generates a deterministic container name from tenant and service IDs.
-func containerName(tenantID, serviceID string) string {
-	return fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
+// ServiceContainerName returns the deterministic container name RunContainer
+// gives a service, so callers can find split-brain containers whose ID was lost.
+func ServiceContainerName(tenantID, serviceID string) string {
+	return "ah-" + tenantID + "-" + serviceID
 }
 
 // VerifyGVisorRuntime checks that the Docker daemon has the gVisor (runsc) runtime available.
@@ -728,12 +758,16 @@ func (c *DockerClient) VerifyGVisorRuntime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("docker info: %w", err)
 	}
-	for name := range info.Runtimes {
-		if name == "runsc" {
-			return nil
-		}
+	rt, ok := info.Runtimes[DefaultRuntime]
+	if !ok {
+		return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon")
 	}
-	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon")
+	// The name alone proves nothing: {"runsc": {"runtimeType":
+	// "io.containerd.runc.v2"}} registers runc under gVisor's name.
+	if !IsGVisorRuntime(DefaultRuntime, RuntimeInfo{Path: rt.Path, Type: rt.Type}) {
+		return fmt.Errorf("docker runtime %q is not gVisor (path %q, type %q)", DefaultRuntime, rt.Path, rt.Type)
+	}
+	return nil
 }
 
 // RunDatabaseConfig holds parameters for running a database container.
@@ -785,7 +819,7 @@ const wipeScript = `find /data -type f -exec sh -c 'head -c "$(wc -c < "$1")" /d
 
 // wipeConfigs builds the container configs for WipeVolume. Root needs
 // DAC_OVERRIDE/FOWNER because volume files may belong to other UIDs.
-func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
+func wipeConfigs(volume, runtime string) (*container.Config, *container.HostConfig) {
 	return &container.Config{
 			Image:  wipeImage,
 			Cmd:    []string{"sh", "-c", wipeScript},
@@ -793,7 +827,7 @@ func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
 		}, &container.HostConfig{
 			// AutoRemove releases the volume even if this process dies mid-wipe.
 			AutoRemove:  true,
-			Runtime:     "runsc",
+			Runtime:     runtime,
 			NetworkMode: "none",
 			CapDrop:     []string{"ALL"},
 			CapAdd:      []string{"DAC_OVERRIDE", "FOWNER"},
@@ -816,7 +850,7 @@ func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
 			return fmt.Errorf("wipe volume %s: %w", name, err)
 		}
 	}
-	containerCfg, hostCfg := wipeConfigs(name)
+	containerCfg, hostCfg := wipeConfigs(name, c.Runtime())
 
 	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")
 	if err != nil {
@@ -864,9 +898,9 @@ var databaseCaps = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER
 // Host publish stays on 127.0.0.1 for control-plane health probes. Never bind
 // 0.0.0.0. When NetworkName is set, that internal network is primary so the
 // container is not left on Docker's default bridge.
-func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostConfig {
+func databaseHostConfig(cfg RunDatabaseConfig, portStr, runtime string) *container.HostConfig {
 	h := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: runtime,
 		PortBindings: nat.PortMap{
 			nat.Port(portStr): []nat.PortBinding{
 				{HostIP: "127.0.0.1", HostPort: fmt.Sprintf("%d", cfg.HostPort)},
@@ -926,7 +960,7 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 
 	portStr := fmt.Sprintf("%d/tcp", cfg.ContainerPort)
 
-	hostCfg := databaseHostConfig(cfg, portStr)
+	hostCfg := databaseHostConfig(cfg, portStr, c.Runtime())
 
 	labels := map[string]string{
 		"ah.managed": "true",
@@ -965,7 +999,7 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("start database container: %w", err)
 	}
 
@@ -1108,34 +1142,108 @@ type RunEnvironmentConfig struct {
 	Labels      map[string]string
 	EgressAllow bool
 	WarmPool    bool // explicit lifecycle marker for containers created for the warm pool
+	// Env is passed to the container as KEY=VALUE entries (sandboxes forked
+	// from a snapshot or service with include_env).
+	Env []string
+	// UseImageCmd keeps the image's own ENTRYPOINT/CMD and WORKDIR instead of
+	// "sleep infinity" in /workspace, so a forked service runs its app.
+	UseImageCmd bool
+	// LocalImage tolerates a failed pull when the image is already in the
+	// local store (snapshot and service build tags never exist upstream).
+	LocalImage bool
+	// ImagePrepared means the caller has already pulled or verified Image
+	// (sandbox creates pull under a host-wide limit and check the image's
+	// size first), so RunEnvironment does not pull it again.
+	ImagePrepared bool
+	// Runtime overrides the client's OCI runtime for this container (the
+	// sandbox runtime, e.g. runsc-sbx). Empty uses the client's runtime.
+	Runtime string
+	// WorkspaceTmpfsMB > 0 mounts /workspace as a tmpfs of that size instead
+	// of the VolumeName volume (VolumeName is then ignored). Under gVisor the
+	// tmpfs lives in sandbox memory, so the memory cgroup bounds it.
+	WorkspaceTmpfsMB int
+	// EgressNetwork marks NetworkName as the sandbox egress bridge. That
+	// network is created once at startup by EnsureSandboxEgressNetwork (not
+	// internal, ICC off); RunEnvironment must not create it here as an
+	// internal tenant network, so it only attaches the container to it.
+	EgressNetwork bool
 }
 
 // RunEnvironment creates and starts an environment container with gVisor runtime.
 // Environments are dev workspaces: writable rootfs, sleep infinity entrypoint,
-// workspace volume at /workspace.
+// workspace volume at /workspace. Sandboxes reuse it with the same isolation.
 func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentConfig) (string, error) {
 	name := fmt.Sprintf("ah-env-%s-%s", cfg.TenantID, cfg.EnvID)
 
-	// Pull the image if not available locally.
-	if err := c.PullImage(ctx, cfg.Image); err != nil {
+	if err := ensureEnvironmentImage(ctx, cfg, c.PullImage, c.ImageExists); err != nil {
 		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
 	}
 
+	runtime := c.Runtime()
+	if cfg.Runtime != "" {
+		runtime = cfg.Runtime
+	}
+	containerCfg, hostCfg := environmentContainerConfigs(cfg, runtime)
+
+	netCfg := &network.NetworkingConfig{}
+
+	// Ensure the tenant network exists before creating the container. The
+	// sandbox egress bridge is never created here: it must already exist
+	// with its egress settings, or ContainerCreate fails.
+	if !cfg.EgressNetwork {
+		if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
+			return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+		}
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("create environment container: %w", err)
+	}
+
+	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		c.rollbackRemove(ctx, resp.ID)
+		return "", fmt.Errorf("start environment container: %w", err)
+	}
+
+	return resp.ID, nil
+}
+
+// ensureEnvironmentImage pulls cfg.Image. With LocalImage set, a failed pull
+// is tolerated when the image is already present locally. With ImagePrepared
+// the caller has already done this and nothing is pulled.
+func ensureEnvironmentImage(ctx context.Context, cfg RunEnvironmentConfig, pull func(context.Context, string) error, exists func(context.Context, string) (bool, error)) error {
+	if cfg.ImagePrepared {
+		return nil
+	}
+	if cfg.LocalImage {
+		return pullOrUseLocal(ctx, cfg.Image, pull, exists)
+	}
+	return pull(ctx, cfg.Image)
+}
+
+// environmentContainerConfigs builds the container and host configs for an
+// environment or sandbox container. Isolation settings are identical for
+// both; only Cmd/WorkingDir (UseImageCmd) and Env differ.
+func environmentContainerConfigs(cfg RunEnvironmentConfig, runtime string) (*container.Config, *container.HostConfig) {
 	memoryBytes := cfg.MemoryMB * 1024 * 1024
 	nanoCPUs := cfg.CPUMillis * 1_000_000
 
-	labels := environmentContainerLabels(cfg)
-
 	containerCfg := &container.Config{
-		Image:      cfg.Image,
-		Cmd:        []string{"sleep", "infinity"},
-		WorkingDir: "/workspace",
-		Labels:     labels,
+		Image:  cfg.Image,
+		Labels: environmentContainerLabels(cfg),
+	}
+	if !cfg.UseImageCmd {
+		containerCfg.Cmd = []string{"sleep", "infinity"}
+		containerCfg.WorkingDir = "/workspace"
+	}
+	if len(cfg.Env) > 0 {
+		containerCfg.Env = append([]string(nil), cfg.Env...)
 	}
 
 	initTrue := true
 	hostCfg := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: runtime,
 		Init:    &initTrue,
 		Resources: container.Resources{
 			Memory:     memoryBytes,
@@ -1145,13 +1253,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 		},
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges"},
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeVolume,
-				Source: cfg.VolumeName,
-				Target: "/workspace",
-			},
-		},
+		Mounts:      []mount.Mount{workspaceMount(cfg)},
 		Tmpfs: map[string]string{
 			"/tmp":     "rw,noexec,nosuid,size=64m",
 			"/var/run": "rw,noexec,nosuid,size=16m",
@@ -1161,25 +1263,35 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		NetworkMode:   container.NetworkMode(cfg.NetworkName),
 	}
-
-	netCfg := &network.NetworkingConfig{}
-
-	// Ensure the tenant network exists before creating the container.
-	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
-		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+	if cfg.EgressNetwork {
+		// An egress sandbox is safe only behind the host firewall rules,
+		// which are (re)installed right before ah starts, after dockerd.
+		// Docker must never bring one back on its own (host reboot, dockerd
+		// restart) ahead of those rules: it stays stopped, the reconciler
+		// marks it stopped and the sandbox reaper deletes it.
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyDisabled}
 	}
+	return containerCfg, hostCfg
+}
 
-	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
-	if err != nil {
-		return "", fmt.Errorf("create environment container: %w", err)
+// workspaceMount is the /workspace mount: the named volume, or with
+// WorkspaceTmpfsMB a size-limited tmpfs (exec allowed, like the volume).
+func workspaceMount(cfg RunEnvironmentConfig) mount.Mount {
+	if cfg.WorkspaceTmpfsMB > 0 {
+		return mount.Mount{
+			Type:   mount.TypeTmpfs,
+			Target: "/workspace",
+			TmpfsOptions: &mount.TmpfsOptions{
+				SizeBytes: int64(cfg.WorkspaceTmpfsMB) * 1024 * 1024,
+				Mode:      01777,
+			},
+		}
 	}
-
-	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", fmt.Errorf("start environment container: %w", err)
+	return mount.Mount{
+		Type:   mount.TypeVolume,
+		Source: cfg.VolumeName,
+		Target: "/workspace",
 	}
-
-	return resp.ID, nil
 }
 
 // environmentContainerLabels builds container labels; the ah.* keys are set
@@ -1279,39 +1391,20 @@ func (c *DockerClient) CopyToContainer(ctx context.Context, containerID string, 
 }
 
 // cappedWriter writes to buf up to max bytes, silently discarding the rest.
+// It always reports the full len(p) as written: stdcopy.StdCopy treats a short
+// count as io.ErrShortWrite, which would turn over-limit output into an error.
 type cappedWriter struct {
 	buf *bytes.Buffer
 	max int
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
-	remaining := w.max - w.buf.Len()
-	if remaining <= 0 {
-		return len(p), nil // discard but report success
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-	}
-	w.buf.Write(p)
-	return len(p), nil
-}
-
-// drainPullStream reads Docker's JSON progress stream to the end and returns
-// the first error message in it, or the read error (including a timeout).
-// PullImage uses consumeImagePullResponse, which omits daemon error text;
-// this variant keeps it for callers and tests that want the daemon message.
-func drainPullStream(r io.Reader) error {
-	dec := json.NewDecoder(r)
-	for {
-		var msg jsonmessage.JSONMessage
-		if err := dec.Decode(&msg); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
+	n := len(p)
+	if remaining := w.max - w.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
 		}
-		if msg.Error != nil {
-			return msg.Error
-		}
+		w.buf.Write(p)
 	}
+	return n, nil
 }

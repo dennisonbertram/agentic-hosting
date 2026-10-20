@@ -335,7 +335,7 @@ func TestListByTenant_CrossService(t *testing.T) {
 	assert.Equal(t, "svc-1", list[1].ServiceID)
 }
 
-func TestLatestForService(t *testing.T) {
+func TestListByService_NewestFirst(t *testing.T) {
 	db := testutil.NewStateDB(t)
 	seedTestData(t, db, "tenant-1", "svc-1")
 	store := NewStore(db)
@@ -364,21 +364,65 @@ func TestLatestForService(t *testing.T) {
 	}
 	require.NoError(t, store.Create(ctx, d2))
 
-	latest, err := store.LatestForService(ctx, "svc-1")
+	latest, err := store.ListByService(ctx, "tenant-1", "svc-1", 1, 0)
 	require.NoError(t, err)
-	assert.Equal(t, d2.ID, latest.ID)
-	assert.Equal(t, "nginx:2.0", latest.Image)
-	assert.Equal(t, StatusRunning, latest.Status)
+	require.Len(t, latest, 1)
+	assert.Equal(t, d2.ID, latest[0].ID)
+	assert.Equal(t, "nginx:2.0", latest[0].Image)
+	assert.Equal(t, StatusRunning, latest[0].Status)
+
+	// Out-of-range pagination values fall back to defaults.
+	all, err := store.ListByService(ctx, "tenant-1", "svc-1", 0, -5)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Equal(t, d2.ID, all[0].ID)
+	assert.Equal(t, d1.ID, all[1].ID)
+
+	all, err = store.ListByTenant(ctx, "tenant-1", 500, -1)
+	require.NoError(t, err)
+	assert.Len(t, all, 2)
 }
 
-func TestLatestForService_NotFound(t *testing.T) {
+func TestGet_RoundTripsOptionalFields(t *testing.T) {
 	db := testutil.NewStateDB(t)
+	seedTestData(t, db, "tenant-1", "svc-1")
+	_, err := db.Exec(`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at)
+		VALUES ('build-1', 'svc-1', 'tenant-1', 'succeeded', 'git', 'https://github.com/a/b', 'main', 'img', 1)`)
+	require.NoError(t, err)
 	store := NewStore(db)
 	ctx := context.Background()
 
-	_, err := store.LatestForService(ctx, "nonexistent-svc")
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, apierr.ErrNotFound))
+	done := int64(1234)
+	d := &Deployment{ServiceID: "svc-1", TenantID: "tenant-1", BuildID: "build-1", Image: "img", Status: StatusDeploying, Trigger: TriggerBuild, StartedAt: 1000}
+	require.NoError(t, store.Create(ctx, d))
+	require.NoError(t, store.UpdateStatus(ctx, d.ID, StatusRunning, WithContainerID("cid-1"), WithCompletedAt(done)))
+
+	got, err := store.Get(ctx, "tenant-1", d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "build-1", got.BuildID)
+	assert.Equal(t, "cid-1", got.ContainerID)
+	assert.Equal(t, StatusRunning, got.Status)
+	require.NotNil(t, got.CompletedAt)
+	assert.Equal(t, done, *got.CompletedAt)
+	assert.Nil(t, got.CancelledAt)
+	assert.NotZero(t, got.CreatedAt)
+}
+
+func TestStore_ClosedDBErrors(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	store := NewStore(db)
+	require.NoError(t, db.Close())
+	ctx := context.Background()
+
+	_, err := store.Get(ctx, "t", "d")
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, apierr.ErrNotFound))
+	_, err = store.ListByService(ctx, "t", "s", 10, 0)
+	assert.Error(t, err)
+	_, err = store.Cancel(ctx, "t", "d")
+	assert.Error(t, err)
+	assert.Error(t, store.UpdateStatus(ctx, "d", StatusRunning))
+	assert.Error(t, store.Create(ctx, &Deployment{ServiceID: "s", TenantID: "t"}))
 }
 
 func TestCascadeDelete(t *testing.T) {

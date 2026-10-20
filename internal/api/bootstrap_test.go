@@ -81,7 +81,7 @@ func TestValidateBootstrapToken(t *testing.T) {
 }
 
 func TestHandleBootstrapTokenValidate(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const tokenA = "test-bootstrap-token-aaaaaaa-32chars"
 	const tokenB = "test-bootstrap-token-bbbbbbb-32chars"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
@@ -177,7 +177,7 @@ func TestHandleBootstrapTokenValidate(t *testing.T) {
 }
 
 func TestRegistrationWithMultipleBootstrapTokens(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const tokenA = "test-bootstrap-token-aaaaaaa-32chars"
 	const tokenB = "test-bootstrap-token-bbbbbbb-32chars"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
@@ -250,7 +250,7 @@ func TestRegistrationWithMultipleBootstrapTokens(t *testing.T) {
 }
 
 func TestRecoveryWithMultipleBootstrapTokens(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const tokenA = "test-bootstrap-token-aaaaaaa-32chars"
 	const tokenB = "test-bootstrap-token-bbbbbbb-32chars"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
@@ -333,7 +333,7 @@ func TestRecoveryWithMultipleBootstrapTokens(t *testing.T) {
 }
 
 func TestTokenRotationWorkflow(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	// Simulates the full rotation workflow:
 	// 1. Start with token A only
 	// 2. Register with token A (works)

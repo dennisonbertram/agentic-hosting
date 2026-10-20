@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
 	"github.com/spf13/cobra"
@@ -29,7 +30,12 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// If no flags provided, show current config or guidance
 			if urlFlag == "" && keyFlag == "" {
-				existing, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: configPathFlag})
+				// Show only what is saved in the file; env vars are reported
+				// separately so they are not mistaken for saved settings.
+				existing, err := ahclient.LoadConfigFile(configPathFlag)
+				if os.Getenv("AH_URL") != "" || os.Getenv("AH_KEY") != "" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Note: AH_URL/AH_KEY are set in the environment and override the saved configuration.")
+				}
 				if err != nil {
 					fmt.Fprintln(cmd.OutOrStdout(), "No configuration found.")
 					fmt.Fprintln(cmd.OutOrStdout(), "")
@@ -56,9 +62,11 @@ Examples:
 				}
 			}
 
-			// Load existing or create new config
+			// Load the saved file only (not AH_URL/AH_KEY), so a transient
+			// environment credential is never written to disk in place of
+			// the user's saved key.
 			cfg := &ahclient.Config{}
-			existing, err := ahclient.LoadConfig(ahclient.LoadOptions{ConfigPath: cfgPath})
+			existing, err := ahclient.LoadConfigFile(cfgPath)
 			if err == nil {
 				cfg = existing
 			}

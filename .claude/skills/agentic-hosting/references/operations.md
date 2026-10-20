@@ -104,8 +104,8 @@ Deletion via the API is soft-delete — the GC handles actual container/volume c
 | `409 Conflict` | Duplicate name or idempotency conflict | Check if resource already exists |
 | `422 Unprocessable Entity` | Validation failed | Read error message; common: name already taken, bad email format |
 | `429 Too Many Requests` | Rate limited | Respect `Retry-After` header; exponential backoff |
-| `500 Internal Server Error` | Untyped errors, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) | Check `/v1/system/health/detailed?fresh=true` and `journalctl -u ah -n 50` |
-| `503 Service Unavailable` | Docker/build/metering/registration unavailable (manager nil) | Check `/v1/system/health/detailed` |
+| `500 Internal Server Error` | Untyped errors (`{"error":"internal error"}`) | Check `/v1/system/health/detailed?fresh=true` and `journalctl -u ah -n 50` |
+| `503 Service Unavailable` | Docker/build/metering/registration unavailable (manager nil); disk ≥90% on build, DB create, kanban create, deploy and restart/redeploy (`{"error":"insufficient disk space; try again later"}`, `Retry-After: 10`); deploy queue full | Respect `Retry-After`; check `/v1/system/health/detailed?fresh=true` |
 
 ## Pagination
 

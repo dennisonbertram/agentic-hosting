@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
-	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
+	"github.com/dennisonbertram/agentic-hosting/internal/environments"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/go-chi/chi/v5"
 )
@@ -52,6 +52,7 @@ type TenantUsageResponse struct {
 	Services  TenantUsageBucket `json:"services"`
 	Databases TenantUsageBucket `json:"databases"`
 	APIKeys   TenantUsageBucket `json:"api_keys"`
+	Sandboxes TenantUsageBucket `json:"sandboxes"`
 	MemoryMB  int               `json:"memory_mb"`
 	CPUCores  float64           `json:"cpu_cores"`
 	DiskGB    int               `json:"disk_gb"`
@@ -89,6 +90,20 @@ var regLimiter = &registrationLimiter{
 	// globalWindowAt zero-value: first request starts the window
 }
 
+// adminLimiter rate-limits the admin-token routes (recover, reactivate,
+// quotas) with the same per-IP/global limits as registration but in separate
+// buckets, so bootstrap-token holders exhausting the registration budget
+// cannot lock the operator out of admin endpoints (and vice versa).
+var adminLimiter = &registrationLimiter{
+	entries: cache.New[string, *regEntry](regMaxEntries),
+}
+
+// resetLimitersForTest resets both the registration and admin limiters.
+func resetLimitersForTest() {
+	regLimiter.resetForTest()
+	adminLimiter.resetForTest()
+}
+
 // resetForTest resets the rate limiter state. Exported only for tests within
 // the api package (unexported, same-package access only).
 func (rl *registrationLimiter) resetForTest() {
@@ -104,9 +119,11 @@ func init() {
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
 			now := time.Now()
-			regLimiter.entries.DeleteFunc(func(_ string, v *regEntry) bool {
-				return now.After(v.windowAt)
-			})
+			for _, rl := range []*registrationLimiter{regLimiter, adminLimiter} {
+				rl.entries.DeleteFunc(func(_ string, v *regEntry) bool {
+					return now.After(v.windowAt)
+				})
+			}
 		}
 	}()
 }
@@ -140,6 +157,22 @@ func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 	return true, 0
 }
 
+// allowRequest charges the per-IP bucket for r's trusted client IP. When the
+// request is over the limit it writes a 429 with Retry-After and returns false.
+func (rl *registrationLimiter) allowRequest(w http.ResponseWriter, r *http.Request) bool {
+	ok, wait := rl.allow(trustedRealIP(r))
+	if ok {
+		return true
+	}
+	secs := int(math.Ceil(wait.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	return false
+}
+
 // chargeGlobal counts one authenticated request against the global hourly
 // budget. allow only checks the global bucket; it is charged here, after the
 // token validated, so invalid requests cannot exhaust it.
@@ -165,14 +198,7 @@ func generateID() (string, error) {
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// Rate limit ALL registration attempts (including invalid tokens) to prevent
 	// brute-force of the bootstrap token. Uses trusted real IP from proxy headers.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	if !regLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -192,7 +218,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	regLimiter.chargeGlobal()
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,24 +291,16 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
-	// Use keyID prefix as display hint, not the secret's prefix
-	if len(keyID) < 8 {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	prefix := keyID[:8]
-
 	_, err = tx.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
 		 VALUES (?, ?, 'default', ?, ?, ?)`,
-		keyID, tenantID, prefix, keyHash, now,
+		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -294,13 +311,13 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-
-	// Return token in format "keyID.secret" for O(1) lookup
-	token := keyID + "." + apiKey
+	// Charge the global registration budget only for a tenant actually
+	// created, so requests that fail validation cannot exhaust it.
+	regLimiter.chargeGlobal()
 
 	writeJSON(w, http.StatusCreated, RegisterResponse{
 		TenantID: tenantID,
-		APIKey:   token,
+		APIKey:   key.token,
 	})
 }
 
@@ -329,15 +346,16 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 
 	var resp TenantUsageResponse
 	err := s.store.StateDB.QueryRow(
-		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit,
+		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit, q.max_sandboxes,
 		    (SELECT COUNT(*) FROM services WHERE tenant_id = ?),
 		    (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'),
-		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL)
+		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL),
+		    (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = 'sandbox' AND status != 'failed')
 		 FROM tenant_quotas q
 		 WHERE q.tenant_id = ?`,
-		tenantID, tenantID, tenantID, tenantID,
-	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit,
-		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used)
+		tenantID, tenantID, tenantID, tenantID, tenantID,
+	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit, &resp.Sandboxes.Max,
+		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used, &resp.Sandboxes.Used)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "tenant quota not found")
 		return
@@ -435,7 +453,7 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 	// Stop environments before service cleanup removes tenant networks. Keep
 	// their workspace and preview records so they can be started after reactivation.
 	if s.envManager != nil {
-		s.envManager.StopAllForTenant(r.Context(), tenantID)
+		s.envManager.StopAllForTenant(cleanupCtx, tenantID)
 	}
 
 	// Stop and remove all running containers for this tenant
@@ -469,25 +487,23 @@ type ReactivateResponse struct {
 	Status   string `json:"status"`
 }
 
+// reactivateAfterStatusCheck is a test hook run between the reactivation
+// status check and the guarded UPDATE.
+var reactivateAfterStatusCheck func()
+
 // handleTenantReactivate handles POST /v1/tenants/{tenantID}/reactivate.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour).
+//   - Rate-limited by adminLimiter (5/IP/hour, 20/global/hour), separate
+//     buckets from registration's regLimiter; the global bucket is charged
+//     only after a successful admin-token check (requireAdmin).
 //   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only suspended tenants can be reactivated; already-active returns 409.
 //   - A new API key is generated and returned (one-time display).
 func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration to prevent
-	// brute-force of the bootstrap token via this endpoint.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	// Admin-route limiter (separate from registration's) to prevent
+	// brute-force of the admin/bootstrap token via this endpoint.
+	if !adminLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -519,6 +535,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "tenant is already active")
 		return
 	}
+	if reactivateAfterStatusCheck != nil {
+		reactivateAfterStatusCheck()
+	}
 
 	now := time.Now().Unix()
 
@@ -529,35 +548,34 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 	}
 	defer tx.Rollback()
 
-	// Set tenant status back to active.
-	_, err = tx.Exec(
-		`UPDATE tenants SET status = 'active', updated_at = ? WHERE id = ?`,
+	// Set tenant status back to active. The status guard makes a concurrent
+	// reactivation (which passed the check above) a 409 instead of a second
+	// key and a second round of container restarts.
+	res, err := tx.Exec(
+		`UPDATE tenants SET status = 'active', updated_at = ? WHERE id = ? AND status != 'active'`,
 		now, tenantID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to reactivate tenant")
 		return
 	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		writeError(w, http.StatusConflict, "tenant is already active")
+		return
+	}
 
 	// Generate a new API key for the reactivated tenant since all keys
 	// were revoked on suspension.
-	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
-	if len(keyID) < 8 {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	prefix := keyID[:8]
-
 	_, err = tx.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
 		 VALUES (?, ?, 'reactivation', ?, ?, ?)`,
-		keyID, tenantID, prefix, keyHash, now,
+		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create reactivation key")
@@ -584,12 +602,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		}()
 	}
 
-	// Return token in format "keyID.secret" for O(1) lookup.
-	token := keyID + "." + apiKey
-
 	writeJSON(w, http.StatusOK, ReactivateResponse{
 		TenantID: tenantID,
-		APIKey:   token,
+		APIKey:   key.token,
 		Status:   "active",
 	})
 }
@@ -601,19 +616,35 @@ type QuotaUpdateRequest struct {
 	MaxDatabases         *int `json:"max_databases,omitempty"`
 	MaxBuildsConcurrent  *int `json:"max_builds_concurrent,omitempty"`
 	MaxEnvVarsPerService *int `json:"max_env_vars_per_service,omitempty"`
+	// Sandbox quotas. max_sandboxes may be 0 to disable sandboxes for a
+	// tenant; sandbox_egress_allowed is 0 or 1 and takes effect only when
+	// the server also has a sandbox egress network (otherwise egress is
+	// refused). max_sandbox_disk_mb caps disk_mb when sandbox workspaces are
+	// tmpfs (AH_SANDBOX_WORKSPACE_TMPFS).
+	MaxSandboxes              *int `json:"max_sandboxes,omitempty"`
+	MaxSandboxTTLSeconds      *int `json:"max_sandbox_ttl_seconds,omitempty"`
+	MaxSandboxLifetimeSeconds *int `json:"max_sandbox_lifetime_seconds,omitempty"`
+	SandboxEgressAllowed      *int `json:"sandbox_egress_allowed,omitempty"`
+	MaxSandboxDiskMB          *int `json:"max_sandbox_disk_mb,omitempty"`
 }
 
 // QuotaUpdateResponse is the response body for PATCH /v1/tenants/{tenantID}/quotas.
 type QuotaUpdateResponse struct {
-	TenantID             string `json:"tenant_id"`
-	MaxServices          int    `json:"max_services"`
-	MaxDatabases         int    `json:"max_databases"`
-	MaxBuildsConcurrent  int    `json:"max_builds_concurrent"`
-	MaxEnvVarsPerService int    `json:"max_env_vars_per_service"`
-	MaxMemoryMB          int    `json:"max_memory_mb"`
+	TenantID             string  `json:"tenant_id"`
+	MaxServices          int     `json:"max_services"`
+	MaxDatabases         int     `json:"max_databases"`
+	MaxBuildsConcurrent  int     `json:"max_builds_concurrent"`
+	MaxEnvVarsPerService int     `json:"max_env_vars_per_service"`
+	MaxMemoryMB          int     `json:"max_memory_mb"`
 	MaxCPUCores          float64 `json:"max_cpu_cores"`
-	MaxDiskGB            int    `json:"max_disk_gb"`
-	APIRateLimit         int    `json:"api_rate_limit"`
+	MaxDiskGB            int     `json:"max_disk_gb"`
+	APIRateLimit         int     `json:"api_rate_limit"`
+
+	MaxSandboxes              int `json:"max_sandboxes"`
+	MaxSandboxTTLSeconds      int `json:"max_sandbox_ttl_seconds"`
+	MaxSandboxLifetimeSeconds int `json:"max_sandbox_lifetime_seconds"`
+	SandboxEgressAllowed      int `json:"sandbox_egress_allowed"`
+	MaxSandboxDiskMB          int `json:"max_sandbox_disk_mb"`
 }
 
 // Quota caps — hard upper bounds for operator-set quotas.
@@ -622,27 +653,27 @@ const (
 	quotaCapMaxDatabases         = 50
 	quotaCapMaxBuildsConcurrent  = 10
 	quotaCapMaxEnvVarsPerService = 500
+
+	quotaCapMaxSandboxes              = 50
+	quotaCapMaxSandboxTTLSeconds      = 86400
+	quotaCapMaxSandboxLifetimeSeconds = 7 * 86400
+	quotaCapSandboxEgressAllowed      = 1
+	quotaCapMaxSandboxDiskMB          = environments.SandboxMaxDiskMBCap
 )
 
 // handleQuotaUpdate handles PATCH /v1/tenants/{tenantID}/quotas.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour).
+//   - Rate-limited by adminLimiter (5/IP/hour, 20/global/hour), separate
+//     buckets from registration's regLimiter; the global bucket is charged
+//     only after a successful admin-token check (requireAdmin).
 //   - Requires the admin token (X-Admin-Token, or X-Bootstrap-Token carrying it); falls back to bootstrap tokens when no admin token is configured.
 //   - Only updates fields that are present in the request body (partial update).
 //   - Validates that all values are positive and within defined caps.
 func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration to prevent
-	// brute-force of the bootstrap token via this endpoint.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	// Admin-route limiter (separate from registration's) to prevent
+	// brute-force of the admin/bootstrap token via this endpoint.
+	if !adminLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -676,66 +707,43 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate: all provided values must be positive and within caps.
-	if req.MaxServices != nil {
-		if *req.MaxServices < 1 {
-			writeError(w, http.StatusBadRequest, "max_services must be at least 1")
-			return
-		}
-		if *req.MaxServices > quotaCapMaxServices {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_services must not exceed %d", quotaCapMaxServices))
-			return
-		}
-	}
-	if req.MaxDatabases != nil {
-		if *req.MaxDatabases < 1 {
-			writeError(w, http.StatusBadRequest, "max_databases must be at least 1")
-			return
-		}
-		if *req.MaxDatabases > quotaCapMaxDatabases {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_databases must not exceed %d", quotaCapMaxDatabases))
-			return
-		}
-	}
-	if req.MaxBuildsConcurrent != nil {
-		if *req.MaxBuildsConcurrent < 1 {
-			writeError(w, http.StatusBadRequest, "max_builds_concurrent must be at least 1")
-			return
-		}
-		if *req.MaxBuildsConcurrent > quotaCapMaxBuildsConcurrent {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_builds_concurrent must not exceed %d", quotaCapMaxBuildsConcurrent))
-			return
-		}
-	}
-	if req.MaxEnvVarsPerService != nil {
-		if *req.MaxEnvVarsPerService < 1 {
-			writeError(w, http.StatusBadRequest, "max_env_vars_per_service must be at least 1")
-			return
-		}
-		if *req.MaxEnvVarsPerService > quotaCapMaxEnvVarsPerService {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_env_vars_per_service must not exceed %d", quotaCapMaxEnvVarsPerService))
-			return
-		}
+	// Each field's JSON name is also its tenant_quotas column name (a constant,
+	// never user input, so it is safe to build into the UPDATE).
+	fields := []struct {
+		column string
+		value  *int
+		min    int
+		cap    int
+	}{
+		{"max_services", req.MaxServices, 1, quotaCapMaxServices},
+		{"max_databases", req.MaxDatabases, 1, quotaCapMaxDatabases},
+		{"max_builds_concurrent", req.MaxBuildsConcurrent, 1, quotaCapMaxBuildsConcurrent},
+		{"max_env_vars_per_service", req.MaxEnvVarsPerService, 1, quotaCapMaxEnvVarsPerService},
+		{"max_sandboxes", req.MaxSandboxes, 0, quotaCapMaxSandboxes},
+		{"max_sandbox_ttl_seconds", req.MaxSandboxTTLSeconds, 60, quotaCapMaxSandboxTTLSeconds},
+		{"max_sandbox_lifetime_seconds", req.MaxSandboxLifetimeSeconds, 60, quotaCapMaxSandboxLifetimeSeconds},
+		{"sandbox_egress_allowed", req.SandboxEgressAllowed, 0, quotaCapSandboxEgressAllowed},
+		{"max_sandbox_disk_mb", req.MaxSandboxDiskMB, 16, quotaCapMaxSandboxDiskMB},
 	}
 
-	// Build dynamic UPDATE query for partial updates.
-	setClauses := []string{}
-	args := []any{}
-	if req.MaxServices != nil {
-		setClauses = append(setClauses, "max_services = ?")
-		args = append(args, *req.MaxServices)
-	}
-	if req.MaxDatabases != nil {
-		setClauses = append(setClauses, "max_databases = ?")
-		args = append(args, *req.MaxDatabases)
-	}
-	if req.MaxBuildsConcurrent != nil {
-		setClauses = append(setClauses, "max_builds_concurrent = ?")
-		args = append(args, *req.MaxBuildsConcurrent)
-	}
-	if req.MaxEnvVarsPerService != nil {
-		setClauses = append(setClauses, "max_env_vars_per_service = ?")
-		args = append(args, *req.MaxEnvVarsPerService)
+	// Validate: all provided values must be within [min, cap].
+	// Build the partial UPDATE from the fields that are present.
+	var setClauses []string
+	var args []any
+	for _, f := range fields {
+		if f.value == nil {
+			continue
+		}
+		if *f.value < f.min {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at least %d", f.column, f.min))
+			return
+		}
+		if *f.value > f.cap {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must not exceed %d", f.column, f.cap))
+			return
+		}
+		setClauses = append(setClauses, f.column+" = ?")
+		args = append(args, *f.value)
 	}
 
 	if len(setClauses) > 0 {
@@ -754,18 +762,24 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return strconv.Itoa(*p)
 	}
-	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s",
-		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService))
+	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s max_sandboxes=%s max_sandbox_ttl_seconds=%s max_sandbox_lifetime_seconds=%s sandbox_egress_allowed=%s max_sandbox_disk_mb=%s",
+		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService),
+		ptrIntStr(req.MaxSandboxes), ptrIntStr(req.MaxSandboxTTLSeconds), ptrIntStr(req.MaxSandboxLifetimeSeconds), ptrIntStr(req.SandboxEgressAllowed),
+		ptrIntStr(req.MaxSandboxDiskMB))
 
 	// Read back the updated quotas and return them.
 	var resp QuotaUpdateResponse
 	resp.TenantID = tenantID
 	err = s.store.StateDB.QueryRow(
 		`SELECT max_services, max_databases, max_builds_concurrent, max_env_vars_per_service,
-		        max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
+		        max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit,
+		        max_sandboxes, max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds, sandbox_egress_allowed,
+		        max_sandbox_disk_mb
 		 FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&resp.MaxServices, &resp.MaxDatabases, &resp.MaxBuildsConcurrent, &resp.MaxEnvVarsPerService,
-		&resp.MaxMemoryMB, &resp.MaxCPUCores, &resp.MaxDiskGB, &resp.APIRateLimit)
+		&resp.MaxMemoryMB, &resp.MaxCPUCores, &resp.MaxDiskGB, &resp.APIRateLimit,
+		&resp.MaxSandboxes, &resp.MaxSandboxTTLSeconds, &resp.MaxSandboxLifetimeSeconds, &resp.SandboxEgressAllowed,
+		&resp.MaxSandboxDiskMB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -830,7 +844,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, provided, unavailableMsg st
 			return false
 		}
 	}
-	regLimiter.chargeGlobal()
+	adminLimiter.chargeGlobal()
 	return true
 }
 

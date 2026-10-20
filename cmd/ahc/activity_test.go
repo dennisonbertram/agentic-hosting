@@ -558,9 +558,9 @@ func TestTenant_IsNotPlaceholder(t *testing.T) {
 		"status": "active", "created_at": int64(0), "updated_at": int64(0),
 	}
 	usage := map[string]interface{}{
-		"services":   map[string]interface{}{"used": 0, "max": 10},
-		"databases":  map[string]interface{}{"used": 0, "max": 5},
-		"api_keys":   map[string]interface{}{"used": 0, "max": 20},
+		"services":  map[string]interface{}{"used": 0, "max": 10},
+		"databases": map[string]interface{}{"used": 0, "max": 5},
+		"api_keys":  map[string]interface{}{"used": 0, "max": 20},
 		"memory_mb": 0, "cpu_cores": 0.0, "disk_gb": 0, "rate_limit": 100,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

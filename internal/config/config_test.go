@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefault(t *testing.T) {
@@ -30,6 +32,8 @@ func TestFromEnv_Defaults(t *testing.T) {
 		"AH_MASTER_KEY_PATH", "AH_BUILD_DIR", "AH_NIXPACKS_PATH",
 		"AH_DOCKER_DATA_DIR", "AH_KANBAN_PORT_START", "AH_KANBAN_PORT_END",
 		"AH_EXTERNAL_TLS_TERMINATED", "AH_CORS_ORIGINS",
+		"AH_CONTAINER_RUNTIME", "AH_WARM_POOL_ENABLED", "AH_GC_PRUNE_DOCKER",
+		"AH_MAX_SANDBOXES_TOTAL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -162,4 +166,99 @@ func TestFromEnv_KanbanPortRangePartialOverride(t *testing.T) {
 	cfg := FromEnv()
 	assert.Equal(t, 8000, cfg.KanbanPortStart)
 	assert.Equal(t, DefaultKanbanPortEnd, cfg.KanbanPortEnd)
+}
+
+func TestParseCORSOrigins_NoValidOriginsDisablesCORS(t *testing.T) {
+	for _, raw := range []string{"*", ",", "none", " NONE ", "*,none"} {
+		got := ParseCORSOrigins(raw)
+		assert.NotNil(t, got, "%q must return a non-nil empty slice (nil means defaults)", raw)
+		assert.Empty(t, got, raw)
+	}
+}
+
+func TestLoadFromEnv_ReportsInvalidValues(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "ninety")
+	t.Setenv("AH_SNAPSHOT_MAX_PER_SERVICE", "unlimited")
+	_, err := LoadFromEnv()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AH_SNAPSHOT_MAX_AGE")
+	assert.Contains(t, err.Error(), "AH_SNAPSHOT_MAX_PER_SERVICE")
+}
+
+func TestLoadFromEnv_AcceptsDaySuffix(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "90d")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, 90*24*time.Hour, cfg.SnapshotMaxAge)
+}
+
+func TestLoadFromEnv_RejectsInvertedKanbanRange(t *testing.T) {
+	t.Setenv("AH_KANBAN_PORT_START", "9000")
+	t.Setenv("AH_KANBAN_PORT_END", "8000")
+	_, err := LoadFromEnv()
+	require.Error(t, err)
+}
+
+func TestFromEnv_SnapshotRetention(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_PER_SERVICE", "3")
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "48h")
+	cfg := FromEnv()
+	assert.Equal(t, 3, cfg.SnapshotMaxPerService)
+	assert.Equal(t, 48*time.Hour, cfg.SnapshotMaxAge)
+
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "two days")
+	assert.Equal(t, DefaultSnapshotMaxAge, FromEnv().SnapshotMaxAge, "invalid duration falls back to default")
+}
+
+func TestParseCORSOrigins_DedupesAndDropsWildcard(t *testing.T) {
+	got := ParseCORSOrigins(" https://a.example , *, https://a.example,,https://b.example")
+	assert.Equal(t, []string{"https://a.example", "https://b.example"}, got)
+}
+
+func TestLoadFromEnv_ContainerRuntimeDefaultsToRunsc(t *testing.T) {
+	t.Setenv("AH_CONTAINER_RUNTIME", "")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, RuntimeRunsc, cfg.ContainerRuntime)
+	assert.Equal(t, RuntimeRunsc, Default().ContainerRuntime)
+}
+
+func TestLoadFromEnv_ContainerRuntimeRunc(t *testing.T) {
+	t.Setenv("AH_CONTAINER_RUNTIME", " runc ")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, RuntimeRunc, cfg.ContainerRuntime)
+}
+
+func TestLoadFromEnv_ContainerRuntimeRejectsUnknown(t *testing.T) {
+	for _, v := range []string{"kata", "RUNSC", "io.containerd.runc.v2"} {
+		t.Setenv("AH_CONTAINER_RUNTIME", v)
+		cfg, err := LoadFromEnv()
+		require.Error(t, err, v)
+		assert.Contains(t, err.Error(), "AH_CONTAINER_RUNTIME")
+		// An invalid value never weakens isolation: it falls back to runsc.
+		assert.Equal(t, RuntimeRunsc, cfg.ContainerRuntime, v)
+	}
+}
+
+func TestLoadFromEnv_WarmPoolAndPruneToggles(t *testing.T) {
+	t.Setenv("AH_WARM_POOL_ENABLED", "")
+	t.Setenv("AH_GC_PRUNE_DOCKER", "")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.True(t, cfg.WarmPoolEnabled)
+	assert.True(t, cfg.GCPruneDocker)
+
+	t.Setenv("AH_WARM_POOL_ENABLED", "false")
+	t.Setenv("AH_GC_PRUNE_DOCKER", "0")
+	cfg, err = LoadFromEnv()
+	require.NoError(t, err)
+	assert.False(t, cfg.WarmPoolEnabled)
+	assert.False(t, cfg.GCPruneDocker)
+
+	t.Setenv("AH_WARM_POOL_ENABLED", "nope")
+	cfg, err = LoadFromEnv()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AH_WARM_POOL_ENABLED")
+	assert.True(t, cfg.WarmPoolEnabled)
 }

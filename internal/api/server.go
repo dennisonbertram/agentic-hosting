@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
@@ -46,6 +47,12 @@ type ServerConfig struct {
 	DataDir               string // data dir for health disk checks (default /var/lib/ah)
 	ExternalTLSTerminated bool
 	CORSOrigins           []string // nil = middleware defaults; empty = disable CORS
+	ContainerRuntime      string   // workload OCI runtime reported by detailed health ("" = not reported)
+	// ServiceManager, when set, is used for all service lifecycle calls. Pass
+	// the same instance whose DeployImage the build manager uses so build
+	// deploys and API deploy/restart/reset share per-service locks and the
+	// deploy semaphore/queue. When nil and Docker is set, NewServer creates one.
+	ServiceManager *services.Manager
 }
 
 type kanbanManager interface {
@@ -78,6 +85,7 @@ type Server struct {
 	openRegistration  bool
 	baseDomain        string
 	dataDir           string
+	containerRuntime  string
 	router            chi.Router
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
@@ -95,6 +103,11 @@ type Server struct {
 	idempotencyStore  *middleware.IdempotencyStore
 	longInflight      *middleware.InflightLimiter
 	corsOrigins       []string
+	// sandboxCreateLimiter caps POST /v1/sandboxes per tenant.
+	sandboxCreateLimiter *middleware.RateLimiter
+	// backgroundDeploys tracks first deploys started by respondDeploying, so
+	// tests can wait for them before their temp dirs are removed.
+	backgroundDeploys sync.WaitGroup
 }
 
 const (
@@ -127,10 +140,15 @@ func NewServer(cfg ServerConfig) *Server {
 
 	var svcMgr *services.Manager
 	var snapMgr *snapshots.Manager
+	if cfg.ServiceManager != nil {
+		svcMgr = cfg.ServiceManager
+	}
 	if cfg.Docker != nil {
+		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+	}
+	if svcMgr == nil && cfg.Docker != nil {
 		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir, cfg.DeploymentStore)
 		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
-		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 
 	s := &Server{
@@ -143,6 +161,7 @@ func NewServer(cfg ServerConfig) *Server {
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
 		dataDir:           cfg.DataDir,
+		containerRuntime:  cfg.ContainerRuntime,
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,
@@ -159,6 +178,8 @@ func NewServer(cfg ServerConfig) *Server {
 		idempotencyStore:  idem,
 		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
 		corsOrigins:       cfg.CORSOrigins,
+
+		sandboxCreateLimiter: middleware.NewRateLimiterWithHeaderPrefix(sandboxCreateRPS, sandboxCreateBurst, sandboxCreateHeaderPrefix),
 	}
 	s.setupRoutes()
 	return s
@@ -197,16 +218,19 @@ func (s *Server) setupRoutes() {
 		r.Use(chimw.Timeout(30 * time.Second))
 		r.Get("/v1/system/health", s.handleHealth)
 		r.Post("/v1/tenants/register", s.handleTenantRegister)
-		// Recovery endpoint: authenticated by bootstrap token, not an API key.
+		// Recovery endpoint: authenticated by the admin token (bootstrap tokens
+		// only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows tenants who have lost all their keys to obtain a new one.
 		r.Post("/v1/auth/recover", s.handleKeyRecover)
-		// Reactivation endpoint: authenticated by bootstrap token, not an API key.
+		// Reactivation endpoint: authenticated by the admin token (bootstrap
+		// tokens only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows operator to reactivate a suspended tenant and generate a new API key.
 		r.Post("/v1/tenants/{tenantID}/reactivate", s.handleTenantReactivate)
 		// Validate endpoint: checks if a bootstrap token is valid.
 		// Useful during token rotation to verify both old and new tokens.
 		r.Post("/v1/system/bootstrap-token/validate", s.handleBootstrapTokenValidate)
-		// Quota update endpoint: authenticated by bootstrap token, not an API key.
+		// Quota update endpoint: authenticated by the admin token (bootstrap
+		// tokens only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows operator to update tenant resource limits.
 		r.Patch("/v1/tenants/{tenantID}/quotas", s.handleQuotaUpdate)
 	})
@@ -227,7 +251,6 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/tenant/usage", s.handleTenantUsage)
 		r.Get("/v1/tenant/usage/metrics", s.handleTenantMetrics)
 		r.Patch("/v1/tenant", s.handleTenantUpdate)
-		r.Delete("/v1/tenant", s.handleTenantDelete)
 
 		r.Post("/v1/auth/keys", s.handleKeyCreate)
 		r.Get("/v1/auth/keys", s.handleKeyList)
@@ -291,6 +314,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewCreate)
 		r.Get("/v1/environments/{envID}/previews", s.handleEnvironmentPreviewList)
 		r.Delete("/v1/environments/{envID}/previews/{previewID}", s.handleEnvironmentPreviewDelete)
+
+		// Sandbox routes (create, delete, exec and logs need longer timeouts)
+		r.Get("/v1/sandboxes", s.handleSandboxList)
+		r.Get("/v1/sandboxes/{sandboxID}", s.handleSandboxGet)
+		r.Post("/v1/sandboxes/{sandboxID}/extend", s.handleSandboxExtend)
 	})
 
 	// Long-running endpoints share auth/rate-limit middleware but intentionally
@@ -302,6 +330,11 @@ func (s *Server) setupRoutes() {
 		r.Use(s.longInflight.Middleware)
 		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Use(s.idempotencyStore.Middleware)
+		// Tenant delete stops every service/database/kanban/environment
+		// container synchronously after the suspension commits; that can take
+		// minutes, and a timeout here would leave the client unable to tell
+		// the delete succeeded (its retry gets 401, keys are revoked).
+		r.Delete("/v1/tenant", s.handleTenantDelete)
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)
@@ -310,6 +343,12 @@ func (s *Server) setupRoutes() {
 		r.Post("/v1/kanban", s.handleKanbanCreate)
 		r.Post("/v1/environments", s.handleEnvironmentCreate)
 		r.Post("/v1/environments/{envID}/sync", s.handleEnvironmentSync)
+		// Create may pull an image; delete stops the container and removes
+		// the volume. Create is idempotent (Idempotency-Key) and rate limited
+		// per tenant.
+		r.With(s.sandboxCreateRateLimit).Post("/v1/sandboxes", s.handleSandboxCreate)
+		r.Delete("/v1/sandboxes/{sandboxID}", s.handleSandboxDelete)
+		r.Get("/v1/sandboxes/{sandboxID}/logs", s.handleSandboxLogs)
 	})
 
 	// Long-running endpoints that skip BOTH standard timeout AND idempotency.
@@ -321,6 +360,7 @@ func (s *Server) setupRoutes() {
 		r.Use(s.longInflight.Middleware)
 		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Post("/v1/environments/{envID}/exec", s.handleEnvironmentExec)
+		r.Post("/v1/sandboxes/{sandboxID}/exec", s.handleSandboxExec)
 	})
 
 	s.router = r
@@ -423,17 +463,27 @@ func normalizeIP(s string) string {
 	return ""
 }
 
+// maxPageLimit caps the limit query parameter on list endpoints.
+const maxPageLimit = 200
+
+// parseLimit reads the limit query parameter: def when absent, an error when
+// it is not a positive integer, and capped at maxPageLimit.
+func parseLimit(r *http.Request, def int) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return def, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 {
+		return 0, fmt.Errorf("limit must be between 1 and %d", maxPageLimit)
+	}
+	return min(limit, maxPageLimit), nil
+}
+
 // parsePagination extracts limit and offset query parameters with defaults.
 func parsePagination(r *http.Request) (limit, offset int, err error) {
-	limit = 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		limit, err = strconv.Atoi(raw)
-		if err != nil || limit < 1 {
-			return 0, 0, fmt.Errorf("limit must be between 1 and 200")
-		}
-		if limit > 200 {
-			limit = 200
-		}
+	if limit, err = parseLimit(r, 100); err != nil {
+		return 0, 0, err
 	}
 	if raw := r.URL.Query().Get("offset"); raw != "" {
 		offset, err = strconv.Atoi(raw)

@@ -16,6 +16,17 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 - **Default port**: 8080 (loopback only, behind Traefik)
 - **License**: [MIT](LICENSE)
 
+## Quick start
+
+| You have | Run | Runbook |
+|---|---|---|
+| A fresh Ubuntu 24.04 server (amd64/arm64) | `sudo scripts/setup-linux.sh --domain example.com --acme-email ops@example.com` | [setup-linux](docs/runbooks/setup-linux.md) |
+| An existing Linux install to upgrade or repair | `sudo scripts/setup-linux.sh` | [operations](docs/runbooks/operations.md) |
+| A Mac for local development | `scripts/setup-macos.sh` then `make sandbox` | [setup-macos](docs/runbooks/setup-macos.md) |
+| Any machine with Docker, for a throwaway instance | `make sandbox` / `make sandbox-down` | [local-sandbox](docs/runbooks/local-sandbox.md) |
+
+Every setup script accepts `--dry-run` (check prerequisites, print the plan, change nothing) and `--help`. The macOS setup and the sandbox use the `runc` runtime when gVisor is unavailable; that is a dev-only fallback with no syscall sandbox, `ah` refuses it without `--dev`, and it logs a warning banner at startup. Production always runs workloads under gVisor (`runsc`). Day-2 tasks (upgrade, backup and restore, master key rotation, logs, troubleshooting) are in the [operations runbook](docs/runbooks/operations.md).
+
 ## Give this to your agent
 
 One shareable link is enough for an agent to install the control plane, register a tenant, deploy from git, add Postgres/Redis, and read logs.
@@ -78,12 +89,15 @@ Environment variables read by `ah`:
 | `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
 | `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |
 | `AH_CORS_ORIGINS` | Comma-separated browser Origin allowlist for the dashboard. Default: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io`. `*` is ignored |
+| `AH_CONTAINER_RUNTIME` | OCI runtime for tenant workloads: `runsc` (default, gVisor) or `runc`. `runc` is a dev-only fallback for hosts without gVisor (macOS); `ah` refuses it unless started with `--dev` |
+| `AH_WARM_POOL_ENABLED` | `false` disables the pre-started environment containers (default `true`). The local sandbox turns it off so it does not pull every template image |
+| `AH_GC_PRUNE_DOCKER` | `false` stops GC from running daemon-wide dangling-image and unused anonymous-volume prunes (default `true`). Set it when the Docker daemon is shared with unrelated work |
 
 ## Installation
 
 For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
 
-For a fresh Ubuntu 24.04 amd64 host, `scripts/bootstrap-stack.sh` installs and configures everything below in one run, including generating the master key, bootstrap token and admin token (see the fresh-install guide). The manual steps that follow are for reference or customized setups.
+The quickest path is `scripts/setup-linux.sh` (see [Quick start](#quick-start)); on a fresh host it runs `scripts/bootstrap-stack.sh` and then installs `ahc`, and on an existing host it upgrades in place. For a fresh Ubuntu 24.04 amd64 host, `scripts/bootstrap-stack.sh` installs and configures everything below in one run, including generating the master key, bootstrap token and admin token (see the fresh-install guide). The manual steps that follow are for reference or customized setups.
 
 ### Run the OpenRouter example on the Mac mini
 
@@ -353,9 +367,9 @@ Connection strings use the DNS alias `ah-db-<databaseID>` and the engine port (`
 ### Background Processes
 
 - **Reconciler** (30s interval): Syncs DB state to Docker reality. Detects crashes, circuit breakers.
-- **GC** (5min interval): Cleans orphaned containers, volumes, images, build directories.
+- **GC** (5min interval): Cleans orphaned containers, volumes, images (including public images ah pulled for image-sourced sandboxes once nothing uses them), build directories.
 - **Circuit breaker**: 5 crashes in 10 minutes stops the container **and removes it**. Reset with `POST /v1/services/{id}/reset`, then `POST .../redeploy` (`/start` returns 409 because there is no container).
-- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Sync paths return **500** `{"error":"internal error"}` (not 503); service create returns 201 then fails async.
+- **Disk watermarks**: Warns at 80% usage, blocks new deploys at 90%. Build, database create, kanban create, sandbox create, deploy and restart/redeploy return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`; service create returns 201 then fails async. A full deploy queue is also 503 with `Retry-After`.
 - **Tenant resource defaults**: New tenants get **2048 MB / 2 CPUs** from `tenant_quotas`. Fallback 512 MB / 1 CPU only if the quota row cannot be loaded. Limits are per-tenant and still bounded by the host.
 
 ### Backups
@@ -392,10 +406,17 @@ ah backup
 make build
 
 # Run locally (requires Docker + gVisor)
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum AH_ADMIN_TOKEN=dev-admin-token-32-chars-minimum make run
+AH_BOOTSTRAP_TOKEN=dev-bootstrap-token-32-chars-minimum AH_ADMIN_TOKEN=dev-admin-token-32-chars-minimum make run
 
 # Run in dev mode (no HTTPS enforcement, open registration)
 ./bin/ah --dev --open-registration --port 8080
+
+# Throwaway local instance with a demo tenant and service (macOS or Linux)
+make sandbox
+make sandbox-down
+
+# Dry-run checks for the setup scripts (no sudo, nothing installed)
+make test-scripts
 
 # Backup databases
 ./bin/ah backup

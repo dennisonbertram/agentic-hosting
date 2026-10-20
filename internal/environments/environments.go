@@ -117,6 +117,19 @@ type Manager struct {
 	externalTLSTerminated bool
 	traefikConfigDir      string
 	mu                    sync.Mutex // for state transitions
+
+	// Sandbox settings (see sandbox.go).
+	maxSandboxesTotal int // host-wide cap on non-failed sandboxes; 0 = none
+	snapshotSource    SnapshotSource
+	serviceSource     ServiceSource
+	diskCheck         func() error
+	// Phase 2 hardening (see sandbox_hardening.go); all off by default.
+	sandboxEgressNetwork  string // egress bridge name; "" = egress "internet" refused
+	sandboxRuntime        string // OCI runtime for sandboxes; "" = the client's runtime
+	sandboxWorkspaceTmpfs bool   // /workspace is a tmpfs of disk_mb, no volume
+	// Sandbox image pulls (see sandbox_images.go).
+	sandboxPullSem    chan struct{} // host-wide limit on concurrent sandbox pulls
+	sandboxMaxImageMB int           // largest public image a sandbox may pull
 }
 
 // SetExternalTLSTerminated configures preview routes for deployments where a
@@ -133,10 +146,12 @@ func NewManager(db *sql.DB, docker docker.Client, baseDomain, traefikConfigDir s
 		panic("environments: NewManager requires non-nil docker client")
 	}
 	return &Manager{
-		db:               db,
-		docker:           docker,
-		baseDomain:       baseDomain,
-		traefikConfigDir: traefikConfigDir,
+		db:                db,
+		docker:            docker,
+		baseDomain:        baseDomain,
+		traefikConfigDir:  traefikConfigDir,
+		sandboxPullSem:    make(chan struct{}, defaultSandboxMaxConcurrentPulls),
+		sandboxMaxImageMB: defaultSandboxMaxImageMB,
 	}
 }
 
@@ -172,47 +187,165 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, apierr.Validation("lease_duration_seconds must be between 300 and 86400")
 	}
 
+	c, err := m.create(ctx, tenantID, createSpec{
+		kind:        KindEnvironment,
+		name:        req.Name,
+		templateID:  req.TemplateID,
+		poolTmplID:  tmpl.ID,
+		image:       tmpl.BaseImage,
+		memoryMB:    tmpl.MemoryMB,
+		cpuMillis:   tmpl.CPUMillis,
+		egressAllow: tmpl.EgressPolicy == "allow",
+		leaseSec:    leaseDuration,
+		sourceType:  "template",
+		sourceRef:   tmpl.ID,
+		runMode:     "idle",
+		egress:      "none",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Environment{
+		ID:                   c.id,
+		TenantID:             tenantID,
+		Name:                 req.Name,
+		TemplateID:           req.TemplateID,
+		Status:               "running",
+		ContainerID:          c.containerID,
+		VolumeName:           c.volumeName,
+		LeaseExpiresAt:       &c.leaseExpiresAt,
+		LeaseDurationSeconds: leaseDuration,
+		LastActivityAt:       &c.now,
+		CreatedAt:            c.now,
+		UpdatedAt:            c.now,
+	}, nil
+}
+
+// Kinds of rows in the environments table.
+const (
+	KindEnvironment = "environment"
+	KindSandbox     = "sandbox"
+)
+
+// createSpec describes one environment or sandbox to provision. Environments
+// and sandboxes share the INSERT-with-quota, warm pool, volume, container and
+// commit steps; they differ only in these fields.
+type createSpec struct {
+	kind        string
+	name        string
+	templateID  string // stored in template_id
+	poolTmplID  string // warm-pool template to try; "" skips the pool
+	image       string
+	memoryMB    int
+	cpuMillis   int
+	egressAllow bool
+	env         []string
+	useImageCmd bool
+	localImage  bool
+	leaseSec    int
+	// maxExpiresAt is the absolute lifetime cap (sandboxes only, 0 = none).
+	maxExpiresAt int64
+	sourceType   string
+	sourceRef    string
+	runMode      string
+	egress       string
+	// Sandbox hardening (zero values keep the environment behaviour).
+	runtime          string // OCI runtime override
+	workspaceTmpfsMB int    // >0: tmpfs /workspace of this size, no volume
+	egressNetwork    string // attach only to this egress bridge, not the tenant network
+	// prepareImage, when set, makes the image available on the cold-start
+	// path (after the quota INSERT) instead of RunEnvironment pulling it.
+	prepareImage func(ctx context.Context) error
+}
+
+// created is what create returns to the kind-specific wrappers.
+type created struct {
+	id             string
+	containerID    string
+	volumeName     string
+	leaseExpiresAt int64
+	now            int64
+}
+
+// kindLabel is the word used in user-facing errors for a row kind.
+func kindLabel(kind string) string {
+	if kind == KindSandbox {
+		return "sandbox"
+	}
+	return "environment"
+}
+
+// create provisions a row of the given kind: quota-checked INSERT, warm pool
+// or cold start, then the commit to 'running'.
+func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) (*created, error) {
+	label := kindLabel(spec.kind)
+
 	// Generate ID
 	id, err := generateID()
 	if err != nil {
 		return nil, err
 	}
 
-	var maxEnvironments int
+	quotaColumn := "max_environments"
+	globalCap := 0
+	if spec.kind == KindSandbox {
+		quotaColumn = "max_sandboxes"
+		globalCap = m.maxSandboxesTotal
+	}
+	var maxPerTenant int
 	if err := m.db.QueryRowContext(ctx,
-		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
-	).Scan(&maxEnvironments); err != nil {
+		`SELECT `+quotaColumn+` FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxPerTenant); err != nil {
 		return nil, fmt.Errorf("check quota: %w", err)
 	}
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
+	if spec.workspaceTmpfsMB > 0 {
+		// The workspace is a tmpfs: no volume is created, stored or removed.
+		volumeName = ""
+	}
+	var maxExpires any
+	if spec.maxExpiresAt > 0 {
+		maxExpires = spec.maxExpiresAt
+	}
 
 	// Insert DB row with status=creating
 	// The quota count is part of the INSERT so concurrent creates cannot both
 	// pass the check. Nothing is claimed from the warm pool until this succeeds.
+	// Environments and sandboxes are counted separately; sandboxes are also
+	// bounded host-wide by globalCap (0 = no host cap).
 	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
-		 lease_duration_seconds, created_at, updated_at)
-		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?
-		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')) < ?`,
-		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now, tenantID, maxEnvironments,
+		 lease_duration_seconds, created_at, updated_at, kind, source_type, source_ref,
+		 image_ref, run_mode, memory_mb, cpu_millicores, egress, max_expires_at, disk_mb)
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = ? AND status NOT IN ('failed')) < ?
+		 AND (? <= 0 OR (SELECT COUNT(*) FROM environments WHERE kind = ? AND status NOT IN ('failed')) < ?)`,
+		id, tenantID, spec.name, spec.templateID, volumeName, spec.leaseSec, now, now,
+		spec.kind, spec.sourceType, spec.sourceRef, spec.image, spec.runMode, spec.memoryMB, spec.cpuMillis, spec.egress, maxExpires, spec.workspaceTmpfsMB,
+		tenantID, spec.kind, maxPerTenant,
+		globalCap, spec.kind, globalCap,
 	)
 	if err == nil {
 		if n, _ := res.RowsAffected(); n == 0 {
-			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
+			return nil, m.quotaError(ctx, tenantID, spec.kind, maxPerTenant, globalCap)
 		}
 	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return nil, apierr.Conflict(fmt.Sprintf("environment with name %q already exists", req.Name))
+			return nil, apierr.Conflict(fmt.Sprintf("%s with name %q already exists", label, spec.name))
 		}
-		return nil, fmt.Errorf("insert environment: %w", err)
+		return nil, fmt.Errorf("insert %s: %w", label, err)
 	}
 
-	// Ensure tenant network (needed for both warm and cold paths).
+	// Ensure tenant network (needed for both warm and cold paths). An egress
+	// sandbox is attached only to the egress bridge, never the tenant network.
 	tenantNet := docker.TenantNetworkName(tenantID)
-	if _, err := m.docker.EnsureNetwork(ctx, tenantNet); err != nil {
+	if spec.egressNetwork != "" {
+		tenantNet = spec.egressNetwork
+	} else if _, err := m.docker.EnsureNetwork(ctx, tenantNet); err != nil {
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("ensure network: %w", err)
 	}
@@ -221,8 +354,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	// get a pre-warmed container.
 	var containerID string
 	usedPool := false
-	if m.pool != nil {
-		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, tmpl.ID, tenantID, id)
+	// Pool containers use the default runtime, a workspace volume and the
+	// tenant network, so hardened sandboxes never take one.
+	poolOK := spec.runtime == "" && spec.workspaceTmpfsMB == 0 && spec.egressNetwork == ""
+	if m.pool != nil && spec.poolTmplID != "" && poolOK {
+		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, spec.poolTmplID, tenantID, id)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
 			transferErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
@@ -258,37 +394,60 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	if !usedPool {
 		// Cold-start path: create a new volume and run a fresh container.
-		if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
-			m.updateStatus(ctx, id, "failed")
-			return nil, fmt.Errorf("create volume: %w", err)
+		if spec.prepareImage != nil {
+			if err := spec.prepareImage(ctx); err != nil {
+				m.updateStatus(ctx, id, "failed")
+				var apiErr *apierr.APIError
+				if errors.As(err, &apiErr) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("run %s: %w", label, err)
+			}
 		}
-
-		// Determine egress policy from template
-		egressAllow := tmpl.EgressPolicy == "allow"
+		if volumeName != "" {
+			if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
+				m.updateStatus(ctx, id, "failed")
+				return nil, fmt.Errorf("create volume: %w", err)
+			}
+		}
 
 		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
 			TenantID:    tenantID,
 			EnvID:       id,
-			Image:       tmpl.BaseImage,
-			MemoryMB:    int64(tmpl.MemoryMB),
-			CPUMillis:   int64(tmpl.CPUMillis),
+			Image:       spec.image,
+			MemoryMB:    int64(spec.memoryMB),
+			CPUMillis:   int64(spec.cpuMillis),
 			VolumeName:  volumeName,
 			NetworkName: tenantNet,
 			Labels:      map[string]string{},
-			EgressAllow: egressAllow,
+			EgressAllow: spec.egressAllow,
+			Env:         spec.env,
+			UseImageCmd: spec.useImageCmd,
+			LocalImage:  spec.localImage,
+
+			ImagePrepared:    spec.prepareImage != nil,
+			Runtime:          spec.runtime,
+			WorkspaceTmpfsMB: spec.workspaceTmpfsMB,
+			EgressNetwork:    spec.egressNetwork != "",
 		})
 		if err != nil {
 			m.updateStatus(ctx, id, "failed")
-			_ = m.docker.RemoveVolume(ctx, volumeName)
-			return nil, fmt.Errorf("run environment: %w", err)
+			if volumeName != "" {
+				_ = m.docker.RemoveVolume(ctx, volumeName)
+			}
+			return nil, fmt.Errorf("run %s: %w", label, err)
 		}
 	}
 
 	// Update DB with container_id, status=running, lease. The update only
 	// applies while the row is still 'creating' and the tenant is active, so a
 	// suspension that raced with this Create (StopAllForTenant skips rows with
-	// no container yet) cannot leave a running container behind.
-	leaseExpiresAt := now + int64(leaseDuration)
+	// no container yet) cannot leave a running container behind. The same
+	// guard makes a sandbox DELETE (status 'deleting') during create win.
+	leaseExpiresAt := now + int64(spec.leaseSec)
+	if spec.maxExpiresAt > 0 && leaseExpiresAt > spec.maxExpiresAt {
+		leaseExpiresAt = spec.maxExpiresAt
+	}
 	var updateResult sql.Result
 	updateResult, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running',
@@ -321,42 +480,67 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		if deleteErr != nil {
 			log.Printf("environments: remove interrupted creation %s: %v", id, deleteErr)
 		}
+		if spec.kind == KindSandbox {
+			// A concurrent DELETE claimed the row ('deleting') and finishes
+			// removing it; only a row still 'creating' is marked failed.
+			m.updateStatusIf(ctx, id, "creating", "failed")
+			return nil, apierr.Conflict("sandbox creation was interrupted: it was deleted or the tenant is not active")
+		}
 		m.updateStatus(ctx, id, "failed")
 		return nil, apierr.Validation("environment creation was interrupted: tenant is not active")
 	}
 
-	return &Environment{
-		ID:                   id,
-		TenantID:             tenantID,
-		Name:                 req.Name,
-		TemplateID:           req.TemplateID,
-		Status:               "running",
-		ContainerID:          containerID,
-		VolumeName:           volumeName,
-		LeaseExpiresAt:       &leaseExpiresAt,
-		LeaseDurationSeconds: leaseDuration,
-		LastActivityAt:       &now,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+	return &created{
+		id:             id,
+		containerID:    containerID,
+		volumeName:     volumeName,
+		leaseExpiresAt: leaseExpiresAt,
+		now:            now,
 	}, nil
 }
 
-// Get returns an environment by ID, scoped to tenant.
-func (m *Manager) Get(ctx context.Context, tenantID, envID string) (*Environment, error) {
+// quotaError explains why a quota-checked INSERT inserted nothing.
+func (m *Manager) quotaError(ctx context.Context, tenantID, kind string, maxPerTenant, globalCap int) error {
+	if kind != KindSandbox {
+		return apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxPerTenant))
+	}
+	var tenantCount int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = ? AND status NOT IN ('failed')`,
+		tenantID, kind).Scan(&tenantCount); err == nil && tenantCount < maxPerTenant && globalCap > 0 {
+		return apierr.QuotaExceeded("host sandbox capacity reached; try again later")
+	}
+	return apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d sandboxes reached", maxPerTenant))
+}
+
+// environmentColumns is the column list scanned by scanEnvironment.
+const environmentColumns = `id, tenant_id, name, template_id, status, container_id, volume_name,
+	 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at`
+
+func scanEnvironment(row interface{ Scan(...any) error }) (*Environment, error) {
 	e := &Environment{}
-	err := m.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, name, template_id, status, container_id, volume_name,
-		 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at
-		 FROM environments WHERE id = ? AND tenant_id = ?`,
-		envID, tenantID,
-	).Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status, &e.ContainerID,
+	err := row.Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status, &e.ContainerID,
 		&e.VolumeName, &e.LeaseExpiresAt, &e.LeaseDurationSeconds, &e.LastActivityAt,
 		&e.CreatedAt, &e.UpdatedAt)
+	return e, err
+}
+
+// Get returns an environment by ID, scoped to tenant. Sandbox rows are not
+// environments and return not found.
+func (m *Manager) Get(ctx context.Context, tenantID, envID string) (*Environment, error) {
+	return m.get(ctx, tenantID, envID, KindEnvironment)
+}
+
+// get returns a row of the given kind by ID, scoped to tenant.
+func (m *Manager) get(ctx context.Context, tenantID, id, kind string) (*Environment, error) {
+	e, err := scanEnvironment(m.db.QueryRowContext(ctx,
+		`SELECT `+environmentColumns+` FROM environments WHERE id = ? AND tenant_id = ? AND kind = ?`,
+		id, tenantID, kind))
 	if err == sql.ErrNoRows {
-		return nil, apierr.NotFound("environment not found")
+		return nil, apierr.NotFound(kindLabel(kind) + " not found")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get environment: %w", err)
+		return nil, fmt.Errorf("get %s: %w", kindLabel(kind), err)
 	}
 	return e, nil
 }
@@ -370,9 +554,7 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 		offset = 0
 	}
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, tenant_id, name, template_id, status, container_id, volume_name,
-		 lease_expires_at, lease_duration_seconds, last_activity_at, created_at, updated_at
-		 FROM environments WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT `+environmentColumns+` FROM environments WHERE tenant_id = ? AND kind = 'environment' ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		tenantID, limit, offset,
 	)
 	if err != nil {
@@ -382,10 +564,8 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 
 	result := make([]*Environment, 0)
 	for rows.Next() {
-		e := &Environment{}
-		if err := rows.Scan(&e.ID, &e.TenantID, &e.Name, &e.TemplateID, &e.Status,
-			&e.ContainerID, &e.VolumeName, &e.LeaseExpiresAt, &e.LeaseDurationSeconds,
-			&e.LastActivityAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		e, err := scanEnvironment(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan environment: %w", err)
 		}
 		result = append(result, e)
@@ -402,9 +582,32 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 	if err != nil {
 		return err
 	}
+	return m.teardown(ctx, e, false)
+}
+
+// teardown removes an environment's or sandbox's previews, container, ingress
+// network, warm_pool row, volume and DB row. Not-found errors are ignored.
+// With strict set (sandboxes), a container or volume that cannot be removed
+// keeps the row so the sandbox reaper retries; otherwise failures are logged
+// and the row is deleted, leaving any leftovers to GC.
+func (m *Manager) teardown(ctx context.Context, e *Environment, strict bool) error {
+	tenantID, envID := e.TenantID, e.ID
 
 	// Clean up preview Traefik route files before DB cascade deletes the rows
 	m.cleanupPreviews(ctx, envID)
+
+	// No container_id yet: create() records it only in its final UPDATE, so a
+	// create interrupted by a crash can leave a running container the row does
+	// not know. On the strict (sandbox) path remove it by its deterministic
+	// name, or an egress sandbox would keep internet access after its row is
+	// deleted at startup.
+	if e.ContainerID == "" && strict {
+		name := fmt.Sprintf("ah-env-%s-%s", tenantID, envID)
+		if err := m.docker.RemoveContainer(ctx, name); err != nil && !isNotFoundError(err) {
+			log.Printf("environments: remove unrecorded container %s: %v", name, err)
+			return fmt.Errorf("remove container: %w", err)
+		}
+	}
 
 	// Stop and remove container (ignore not-found errors)
 	if e.ContainerID != "" {
@@ -416,6 +619,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 		if err := m.docker.RemoveContainer(ctx, e.ContainerID); err != nil {
 			if !isNotFoundError(err) {
 				log.Printf("environments: remove container %s: %v", e.ContainerID, err)
+				if strict {
+					return fmt.Errorf("remove container: %w", err)
+				}
 			}
 		}
 	}
@@ -433,13 +639,15 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 		if err := m.docker.RemoveVolume(ctx, e.VolumeName); err != nil {
 			if !isNotFoundError(err) {
 				log.Printf("environments: remove volume %s: %v", e.VolumeName, err)
+				if strict {
+					return fmt.Errorf("remove volume: %w", err)
+				}
 			}
 		}
 	}
 
 	// Delete record
-	_, err = m.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ? AND tenant_id = ?`, envID, tenantID)
-	if err != nil {
+	if _, err := m.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ? AND tenant_id = ?`, envID, tenantID); err != nil {
 		return fmt.Errorf("delete environment record: %w", err)
 	}
 	return nil
@@ -467,6 +675,23 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 	networkName := docker.TenantNetworkName(tenantID)
 	if _, err := m.docker.EnsureNetwork(ctx, networkName); err != nil {
 		return fmt.Errorf("ensure environment network: %w", err)
+	}
+
+	// Push the lease forward before starting the container. The reconciler's
+	// retry pass stops running containers of 'stopped' rows whose lease has
+	// expired; without this it could stop the container we are starting here
+	// before the final UPDATE commits 'running'.
+	{
+		now := time.Now().Unix()
+		hold := int64(e.LeaseDurationSeconds)
+		if hold < 300 {
+			hold = 300
+		}
+		if _, err := m.db.ExecContext(ctx,
+			`UPDATE environments SET lease_expires_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'stopped'`,
+			now+hold, now, envID, tenantID); err != nil {
+			return fmt.Errorf("extend lease before start: %w", err)
+		}
 	}
 
 	containerID := e.ContainerID
@@ -509,26 +734,30 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		}
 		recreated = true
 	}
+	// undo rolls back a start that could not be committed: optionally the
+	// restored preview routes and ingress network, then the container (removed
+	// only if this call created it). It runs detached from the request.
+	undo := func(routes, ingress bool) {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if routes {
+			m.cleanupPreviews(cleanupCtx, envID)
+		}
+		_ = m.docker.StopContainer(cleanupCtx, containerID)
+		if recreated {
+			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
+		}
+		if ingress {
+			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
+		}
+	}
 	if needsIngress {
 		if err := m.ensurePreviewIngress(ctx, tenantID, envID, containerID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			_ = m.docker.StopContainer(cleanupCtx, containerID)
-			if recreated {
-				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-			}
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-			cancel()
+			undo(false, true)
 			return fmt.Errorf("restore preview ingress network: %w", err)
 		}
 		if err := m.restorePreviews(ctx, envID, tenantID); err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			m.cleanupPreviews(cleanupCtx, envID)
-			_ = m.docker.StopContainer(cleanupCtx, containerID)
-			if recreated {
-				_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-			}
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-			cancel()
+			undo(true, true)
 			return fmt.Errorf("restore preview routes: %w", err)
 		}
 	}
@@ -546,18 +775,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		updated, err = updateResult.RowsAffected()
 	}
 	if err != nil || updated != 1 {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		if needsIngress {
-			m.cleanupPreviews(cleanupCtx, envID)
-		}
-		_ = m.docker.StopContainer(cleanupCtx, containerID)
-		if recreated {
-			_ = m.docker.RemoveContainer(cleanupCtx, containerID)
-		}
-		if needsIngress {
-			_ = m.removePreviewIngressNetwork(cleanupCtx, tenantID, envID, containerID)
-		}
-		cancel()
+		undo(needsIngress, needsIngress)
 		if err != nil {
 			return err
 		}
@@ -579,14 +797,16 @@ func (m *Manager) Stop(ctx context.Context, tenantID, envID string) error {
 		return apierr.Validation(fmt.Sprintf("environment must be running to stop (current: %s)", e.Status))
 	}
 
-	if err := m.docker.StopContainer(ctx, e.ContainerID); err != nil {
+	// A container that is already gone is as stopped as it gets; Start
+	// recreates it from the workspace volume.
+	if err := m.docker.StopContainer(ctx, e.ContainerID); err != nil && !isNotFoundError(err) {
 		return fmt.Errorf("stop container: %w", err)
 	}
 
 	now := time.Now().Unix()
 	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ?`,
-		now, envID,
+		`UPDATE environments SET status = 'stopped', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, envID, tenantID,
 	)
 	return err
 }
@@ -597,8 +817,14 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 	if err != nil {
 		return nil, err
 	}
+	return m.execIn(ctx, e, KindEnvironment, req)
+}
+
+// execIn runs req inside e's container. Shared by environment and sandbox
+// exec; both bump last_activity_at.
+func (m *Manager) execIn(ctx context.Context, e *Environment, kind string, req ExecRequest) (*ExecResponse, error) {
 	if e.Status != "running" {
-		return nil, apierr.Validation(fmt.Sprintf("environment must be running to exec (current: %s)", e.Status))
+		return nil, apierr.Validation(fmt.Sprintf("%s must be running to exec (current: %s)", kindLabel(kind), e.Status))
 	}
 
 	// Validate command
@@ -643,8 +869,8 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 	// Update last_activity_at
 	now := time.Now().Unix()
 	_, _ = m.db.ExecContext(ctx,
-		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		now, now, envID,
+		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, now, e.ID, e.TenantID,
 	)
 
 	// Check truncation
@@ -675,109 +901,41 @@ func (m *Manager) ExtendLease(ctx context.Context, tenantID, envID string, durat
 
 	now := time.Now().Unix()
 	leaseExpiresAt := now + int64(durationSec)
-	_, err = m.db.ExecContext(ctx,
-		`UPDATE environments SET lease_expires_at = ?, updated_at = ? WHERE id = ?`,
-		leaseExpiresAt, now, envID,
-	)
-	return err
-}
-
-// ReconcileStale cleans up stuck or expired environments.
-func (m *Manager) ReconcileStale(ctx context.Context) error {
-	now := time.Now().Unix()
-	fiveMinAgo := now - 300
-
-	// Mark stuck "creating" > 5min as "failed"
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE environments SET status = 'failed', updated_at = ?
-		 WHERE status = 'creating' AND created_at < ?`,
-		now, fiveMinAgo,
+	// Conditional on 'running': if the reconciler expired the lease after the
+	// check above, report that instead of claiming an extension that the
+	// already-stopped environment will not get.
+	res, err := m.db.ExecContext(ctx,
+		`UPDATE environments SET lease_expires_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND kind = 'environment' AND status = 'running'`,
+		leaseExpiresAt, now, envID, tenantID,
 	)
 	if err != nil {
-		return fmt.Errorf("reconcile creating: %w", err)
+		return err
 	}
-
-	// Check running envs — if container missing, mark "stopped"
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM environments WHERE status = 'running'`)
-	if err != nil {
-		return fmt.Errorf("reconcile running query: %w", err)
+	if n, _ := res.RowsAffected(); n == 0 {
+		return apierr.Conflict("environment stopped while extending its lease")
 	}
-	defer rows.Close()
-
-	var running []struct{ id, containerID string }
-	for rows.Next() {
-		var r struct{ id, containerID string }
-		if err := rows.Scan(&r.id, &r.containerID); err != nil {
-			log.Printf("environments: reconcile scan: %v", err)
-			continue
-		}
-		running = append(running, r)
-	}
-	rows.Close()
-
-	for _, r := range running {
-		if r.containerID != "" {
-			_, err := m.docker.InspectContainer(ctx, r.containerID)
-			if err != nil {
-				log.Printf("environments: container %s missing for env %s, marking stopped", r.containerID, r.id)
-				m.updateStatus(ctx, r.id, "stopped")
-			}
-		}
-	}
-
-	// Expire leases: running envs past lease_expires_at -> stop
-	expiredRows, err := m.db.QueryContext(ctx,
-		`SELECT id, container_id FROM environments
-		 WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
-		now,
-	)
-	if err != nil {
-		return fmt.Errorf("reconcile expired query: %w", err)
-	}
-	defer expiredRows.Close()
-
-	var expired []struct{ id, containerID string }
-	for expiredRows.Next() {
-		var e struct{ id, containerID string }
-		if err := expiredRows.Scan(&e.id, &e.containerID); err != nil {
-			log.Printf("environments: reconcile expired scan: %v", err)
-			continue
-		}
-		expired = append(expired, e)
-	}
-	expiredRows.Close()
-
-	for _, e := range expired {
-		log.Printf("environments: lease expired for env %s, stopping", e.id)
-		if e.containerID != "" {
-			_ = m.docker.StopContainer(ctx, e.containerID)
-		}
-		m.updateStatus(ctx, e.id, "stopped")
-	}
-
 	return nil
 }
 
-// GetTemplate returns a template by ID.
-func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template, error) {
+// templateColumns is the column list scanned by scanTemplate.
+const templateColumns = `id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
+	 egress_policy, created_at, updated_at`
+
+func scanTemplate(row interface{ Scan(...any) error }) (*Template, error) {
 	t := &Template{}
-	err := m.db.QueryRowContext(ctx,
-		`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-		 egress_policy, created_at, updated_at
-		 FROM environment_templates WHERE id = ?`,
-		templateID,
-	).Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
+	err := row.Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
 		&t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
+}
+
+// GetTemplate returns a template by ID, falling back to lookup by name.
+func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template, error) {
+	t, err := scanTemplate(m.db.QueryRowContext(ctx,
+		`SELECT `+templateColumns+` FROM environment_templates WHERE id = ?`, templateID))
 	if err == sql.ErrNoRows {
-		// Also try by name
-		err = m.db.QueryRowContext(ctx,
-			`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-			 egress_policy, created_at, updated_at
-			 FROM environment_templates WHERE name = ?`,
-			templateID,
-		).Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB, &t.CPUMillis,
-			&t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt)
+		t, err = scanTemplate(m.db.QueryRowContext(ctx,
+			`SELECT `+templateColumns+` FROM environment_templates WHERE name = ?`, templateID))
 	}
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound(fmt.Sprintf("template %q not found", templateID))
@@ -791,9 +949,7 @@ func (m *Manager) GetTemplate(ctx context.Context, templateID string) (*Template
 // ListTemplates returns all available templates.
 func (m *Manager) ListTemplates(ctx context.Context) ([]*Template, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, base_image, description, memory_mb, cpu_millicores, disk_mb,
-		 egress_policy, created_at, updated_at
-		 FROM environment_templates ORDER BY name`)
+		`SELECT `+templateColumns+` FROM environment_templates ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list templates: %w", err)
 	}
@@ -801,9 +957,8 @@ func (m *Manager) ListTemplates(ctx context.Context) ([]*Template, error) {
 
 	result := make([]*Template, 0)
 	for rows.Next() {
-		t := &Template{}
-		if err := rows.Scan(&t.ID, &t.Name, &t.BaseImage, &t.Description, &t.MemoryMB,
-			&t.CPUMillis, &t.DiskMB, &t.EgressPolicy, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		t, err := scanTemplate(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan template: %w", err)
 		}
 		result = append(result, t)
@@ -823,6 +978,19 @@ func validateName(name string) error {
 		return apierr.Validation("environment name must start with a letter and contain only alphanumeric characters, hyphens, and underscores")
 	}
 	return nil
+}
+
+// updateStatusIf moves a row from one status to another, detached from the
+// request context.
+func (m *Manager) updateStatusIf(ctx context.Context, id, from, to string) {
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := m.db.ExecContext(freshCtx,
+		`UPDATE environments SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		to, time.Now().Unix(), id, from,
+	); err != nil {
+		log.Printf("environments: failed to update status for %s: %v", id, err)
+	}
 }
 
 func (m *Manager) updateStatus(ctx context.Context, id, status string) {
@@ -880,20 +1048,29 @@ func (m *Manager) SyncWorkspace(ctx context.Context, tenantID, envID string, req
 		return apierr.Validation("git_url must start with https://")
 	}
 
+	// git would parse a ref starting with '-' as an option. No valid ref name
+	// starts with '-' (git check-ref-format), so reject it outright.
+	if strings.HasPrefix(req.GitRef, "-") {
+		return apierr.Validation("git_ref must not start with '-'")
+	}
 	ref := req.GitRef
 	if ref == "" {
 		ref = "HEAD"
 	}
 
-	// Build the git clone/pull command to run inside the container.
-	// If /workspace/.git exists, fetch and checkout; otherwise clone fresh.
-	gitCmd := fmt.Sprintf(
-		`cd /workspace && if [ -d .git ]; then git fetch origin && git checkout %s; else git clone --depth=1 %s .; fi`,
-		ref, req.GitURL,
-	)
+	// The URL and ref are passed as positional parameters ($1, $2), never
+	// spliced into the script, so quotes, spaces or ';' in them cannot change
+	// the command. If /workspace/.git exists, fetch and check out the ref;
+	// otherwise clone fresh and, when a ref was requested, check it out too
+	// (a --depth=1 clone alone only ever yields the default branch).
+	const gitScript = `cd /workspace && if [ -d .git ]; then git fetch origin && git checkout "$2"; ` +
+		`else git clone --depth=1 "$1" . && if [ "$2" != HEAD ]; then git fetch --depth=1 origin "$2" && git checkout FETCH_HEAD; fi; fi`
 
 	// Create and run exec with a 5-minute timeout
-	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())), "sh", "-c", gitCmd}, "/workspace")
+	execID, err := m.docker.ExecCreate(ctx, e.ContainerID, []string{
+		"timeout", "-s", "KILL", fmt.Sprintf("%d", int((syncTimeout + 5*time.Second).Seconds())),
+		"sh", "-c", gitScript, "sh", req.GitURL, ref,
+	}, "/workspace")
 	if err != nil {
 		return fmt.Errorf("sync exec create: %w", err)
 	}

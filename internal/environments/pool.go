@@ -386,10 +386,3 @@ func (p *PoolManager) Drain(ctx context.Context) error {
 	log.Printf("warm-pool: drained %d containers", len(entries))
 	return nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

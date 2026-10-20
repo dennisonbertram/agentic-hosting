@@ -13,7 +13,7 @@ import (
 // one in the body or X-Admin-Token when an admin token is configured, and an
 // unknown token must get 401.
 func TestAdminToken_RecoverHeaderSlot(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	srv := newAdminTestServer(t, []string{atAdmin})
 	body, _ := json.Marshal(KeyRecoverRequest{Email: "admin@example.com"})
 	for _, header := range []string{"X-Bootstrap-Token", "X-Admin-Token"} {

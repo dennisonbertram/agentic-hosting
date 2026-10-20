@@ -7,7 +7,7 @@ import (
 )
 
 func TestDatabaseHostConfig_Hardened(t *testing.T) {
-	h := databaseHostConfig(RunDatabaseConfig{HostPort: 5432, ContainerPort: 5432, VolumeName: "v", MountPath: "/data"}, "5432/tcp")
+	h := databaseHostConfig(RunDatabaseConfig{HostPort: 5432, ContainerPort: 5432, VolumeName: "v", MountPath: "/data"}, "5432/tcp", DefaultRuntime)
 	if h.Memory <= 0 || h.MemorySwap != h.Memory {
 		t.Errorf("memory limit not set without swap: %d/%d", h.Memory, h.MemorySwap)
 	}
@@ -39,7 +39,7 @@ func TestIssue164_DatabaseKeepsHostLoopbackAndJoinsDatabaseNetwork(t *testing.T)
 	h := databaseHostConfig(RunDatabaseConfig{
 		HostPort: 5456, ContainerPort: 5432, VolumeName: "v", MountPath: "/data",
 		NetworkName: netName, NetworkAlias: DatabaseAlias("db-1"),
-	}, "5432/tcp")
+	}, "5432/tcp", DefaultRuntime)
 	bindings := h.PortBindings[nat.Port("5432/tcp")]
 	if len(bindings) != 1 {
 		t.Fatalf("PortBindings[5432/tcp] = %#v, want one loopback binding", bindings)
@@ -57,7 +57,7 @@ func TestIssue164_DatabaseKeepsHostLoopbackAndJoinsDatabaseNetwork(t *testing.T)
 		t.Errorf("NetworkMode = %q, want %q", h.NetworkMode, netName)
 	}
 
-	kanban := databaseHostConfig(RunDatabaseConfig{HostPort: 7200, ContainerPort: 3000, VolumeName: "v", MountPath: "/data"}, "3000/tcp")
+	kanban := databaseHostConfig(RunDatabaseConfig{HostPort: 7200, ContainerPort: 3000, VolumeName: "v", MountPath: "/data"}, "3000/tcp", DefaultRuntime)
 	if kanban.NetworkMode != "" {
 		t.Errorf("kanban NetworkMode = %q, want empty (loopback-only, no dbnet)", kanban.NetworkMode)
 	}

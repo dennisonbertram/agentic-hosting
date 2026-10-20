@@ -56,7 +56,7 @@ func RotateKeys(db *sql.DB, oldKey, newKey []byte, dryRun bool) (RotateResult, e
 	result.Errors += errs
 
 	// 2. Re-encrypt databases.password_encrypted
-	count, errs, err = rotateDatabasePasswords(tx, oldKey, newKey, dryRun)
+	count, errs, err = rotateColumn(tx, "databases", "password_encrypted", oldKey, newKey, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("rotate database passwords: %w", err)
 	}
@@ -64,7 +64,7 @@ func RotateKeys(db *sql.DB, oldKey, newKey []byte, dryRun bool) (RotateResult, e
 	result.Errors += errs
 
 	// 3. Re-encrypt databases.connection_string_encrypted
-	count, errs, err = rotateDatabaseConnStrs(tx, oldKey, newKey, dryRun)
+	count, errs, err = rotateColumn(tx, "databases", "connection_string_encrypted", oldKey, newKey, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("rotate database connection strings: %w", err)
 	}
@@ -72,7 +72,7 @@ func RotateKeys(db *sql.DB, oldKey, newKey []byte, dryRun bool) (RotateResult, e
 	result.Errors += errs
 
 	// 4. Re-encrypt kanbans.admin_token_encrypted
-	count, errs, err = rotateKanbanTokens(tx, oldKey, newKey, dryRun)
+	count, errs, err = rotateColumn(tx, "kanbans", "admin_token_encrypted", oldKey, newKey, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("rotate kanban tokens: %w", err)
 	}
@@ -209,20 +209,24 @@ func rotateServiceEnv(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, int,
 	return count, errs, nil
 }
 
-func rotateDatabasePasswords(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, int, error) {
-	rows, err := tx.Query(`SELECT id, password_encrypted FROM databases WHERE password_encrypted IS NOT NULL AND password_encrypted != ''`)
+// rotateColumn re-encrypts every non-empty value of table.column, a single
+// encrypted TEXT column keyed by an "id" primary key. table and column are
+// compile-time constants from RotateKeys, never user input.
+func rotateColumn(tx *sql.Tx, table, column string, oldKey, newKey []byte, dryRun bool) (int, int, error) {
+	field := table + "." + column
+	rows, err := tx.Query(fmt.Sprintf(`SELECT id, %[2]s FROM %[1]s WHERE %[2]s IS NOT NULL AND %[2]s != ''`, table, column))
 	if err != nil {
 		return 0, 0, fmt.Errorf("query: %w", err)
 	}
 	defer rows.Close()
 
 	type row struct {
-		id, passwordEnc string
+		id, enc string
 	}
 	var toUpdate []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.passwordEnc); err != nil {
+		if err := rows.Scan(&r.id, &r.enc); err != nil {
 			return 0, 0, fmt.Errorf("scan: %w", err)
 		}
 		toUpdate = append(toUpdate, r)
@@ -231,106 +235,18 @@ func rotateDatabasePasswords(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (in
 		return 0, 0, fmt.Errorf("iterate: %w", err)
 	}
 
+	update := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE id = ?`, table, column)
 	var count, errs int
 	for _, r := range toUpdate {
-		newEnc, err := reencrypt(r.passwordEnc, oldKey, newKey)
+		newEnc, err := reencrypt(r.enc, oldKey, newKey)
 		if err != nil {
-			log.Printf("ERROR: failed to re-encrypt databases.password_encrypted (id=%s): %v", r.id, err)
+			log.Printf("ERROR: failed to re-encrypt %s (id=%s): %v", field, r.id, err)
 			errs++
 			continue
 		}
 		if !dryRun {
-			if _, err := tx.Exec(
-				`UPDATE databases SET password_encrypted = ? WHERE id = ?`,
-				newEnc, r.id,
-			); err != nil {
-				return count, errs, fmt.Errorf("update databases.password_encrypted (id=%s): %w", r.id, err)
-			}
-		}
-		count++
-	}
-	return count, errs, nil
-}
-
-func rotateDatabaseConnStrs(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, int, error) {
-	rows, err := tx.Query(`SELECT id, connection_string_encrypted FROM databases WHERE connection_string_encrypted IS NOT NULL AND connection_string_encrypted != ''`)
-	if err != nil {
-		return 0, 0, fmt.Errorf("query: %w", err)
-	}
-	defer rows.Close()
-
-	type row struct {
-		id, connStrEnc string
-	}
-	var toUpdate []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.connStrEnc); err != nil {
-			return 0, 0, fmt.Errorf("scan: %w", err)
-		}
-		toUpdate = append(toUpdate, r)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, fmt.Errorf("iterate: %w", err)
-	}
-
-	var count, errs int
-	for _, r := range toUpdate {
-		newEnc, err := reencrypt(r.connStrEnc, oldKey, newKey)
-		if err != nil {
-			log.Printf("ERROR: failed to re-encrypt databases.connection_string_encrypted (id=%s): %v", r.id, err)
-			errs++
-			continue
-		}
-		if !dryRun {
-			if _, err := tx.Exec(
-				`UPDATE databases SET connection_string_encrypted = ? WHERE id = ?`,
-				newEnc, r.id,
-			); err != nil {
-				return count, errs, fmt.Errorf("update databases.connection_string_encrypted (id=%s): %w", r.id, err)
-			}
-		}
-		count++
-	}
-	return count, errs, nil
-}
-
-func rotateKanbanTokens(tx *sql.Tx, oldKey, newKey []byte, dryRun bool) (int, int, error) {
-	rows, err := tx.Query(`SELECT id, admin_token_encrypted FROM kanbans WHERE admin_token_encrypted IS NOT NULL AND admin_token_encrypted != ''`)
-	if err != nil {
-		return 0, 0, fmt.Errorf("query: %w", err)
-	}
-	defer rows.Close()
-
-	type row struct {
-		id, tokenEnc string
-	}
-	var toUpdate []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.tokenEnc); err != nil {
-			return 0, 0, fmt.Errorf("scan: %w", err)
-		}
-		toUpdate = append(toUpdate, r)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, fmt.Errorf("iterate: %w", err)
-	}
-
-	var count, errs int
-	for _, r := range toUpdate {
-		newEnc, err := reencrypt(r.tokenEnc, oldKey, newKey)
-		if err != nil {
-			log.Printf("ERROR: failed to re-encrypt kanbans.admin_token_encrypted (id=%s): %v", r.id, err)
-			errs++
-			continue
-		}
-		if !dryRun {
-			if _, err := tx.Exec(
-				`UPDATE kanbans SET admin_token_encrypted = ? WHERE id = ?`,
-				newEnc, r.id,
-			); err != nil {
-				return count, errs, fmt.Errorf("update kanbans.admin_token_encrypted (id=%s): %w", r.id, err)
+			if _, err := tx.Exec(update, newEnc, r.id); err != nil {
+				return count, errs, fmt.Errorf("update %s (id=%s): %w", field, r.id, err)
 			}
 		}
 		count++

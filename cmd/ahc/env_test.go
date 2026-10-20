@@ -171,7 +171,7 @@ func TestEnvExec_PrintsOutput(t *testing.T) {
 	c := newTestClient(srv)
 
 	var buf bytes.Buffer
-	err := runEnvExec(c, &buf, "my-env", []string{"echo", "hello"})
+	err := runEnvExec(c, &buf, io.Discard, "my-env", []string{"echo", "hello"})
 	require.NoError(t, err)
 	assert.True(t, execCalled, "EnvironmentExec must be called")
 	assert.Contains(t, buf.String(), "hello from exec", "exec output must be printed")
@@ -201,7 +201,7 @@ func TestEnvExec_NonZeroExitCode_ReturnsError(t *testing.T) {
 	c := newTestClient(srv)
 
 	var buf bytes.Buffer
-	err := runEnvExec(c, &buf, "my-env", []string{"badcmd"})
+	err := runEnvExec(c, &buf, io.Discard, "my-env", []string{"badcmd"})
 	require.Error(t, err, "non-zero exit code must return an error")
 	assert.Contains(t, err.Error(), "exit code 1", "error must mention exit code")
 }
@@ -412,13 +412,12 @@ func TestEnvExec_PrintsStderr(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(srv)
 
-	var buf bytes.Buffer
-	err := runEnvExec(c, &buf, "my-env", []string{"cmd"})
+	var buf, errBuf bytes.Buffer
+	err := runEnvExec(c, &buf, &errBuf, "my-env", []string{"cmd"})
 	require.NoError(t, err)
-	output := buf.String()
-	assert.Contains(t, output, "stdout content", "stdout must be printed")
-	// stderr warning should also be present
-	assert.Contains(t, output, "warning: deprecated flag", "stderr must be printed")
+	assert.Equal(t, "stdout content\n", buf.String(), "only the command's stdout goes to stdout")
+	// stderr must be printed, but on the stderr stream so pipes stay clean
+	assert.Equal(t, "warning: deprecated flag\n", errBuf.String(), "stderr must be printed to stderr")
 }
 
 // REG-ENV-003: env list EXPIRES column shows lease info when present

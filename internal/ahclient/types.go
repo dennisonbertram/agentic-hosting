@@ -2,6 +2,8 @@
 // It has no dependencies on internal server packages — types are defined independently.
 package ahclient
 
+import "strconv"
+
 // ---- Error type ----
 
 // APIError represents a non-2xx response from the API.
@@ -11,31 +13,7 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return "ahclient: API error " + itoa(e.StatusCode) + ": " + e.Message
-}
-
-// itoa converts an integer to string without importing strconv at the package level.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	buf := [20]byte{}
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return "ahclient: API error " + strconv.Itoa(e.StatusCode) + ": " + e.Message
 }
 
 // ---- Service types ----
@@ -137,6 +115,57 @@ type ExecResult struct {
 	Truncated  bool   `json:"truncated"`
 	TimedOut   bool   `json:"timed_out"`
 	DurationMs int64  `json:"duration_ms"`
+}
+
+// ---- Sandbox types ----
+
+// SandboxSource selects what a sandbox runs; set Type and the matching field.
+type SandboxSource struct {
+	Type       string `json:"type"` // template, image, snapshot or service
+	Template   string `json:"template,omitempty"`
+	Image      string `json:"image,omitempty"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	ServiceID  string `json:"service_id,omitempty"`
+}
+
+// CreateSandboxRequest holds parameters for creating a disposable sandbox.
+type CreateSandboxRequest struct {
+	Name          string        `json:"name,omitempty"`
+	Source        SandboxSource `json:"source"`
+	TTLSeconds    *int          `json:"ttl_seconds,omitempty"`
+	Run           string        `json:"run,omitempty"` // idle or app
+	IncludeEnv    bool          `json:"include_env,omitempty"`
+	MemoryMB      *int          `json:"memory_mb,omitempty"`
+	CPUMillicores *int          `json:"cpu_millicores,omitempty"`
+	Egress        string        `json:"egress,omitempty"` // none or internet
+	// DiskMB sizes the tmpfs /workspace; only accepted when the server runs
+	// sandboxes with AH_SANDBOX_WORKSPACE_TMPFS.
+	DiskMB *int `json:"disk_mb,omitempty"`
+}
+
+// SandboxSourceRef is the source recorded on a sandbox.
+type SandboxSourceRef struct {
+	Type string `json:"type"`
+	Ref  string `json:"ref"`
+}
+
+// Sandbox is a disposable, TTL-bound sandbox container.
+type Sandbox struct {
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	Status         string           `json:"status"`
+	Source         SandboxSourceRef `json:"source"`
+	Image          string           `json:"image"`
+	Run            string           `json:"run"`
+	Egress         string           `json:"egress"`
+	MemoryMB       int              `json:"memory_mb"`
+	CPUMillicores  int              `json:"cpu_millicores"`
+	DiskMB         int              `json:"disk_mb"` // 0 = workspace volume, no hard size limit
+	TTLSeconds     int              `json:"ttl_seconds"`
+	CreatedAt      int64            `json:"created_at"`
+	ExpiresAt      int64            `json:"expires_at"`
+	MaxExpiresAt   int64            `json:"max_expires_at"`
+	LastActivityAt int64            `json:"last_activity_at"`
 }
 
 // Preview represents a preview route exposing an environment port via Traefik.
@@ -283,6 +312,7 @@ type TenantUsage struct {
 	Services  UsageBucket `json:"services"`
 	Databases UsageBucket `json:"databases"`
 	APIKeys   UsageBucket `json:"api_keys"`
+	Sandboxes UsageBucket `json:"sandboxes"`
 	MemoryMB  int         `json:"memory_mb"`
 	CPUCores  float64     `json:"cpu_cores"`
 	DiskGB    int         `json:"disk_gb"`

@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"math"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -25,20 +23,14 @@ type BootstrapTokenValidateResponse struct {
 // the old and new tokens work before removing the old one.
 //
 // Security model:
-//   - Rate-limited by the same per-IP / global limiter used for tenant
-//     registration (5/IP/hour, 20/global/hour) to prevent brute-force.
+//   - Rate-limited by regLimiter, the per-IP / global limiter used for tenant
+//     registration (5/IP/hour, 20/global/hour) to prevent brute-force. It
+//     only checks the global bucket: validation never charges it.
 //   - Returns a simple boolean; does not distinguish between "no tokens
 //     configured" and "token not matched" to avoid information leakage.
 func (s *Server) handleBootstrapTokenValidate(w http.ResponseWriter, r *http.Request) {
-	// Apply the same rate limiter as tenant registration.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	// Same limiter (regLimiter) as tenant registration.
+	if !regLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -49,10 +41,10 @@ func (s *Server) handleBootstrapTokenValidate(w http.ResponseWriter, r *http.Req
 	}
 
 	provided := strings.TrimSpace(req.Token)
+	// Validation creates nothing, so it does not charge the global
+	// registration budget (that would let a token holder block registration
+	// and, previously, admin routes). The per-IP limit above still applies.
 	valid := len(s.bootstrapTokens) > 0 && validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey)
-	if valid {
-		regLimiter.chargeGlobal()
-	}
 
 	writeJSON(w, http.StatusOK, BootstrapTokenValidateResponse{Valid: valid})
 }

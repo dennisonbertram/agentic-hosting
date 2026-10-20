@@ -87,6 +87,9 @@ type MockDockerClient struct {
 	// ImageExists (default: false, so deploys pull)
 	ImageExistsFn func(ctx context.Context, img string) (bool, error)
 
+	// ImageSize (default: 0 bytes)
+	ImageSizeFn func(ctx context.Context, img string) (int64, error)
+
 	// TagImage
 	TagImageFn    func(ctx context.Context, source, target string) error
 	TagImageCalls [][2]string // [source, target] pairs
@@ -158,6 +161,8 @@ type MockDockerClient struct {
 	// RunEnvironment
 	RunEnvironmentFn    func(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error)
 	RunEnvironmentCalls int
+	// RunEnvironmentConfigs records every config passed, in call order.
+	RunEnvironmentConfigs []docker.RunEnvironmentConfig
 
 	// ExecCreate
 	ExecCreateFn    func(ctx context.Context, containerID string, cmd []string, workDir string) (string, error)
@@ -371,6 +376,13 @@ func (m *MockDockerClient) ImageExists(ctx context.Context, img string) (bool, e
 	return false, nil
 }
 
+func (m *MockDockerClient) ImageSize(ctx context.Context, img string) (int64, error) {
+	if m.ImageSizeFn != nil {
+		return m.ImageSizeFn(ctx, img)
+	}
+	return 0, nil
+}
+
 func (m *MockDockerClient) TagImage(ctx context.Context, source, target string) error {
 	m.mu.Lock()
 	m.TagImageCalls = append(m.TagImageCalls, [2]string{source, target})
@@ -556,6 +568,7 @@ func (m *MockDockerClient) DiskUsage(ctx context.Context) (*docker.StorageUsage,
 func (m *MockDockerClient) RunEnvironment(ctx context.Context, cfg docker.RunEnvironmentConfig) (string, error) {
 	m.mu.Lock()
 	m.RunEnvironmentCalls++
+	m.RunEnvironmentConfigs = append(m.RunEnvironmentConfigs, cfg)
 	m.mu.Unlock()
 	if m.RunEnvironmentFn != nil {
 		return m.RunEnvironmentFn(ctx, cfg)
@@ -586,8 +599,8 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
 	m.mu.Lock()
 	m.RenameContainerCalls++
-	m.mu.Unlock()
 	m.RenameContainerArgs = append(m.RenameContainerArgs, [2]string{containerID, newName})
+	m.mu.Unlock()
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
 	}

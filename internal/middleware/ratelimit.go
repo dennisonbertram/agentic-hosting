@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +28,13 @@ type RateLimiter struct {
 	rate  rate.Limit
 	burst int
 	now   func() time.Time // injectable for deterministic tests
+	// headerPrefix names the limit headers this limiter sets
+	// (<prefix>-Limit, <prefix>-Remaining). Default "X-RateLimit".
+	headerPrefix string
 }
+
+// DefaultRateLimitHeaderPrefix is the header prefix of the general API limiter.
+const DefaultRateLimitHeaderPrefix = "X-RateLimit"
 
 func NewRateLimiter(rps float64, burst int) *RateLimiter {
 	rl := &RateLimiter{
@@ -35,8 +42,22 @@ func NewRateLimiter(rps float64, burst int) *RateLimiter {
 		rate:  rate.Limit(rps),
 		burst: burst,
 		now:   time.Now,
+
+		headerPrefix: DefaultRateLimitHeaderPrefix,
 	}
 	go rl.cleanup()
+	return rl
+}
+
+// NewRateLimiterWithHeaderPrefix is NewRateLimiter for a secondary limiter
+// stacked on routes that already pass the general API limiter: it reports its
+// state under <prefix>-Limit and <prefix>-Remaining, so the general
+// X-RateLimit-* headers keep describing the general limit.
+func NewRateLimiterWithHeaderPrefix(rps float64, burst int, prefix string) *RateLimiter {
+	rl := NewRateLimiter(rps, burst)
+	if prefix != "" {
+		rl.headerPrefix = prefix
+	}
 	return rl
 }
 
@@ -99,8 +120,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		now := rl.now()
 
 		// Set rate limit headers on all responses
-		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%.0f", float64(limiter.Limit())))
-		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%.0f", math.Max(0, limiter.TokensAt(now))))
+		prefix := rl.headerPrefix
+		if prefix == "" {
+			prefix = DefaultRateLimitHeaderPrefix
+		}
+		w.Header().Set(prefix+"-Limit", formatLimit(limiter.Limit()))
+		w.Header().Set(prefix+"-Remaining", fmt.Sprintf("%.0f", math.Max(0, limiter.TokensAt(now))))
 
 		if !limiter.AllowN(now, 1) {
 			w.Header().Set("Retry-After", retryAfterFromLimiter(limiter, now))
@@ -110,6 +135,17 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// formatLimit renders a per-second limit. Whole rates keep the historical
+// integer format; sub-1/s rates (e.g. 20/min) keep up to 3 decimals instead
+// of rounding to "0".
+func formatLimit(l rate.Limit) string {
+	v := float64(l)
+	if v == math.Trunc(v) {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return strconv.FormatFloat(math.Round(v*1000)/1000, 'f', -1, 64)
 }
 
 // GlobalRateLimiter enforces a single rate limit across all tenants to prevent

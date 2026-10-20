@@ -24,6 +24,9 @@ type DetailedHealthResponse struct {
 	DockerDisk      DiskInfo           `json:"docker_disk"`
 	DockerStorage   *DockerStorageInfo `json:"docker_storage,omitempty"`
 	TraefikNetworks *int               `json:"traefik_networks,omitempty"`
+	// ContainerRuntime is the OCI runtime tenant workloads use ("runsc" in
+	// production; "runc" only in a --dev sandbox).
+	ContainerRuntime string `json:"container_runtime,omitempty"`
 }
 
 type DockerInfo struct {
@@ -118,9 +121,10 @@ func cachedDetailedHealth(maxAge time.Duration) (DetailedHealthResponse, bool) {
 
 func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 	resp := DetailedHealthResponse{
-		Status: "ok",
-		Docker: DockerInfo{Available: false},
-		GVisor: GVisorInfo{Available: false},
+		Status:           "ok",
+		Docker:           DockerInfo{Available: false},
+		GVisor:           GVisorInfo{Available: false},
+		ContainerRuntime: s.containerRuntime,
 	}
 
 	// Check Docker with 5s timeout
@@ -191,7 +195,7 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 		if nets, err := s.dockerClient.NetworkList(ctx4); err == nil {
 			count := 0
 			for _, n := range nets {
-				if len(n.Name) > 10 && n.Name[:10] == "ah-tenant-" {
+				if len(n.Name) > len("ah-tenant-") && strings.HasPrefix(n.Name, "ah-tenant-") {
 					count++
 				}
 			}

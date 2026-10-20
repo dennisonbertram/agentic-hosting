@@ -104,6 +104,14 @@ func TestBuildDetailedHealth_UsesConfiguredDataDir(t *testing.T) {
 	assert.NotZero(t, resp.Disk.TotalGB, "disk info should come from the configured data dir")
 }
 
+// TestBuildDetailedHealth_ReportsContainerRuntime verifies operators can see a
+// dev sandbox running workloads under runc rather than gVisor.
+func TestBuildDetailedHealth_ReportsContainerRuntime(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	srv := NewServer(ServerConfig{Store: &db.Store{StateDB: stateDB}, MasterKey: []byte("0123456789abcdef0123456789abcdef"), DevMode: true, DataDir: t.TempDir(), ContainerRuntime: "runc"})
+	assert.Equal(t, "runc", srv.buildDetailedHealth().ContainerRuntime)
+}
+
 // TestHealthDetailed_FreshBypassesCache verifies that ?fresh=true skips the cache
 // and returns live probe results, allowing operators to see real-time status
 // during incident response.

@@ -26,6 +26,10 @@ func quotaRequest(ip, tenantID, bootstrapToken string, body []byte) *http.Reques
 }
 
 func TestHandleQuotaUpdate(t *testing.T) {
+	// adminLimiter is process-wide; reset it so -count=N runs do not inherit
+	// the per-IP budget spent by earlier iterations.
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 	const bootstrapToken = "test-bootstrap-token-for-quotas"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 

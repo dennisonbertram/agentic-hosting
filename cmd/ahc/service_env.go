@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"text/tabwriter"
 
@@ -58,9 +57,9 @@ plaintext values. Reveal operations are audit-logged on the server.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, vars)
+				return printJSON(cmd.OutOrStdout(), vars)
 			}
-			writeEnvTable(os.Stdout, vars, reveal)
+			writeEnvTable(cmd.OutOrStdout(), vars, reveal)
 			return nil
 		},
 	}
@@ -123,7 +122,7 @@ Changes take effect on the next restart or redeploy. To apply immediately:
 			if _, err := c.SetServiceEnv(id, vars); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "%s updated. Run 'ahc service redeploy %s' to apply.\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "%s updated. Run 'ahc service redeploy %s' to apply.\n",
 				pluralize(len(vars), "variable"), args[0])
 			return nil
 		},
@@ -154,7 +153,7 @@ The change takes effect on the next restart or redeploy. To apply immediately:
 			if err := c.DeleteServiceEnv(id, args[1]); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "Variable %q deleted. Run 'ahc service redeploy %s' to apply.\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "Variable %q deleted. Run 'ahc service redeploy %s' to apply.\n",
 				args[1], args[0])
 			return nil
 		},

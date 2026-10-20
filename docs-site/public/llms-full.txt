@@ -441,6 +441,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ah
 ```
 
+Optional runtime settings for `/etc/default/ah`:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AH_CONTAINER_RUNTIME` | `runsc` | OCI runtime for every tenant workload, database, environment and wipe container. `runc` is a dev-only fallback for hosts without gVisor (macOS): it has no syscall sandbox, and `ah` refuses it unless started with `--dev`. |
+| `AH_WARM_POOL_ENABLED` | `true` | `false` disables the pre-started environment containers. The local sandbox turns it off so it does not pull every template image. |
+| `AH_GC_PRUNE_DOCKER` | `true` | `false` stops GC from running daemon-wide dangling-image and unused anonymous-volume prunes. Set it when the Docker daemon is shared with unrelated work. |
+| `AH_MAX_SANDBOXES_TOTAL` | `20` | Host-wide cap on disposable sandboxes (`--max-sandboxes-total`; 0 = no cap). |
+| `AH_SANDBOX_EGRESS_NETWORK` | empty | Bridge for sandboxes with `egress: "internet"` (`--sandbox-egress-network`). Empty disables egress. Needs the host firewall rules; see `docs/runbooks/sandboxes-hardening.md`. Unverified on the production host. |
+| `AH_SANDBOX_EGRESS_SUBNET` | `10.250.0.0/24` | IPv4 subnet of that bridge. |
+| `AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK` | `false` | Enables egress without verifying the firewall rules. Only for hosts that filter the bridge some other way. |
+| `AH_SANDBOX_RUNTIME` | empty | OCI runtime for disposable sandboxes, e.g. `runsc-sbx` (`runsc --overlay2=root:memory`). Must be registered with Docker and be gVisor outside `--dev`, or `ah` refuses to start. Empty uses `AH_CONTAINER_RUNTIME`. |
+| `AH_SANDBOX_WORKSPACE_TMPFS` | `true` | Each sandbox's `/workspace` is a tmpfs of its `disk_mb` (hard size limit, counted against memory; default half of `memory_mb`). `false` uses a Docker volume with no size limit instead. Unverified on the production host. |
+| `AH_SANDBOX_MAX_CONCURRENT_PULLS` | `2` | Host-wide limit on sandbox image pulls in flight; further creates wait for a slot. |
+| `AH_SANDBOX_MAX_IMAGE_MB` | `4096` | Largest public image a sandbox create may pull. A larger image is refused with 400 `image too large` and removed if that create pulled it. |
+
+`GET /v1/system/health/detailed` reports the active runtime as `container_runtime`.
+
 The unit runs `ah serve --port 8080 --db-path /var/lib/ah/ah.db --master-key-path /var/lib/ah/master.key` as user `ah` with Docker socket access. Create that system user before enabling the unit.
 
 Health check from the host (HTTPS middleware only trusts loopback + `X-Forwarded-Proto`):
@@ -454,7 +472,7 @@ curl -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/v1/system/health
 
 ```bash
 make build
-AH_BOOTSTRAP_TOKEN=dev-token-32-chars-minimum ./bin/ah --dev --port 8080
+AH_BOOTSTRAP_TOKEN=dev-bootstrap-token-32-chars-minimum ./bin/ah --dev --port 8080
 # or open registration (no bootstrap token):
 ./bin/ah --dev --open-registration --port 8080
 ```
@@ -564,7 +582,7 @@ Rules from `handleTenantRegister`:
 - Email must match `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`, max 256
 - Max **1000** active tenants
 - Duplicate name/email → **422** (`registration failed, please check your details and try again`)
-- Rate limit: **5 / IP / hour** and **20 / hour global** (same limiter as recover, reactivate, quota patch, bootstrap validate)
+- Rate limit: **5 / IP / hour** and **20 / hour global** (`regLimiter`, shared with bootstrap validate; recover, reactivate and quota patch use a separate `adminLimiter` with the same limits). The global bucket is charged only by a successful registration.
 
 Response:
 
@@ -1082,7 +1100,7 @@ Traefik network count is also a soft guard: warn >150 `ah-tenant-*` networks, `d
 When disk is over 90%:
 
 - `POST /v1/services` still returns **201** `deploying`; the async deploy then sets `status=failed` and `last_error` to the diskcheck message
-- Build create, DB create, restart, and redeploy return **500** `{"error":"internal error"}` — diskcheck is a plain `fmt.Errorf`, and `apierr.WriteAPIError` falls back to 500. This is **not** 503.
+- Build create, DB create, kanban create, deploy, restart and redeploy return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` (the disk error is wrapped as `apierr.Unavailable`). Retry once space is freed.
 
 
 # Rate limits
@@ -1106,28 +1124,42 @@ If tenant ID is missing on an authenticated route, the limiter **fails closed** 
 
 LRU cap 10_000 tenant buckets; idle entries dropped after 1 hour (cleanup every 5 minutes).
 
+## Sandbox creates
+
+`POST /v1/sandboxes` also passes a per-tenant create limiter: **20 per minute**, burst **10**, independent of `api_rate_limit`. It reports itself in its own headers, so `X-RateLimit-*` keep describing the per-tenant limit above:
+
+- `X-Sandbox-Create-RateLimit-Limit` (requests/second, `0.333`)
+- `X-Sandbox-Create-RateLimit-Remaining`
+
+On exceed: **429** plus `Retry-After`.
+
 ## Global
 
 `middleware.NewGlobalRateLimiter(500, 1000)` — **500 rps**, burst **1000**, process-wide.
 
 Same 429 + `Retry-After` behavior.
 
-## Registration / bootstrap
+## Registration, bootstrap and admin routes
 
-`registrationLimiter` in `internal/api/tenants.go`:
+Two limiters of type `registrationLimiter` in `internal/api/tenants.go`, with separate buckets and the same limits:
 
 | Scope | Limit | Window |
 |-------|--------|--------|
 | Per client IP | 5 | 1 hour |
 | Global | 20 | 1 hour |
 
-Applied to:
+`regLimiter` applies to:
 
 - `POST /v1/tenants/register`
+- `POST /v1/system/bootstrap-token/validate`
+
+`adminLimiter` applies to:
+
 - `POST /v1/auth/recover`
 - `POST /v1/tenants/{id}/reactivate`
 - `PATCH /v1/tenants/{id}/quotas`
-- `POST /v1/system/bootstrap-token/validate`
+
+Every request charges its per-IP bucket. The global bucket is only checked per request; it is charged only after a successful registration (`regLimiter`) or a successful admin-token check (`adminLimiter`). Validation never charges it. A burst of registrations therefore does not block recovery, and recovery attempts do not use up the registration budget.
 
 IP comes from `trustedRealIP`: `X-Real-Ip` **only** if `RemoteAddr` is loopback (Traefik). `X-Forwarded-For` is not trusted.
 
@@ -1257,9 +1289,12 @@ Auth. Cached 30s. `?fresh=true` bypasses and refreshes the cache.
     "build_cache_size_bytes": 0,
     "total_size_gb": 0
   },
-  "traefik_networks": 0
+  "traefik_networks": 0,
+  "container_runtime": "runsc"
 }
 ```
+
+`container_runtime` is the OCI runtime tenant workloads use (`AH_CONTAINER_RUNTIME`): `runsc` (gVisor) in production, `runc` only in a `--dev` sandbox. Omitted when unknown.
 
 `status` becomes `degraded` if SQLite ping fails, either disk path is >90%, or `ah-tenant-*` networks > 200.
 
@@ -1295,6 +1330,7 @@ Soft-delete / suspend. Stops services, DBs, kanban; cancels builds.
   "services": {"used": 0, "max": 5},
   "databases": {"used": 0, "max": 3},
   "api_keys": {"used": 0, "max": 20},
+  "sandboxes": {"used": 0, "max": 5},
   "memory_mb": 2048,
   "cpu_cores": 2.0,
   "disk_gb": 20,
@@ -1304,7 +1340,7 @@ Soft-delete / suspend. Stops services, DBs, kanban; cancels builds.
 
 ### `GET /v1/tenant/usage/metrics`
 
-Query: `period=hourly|daily` (default daily), `since`, `until` (RFC3339), `service_id`. 503 if metering store is nil.
+Query: `period=hourly|daily` (default daily), `since`, `until` (RFC3339), `service_id`, `kind=service|sandbox` (default `service`; with `kind=sandbox`, `service_id` filters by sandbox ID). 503 if metering store is nil. Sandbox samples are stored with `resource_kind='sandbox'` and never appear in service metrics.
 
 ### `POST /v1/tenants/{tenantID}/reactivate`
 
@@ -1312,14 +1348,21 @@ Bootstrap. New API key. Tenant must exist and be suspended.
 
 ### `PATCH /v1/tenants/{tenantID}/quotas`
 
-Bootstrap. Body fields (all optional, must be ≥ 1 and under caps):
+Bootstrap. Body fields (all optional, must be within min and cap):
 
-| Field | Cap |
-|-------|-----|
-| `max_services` | 100 |
-| `max_databases` | 50 |
-| `max_builds_concurrent` | 10 |
-| `max_env_vars_per_service` | 500 |
+| Field | Min | Cap | Default |
+|-------|-----|-----|---------|
+| `max_services` | 1 | 100 | 5 |
+| `max_databases` | 1 | 50 | 3 |
+| `max_builds_concurrent` | 1 | 10 | 3 |
+| `max_env_vars_per_service` | 1 | 500 | 50 |
+| `max_sandboxes` | 0 | 50 | 5 |
+| `max_sandbox_ttl_seconds` | 60 | 86400 | 14400 |
+| `max_sandbox_lifetime_seconds` | 60 | 604800 | 86400 |
+| `sandbox_egress_allowed` | 0 | 1 | 0 |
+| `max_sandbox_disk_mb` | 16 | 8192 | 1024 |
+
+`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed: 1` lets the tenant create sandboxes with `egress: "internet"`, but only on a server whose operator has enabled sandbox egress (`--sandbox-egress-network`); elsewhere it has no effect and those requests get 403. `max_sandbox_disk_mb` caps a sandbox's `disk_mb`; it only matters on a server with tmpfs sandbox workspaces (`AH_SANDBOX_WORKSPACE_TMPFS`, on by default).
 
 Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`, `api_rate_limit`.
 
@@ -1552,6 +1595,103 @@ DELETE /v1/environments/{id}/previews/{previewID}   → 204
 
 Preview name: `^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`.
 
+Environment routes only see environments: a sandbox ID returns 404 here, and `GET /v1/environments` does not list sandboxes.
+
+---
+
+## Sandboxes (disposable)
+
+A sandbox is a throwaway container with a TTL. The server deletes it (container, any `/workspace` volume and record) when the TTL expires; there is no stop/start. Isolation is the same as an environment: the configured workload runtime (`runsc` / gVisor in production), all capabilities dropped, `no-new-privileges`, 256 PIDs, memory = swap, CPU limit, `noexec` `/tmp`. An operator can run sandboxes under a separate gVisor runtime (`AH_SANDBOX_RUNTIME`, see below).
+
+**Network:** egress `none` by default. The sandbox is attached only to the tenant's internal network (`Internal`, inter-container traffic off): no internet, no other tenant containers, no other tenants. A sandbox forked with `include_env` gets values such as `DATABASE_URL` but is not attached to database networks, so those connections fail.
+
+**Internet egress (opt-in):** `egress: "internet"` works only when both the operator has set `--sandbox-egress-network` / `AH_SANDBOX_EGRESS_NETWORK` (and ah verified the host firewall rules at startup) **and** the tenant's `sandbox_egress_allowed` quota is 1. Otherwise it is 403: `egress "internet" is not available on this server` or `... is not enabled for this tenant`. An egress sandbox is attached **only** to the shared egress bridge, never to the tenant network: it can reach the public internet, but host firewall rules drop traffic to private ranges (RFC 1918, 100.64/10), link-local addresses including cloud metadata (169.254.169.254), loopback, multicast and the host itself; inter-container traffic on the bridge is off and IPv6 is disabled. Egress sandboxes always cold start (no warm pool). Their network bytes are metered and show in `GET /v1/tenant/usage/metrics?kind=sandbox` (`network_rx_bytes`, `network_tx_bytes`; the first 60s sample is a baseline). Operators: docs/runbooks/sandboxes-hardening.md. Status: unverified on the production host until the runbook's host verification checklist has been run.
+
+**Hard disk limit (default):** `/workspace` is a tmpfs of `disk_mb` (default half of `memory_mb`) instead of a volume, so writes beyond `disk_mb` fail with "No space left on device". Under gVisor the tmpfs is sandbox memory, so `disk_mb` counts against `memory_mb`. With the operator's `runsc-sbx` runtime (`--overlay2=root:memory`) writes to the root filesystem are memory-backed too and bounded by `memory_mb`. An operator can opt out with `AH_SANDBOX_WORKSPACE_TMPFS=false`; on such a server `disk_mb` is 0 in responses (a volume with no hard size limit) and sending `disk_mb` is 400. Sandboxes are disposable: while the host disk is at the 90% block threshold the server deletes running sandboxes, largest `disk_mb` first, until usage drops below it. Status: unverified on the production host (in particular that gVisor charges the tmpfs and memory overlay to the sandbox's memory cgroup).
+
+**Limits:** per-tenant `max_sandboxes` (default 5) and a host-wide cap (`--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL`, default 20), both enforced atomically at create; free-disk check before create and again after the image pull (503 `insufficient disk space`); image pulls are limited host-wide (`AH_SANDBOX_MAX_CONCURRENT_PULLS`, default 2), so a create may wait for a pull slot; an `image` source larger than `AH_SANDBOX_MAX_IMAGE_MB` (default 4096) is 400 `image too large`; `template` sources use the server's local copy of the template image without contacting the registry; creates are rate limited to about 20/minute per tenant (429 with `Retry-After`). Sandboxes and environments have separate quotas and separate name namespaces: a sandbox may share a name with an environment, and names are unique only within each kind (409 names the conflicting kind).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/v1/sandboxes` | Long route, `Idempotency-Key` honoured, may pull an image |
+| GET | `/v1/sandboxes?limit&offset&status` | `status` = `creating\|running\|stopped\|failed\|deleting` |
+| GET | `/v1/sandboxes/{sandboxID}` | |
+| DELETE | `/v1/sandboxes/{sandboxID}` | 204. Long route |
+| POST | `/v1/sandboxes/{sandboxID}/exec` | Same body/response as environment exec. Not idempotent |
+| GET | `/v1/sandboxes/{sandboxID}/logs?tail=100&follow=false` | Main process logs, `tail` clamped to 10000 |
+| POST | `/v1/sandboxes/{sandboxID}/extend` | `{"ttl_seconds":1800}` |
+
+### `POST /v1/sandboxes`
+
+```json
+{
+  "name": "optional; default sbx-<8 hex>; same rule as environment names",
+  "source": {"type": "template", "template": "python"},
+  "ttl_seconds": 1800,
+  "run": "idle",
+  "include_env": false,
+  "memory_mb": 512,
+  "cpu_millicores": 1000,
+  "egress": "none",
+  "disk_mb": 256
+}
+```
+
+| Field | Rules |
+|-------|-------|
+| `source` | One of `{"type":"template","template":"<name or id>"}` (default template `default`), `{"type":"image","image":"python:3.12-slim"}`, `{"type":"snapshot","snapshot_id":"…"}`, `{"type":"service","service_id":"…"}` |
+| `ttl_seconds` | 60 to min(`max_sandbox_ttl_seconds`, `max_sandbox_lifetime_seconds`) (defaults 14400 and 86400). Omitted: 1800, lowered to that bound when the tenant's bound is below 1800. An explicit value outside the range is 400 |
+| `run` | `idle` runs `sleep infinity` in `/workspace` (default for template and image); `app` keeps the image's ENTRYPOINT/CMD and WORKDIR (default for snapshot and service) |
+| `include_env` | Snapshot and service sources only. Copies the source's decrypted env vars into the container. Values are never returned by the API |
+| `memory_mb` | 128 to min(2048, tenant `max_memory_mb`). Omitted: template value, else 512, lowered to that maximum when the tenant's maximum is smaller (400 only if the maximum is below 128). An explicit value outside the range is 400 |
+| `cpu_millicores` | 100 to min(2000, tenant `max_cpu_cores` × 1000). Omitted: template value, else 1000, lowered to that maximum the same way. An explicit value outside the range is 400 |
+| `egress` | `none` (default) or `internet`. `internet` → 403 unless the server and the tenant both allow it (see above) |
+| `disk_mb` | Only on servers with tmpfs workspaces, the default (otherwise 400). 16 to min(`memory_mb`, tenant `max_sandbox_disk_mb`, default 1024). Omitted: half of `memory_mb`, within that range |
+
+Every resolved image goes through the service image allowlist: Docker Hub images, or this tenant's own `127.0.0.1:5000/ah/<tenant>-*` build images and `127.0.0.1:5000/snapshots/<tenant>:*` snapshot images. `localhost/…` and other registries → 400. A snapshot or service owned by another tenant → 404. A service with no built image → 409. A service source reads the service's current image directly and does not create a snapshot.
+
+Response (201; `GET` returns the same shape, `list` an array):
+
+```json
+{
+  "id": "1a2b…", "name": "sbx-1a2b3c4d", "status": "running",
+  "source": {"type": "snapshot", "ref": "<snapshot_id>"},
+  "image": "127.0.0.1:5000/snapshots/<tenant>:<id>",
+  "run": "app", "egress": "none",
+  "memory_mb": 512, "cpu_millicores": 1000, "disk_mb": 256, "ttl_seconds": 1800,
+  "created_at": 1760000000, "expires_at": 1760001800,
+  "max_expires_at": 1760086400, "last_activity_at": 1760000000
+}
+```
+
+No `container_id`, volume name or env values are returned. `disk_mb` is the tmpfs `/workspace` size, or 0 on a server that uses volumes (no hard size limit).
+
+The create limiter reports its state in `X-Sandbox-Create-RateLimit-Limit` (requests per second, `0.333` = 20/minute) and `X-Sandbox-Create-RateLimit-Remaining`; `X-RateLimit-*` keep describing the general per-tenant API limit.
+
+### `POST /v1/sandboxes/{sandboxID}/exec`
+
+Argv only (no shell; wrap with `sh -c` yourself). The image must contain the coreutils `timeout` binary (distroless images fail with exit code 127). Default working directory `/workspace`. A background process that keeps stdout open holds the request until the timeout; redirect it (`nohup cmd >/tmp/x 2>&1 &`). Exec bumps `last_activity_at` but does not extend the TTL.
+
+### `POST /v1/sandboxes/{sandboxID}/extend`
+
+```json
+{"ttl_seconds": 3600}
+```
+
+Sets `expires_at = now + ttl_seconds`. 400 if `ttl_seconds` is outside 60..`max_sandbox_ttl_seconds` (no default: `ttl_seconds` is required) or the new expiry would pass `max_expires_at` (created_at + `max_sandbox_lifetime_seconds`, default 24h); 409 if the sandbox is not running or has already expired. Returns the updated sandbox.
+
+### Lifecycle
+
+```
+creating → running → (TTL) → deleted within ~30s
+running → container died → stopped → deleted after 10 min
+creating → stuck 5 min → failed → deleted after 10 min
+DELETE → deleted now
+tenant suspended → stopped → deleted after 10 min
+```
+
+The sandbox reaper runs every 30s. A teardown that fails (Docker error other than not found) leaves the row `deleting`; it is retried after 2 minutes. Lifecycle events are logged as `AUDIT: action=sandbox.{create,delete,extend,expired,reaped}`.
+
 ---
 
 ## Activity
@@ -1578,8 +1718,8 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | 413 | Body > 1 MB |
 | 422 | Registration uniqueness (deliberately vague) |
 | 429 | Rate limit |
-| 500 | Unexpected, including disk ≥90% on build/DB/restart/redeploy (`{"error":"internal error"}`) |
-| 503 | Docker/build/metering/registration unavailable (manager nil) |
+| 500 | Unexpected (`{"error":"internal error"}`) |
+| 503 | Docker/build/metering/registration unavailable (manager nil); disk ≥90% on build, DB create, kanban create, deploy and restart/redeploy (`{"error":"insufficient disk space; try again later"}`, `Retry-After: 10`); deploy queue full (`Retry-After`) |
 
 ## Timeouts
 
@@ -1588,7 +1728,7 @@ Synthetic feed assembled from tenants, services, builds, databases, API keys. Se
 | Most routes | 30s (`chi.Timeout`) |
 | Server `WriteTimeout` | 30s |
 | `ReadTimeout` / `ReadHeaderTimeout` | 10s / 5s |
-| Logs, DB create, kanban create, env create/sync, exec | no chi 30s timeout |
+| Logs, DB create, kanban create, env create/sync, exec, sandbox create/delete/logs/exec | no chi 30s timeout |
 
 Streaming past 30s write timeout can still be cut by `http.Server.WriteTimeout`. In practice log follow is used on the long-timeout group; watch server-level write timeout if streams die at ~30s.
 
@@ -1779,7 +1919,7 @@ Or wait for auto-backoff (30m / 1h / 4h), which **closes the circuit and leaves 
 
 ## Deploy / build returns disk error
 
-`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, restart, redeploy) return **500** `{"error":"internal error"}`, not 503. Service create returns 201 and the async deploy fails with `last_error` set.
+`used_percent >= 90` on `/var/lib/ah` or `/var/lib/docker`. Sync paths (build create, DB create, kanban create, deploy, restart, redeploy) return **503** `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10`. Service create returns 201 and the async deploy fails with `last_error` set.
 
 ```bash
 curl -s -H "Authorization: Bearer $AH_KEY" \
@@ -1973,8 +2113,9 @@ DELETE /v1/auth/keys/:keyID
 POST /v1/auth/recover
 Headers: X-Admin-Token: <admin-token>, Content-Type: application/json
 Body: {"email":"tenant@example.com"}
-# → {"api_key":"newkeyid.newsecret"}
-# Rate limited: same as tenant registration (5/hour per IP, 20/hour global)
+# → 201 {"id":"...","key":"keyid.secret","name":"recovery-YYYYMMDD","created_at":unix,"warning"?:"...","revoked_key_id"?:"..."}
+#   Read the new key from .key (shown once). warning/revoked_key_id appear when the oldest key was auto-revoked.
+# Rate limited: 5/hour per IP, 20/hour global (adminLimiter, separate from registration's buckets)
 # Email must match the tenant's registered email
 
 # Validate a bootstrap token (does not register — just checks validity)
@@ -1984,7 +2125,7 @@ Body: {"token":"<bootstrap-token>"}
 # Rate limited like registration (5/IP/hour, 20/hour global)
 ```
 
-**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration, recovery, and validation.
+**Multi-token support:** `AH_BOOTSTRAP_TOKEN` accepts comma-separated values (e.g. `token1,token2`). Any token in the list is accepted for registration and validation. Recovery (and reactivation and quota updates) takes `AH_ADMIN_TOKEN`; bootstrap tokens work there only when no admin token is configured (otherwise 403).
 
 ---
 
@@ -2179,6 +2320,58 @@ DELETE /v1/snapshots/:snapshotID
 
 ---
 
+## Sandboxes (disposable)
+
+A sandbox is a throwaway container that the server deletes when its TTL expires (no stop/start). Same isolation as environments (gVisor in production, caps dropped, PID/memory/CPU limits). Network egress is `none` by default: no internet, no other tenant containers, no other tenants. `egress:"internet"` is opt-in: it needs the operator's egress network (`--sandbox-egress-network`) **and** the tenant quota `sandbox_egress_allowed=1`, else 403; such a sandbox is attached only to the egress bridge (public internet; private ranges, cloud metadata and the host are firewalled off). Separate quota from environments: `max_sandboxes` (default 5) plus a host-wide cap (default 20). Creates are rate limited to ~20/min per tenant.
+
+```bash
+# Create (long route; Idempotency-Key honoured). source.type: template|image|snapshot|service
+POST /v1/sandboxes
+Body: {"source":{"type":"image","image":"python:3.12-slim"},"ttl_seconds":1800}
+#   {"source":{"type":"template","template":"python"}}
+#   {"source":{"type":"snapshot","snapshot_id":"..."},"include_env":true}   # runs the app (run=app)
+#   {"source":{"type":"service","service_id":"..."},"run":"idle"}            # service's current image
+#   optional: name, run (idle|app), include_env, memory_mb (128..2048), cpu_millicores (100..2000),
+#             egress ("none" | "internet": 403 unless server + tenant allow it),
+#             disk_mb (tmpfs workspace, the default; 400 on servers that opted out; 16..min(memory_mb, max_sandbox_disk_mb))
+# → 201 {"id":"...","name":"sbx-1a2b3c4d","status":"running","source":{"type":"image","ref":"python:3.12-slim"},
+#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,"disk_mb":256,
+#        "ttl_seconds":1800,"created_at":unix,"expires_at":unix,"max_expires_at":unix,"last_activity_at":unix}
+# ttl_seconds: 60..min(max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds) (defaults 14400, 86400).
+#   Omitted: 1800, lowered to that bound if the tenant's bound is smaller. Explicit out-of-range → 400.
+# memory_mb / cpu_millicores omitted: template value (else 512 / 1000), lowered to the tenant maximum.
+# disk_mb: >0 = tmpfs of that size (default half of memory_mb), counted against memory_mb. 0 = volume (server opted out).
+# Image sources: 400 "image too large" over the server's limit (default 4096 MB); 503 if the pull filled the disk.
+# Sandboxes are disposable: at 90% host disk the server deletes running sandboxes, largest disk_mb first.
+# Create limiter headers: X-Sandbox-Create-RateLimit-Limit/-Remaining (X-RateLimit-* stay the general limit).
+# Images: Docker Hub, or your own 127.0.0.1:5000 build/snapshot images. Other tenants' resources → 404.
+
+GET /v1/sandboxes?status=running          # list (limit/offset)
+GET /v1/sandboxes/:sandboxID
+DELETE /v1/sandboxes/:sandboxID           # → 204
+
+# Exec: same body/response as environment exec; not idempotent
+POST /v1/sandboxes/:sandboxID/exec
+Body: {"command":["python3","-c","print(2+2)"],"work_dir":"/workspace","timeout":60}
+# → {"exit_code":0,"stdout":"4\n","stderr":"","truncated":false,"timed_out":false,"duration_ms":120}
+
+# Main process logs (useful for run=app sandboxes)
+GET /v1/sandboxes/:sandboxID/logs?tail=100&follow=false
+
+# Push expiry to now + ttl (not past max_expires_at = created_at + 24h by default)
+POST /v1/sandboxes/:sandboxID/extend
+Body: {"ttl_seconds":3600}
+# 400 past max lifetime; 409 when not running / already expired
+```
+
+Egress is an operator opt-in; tmpfs workspaces are on by default. Both are unverified on the production host until the checklist in docs/runbooks/sandboxes-hardening.md has been run. Egress sandboxes' network bytes show in `GET /v1/tenant/usage/metrics?kind=sandbox`.
+
+Notes: a sandbox forked with `include_env` gets values like `DATABASE_URL` but is not attached to database networks, so those connections fail. Exec needs the `timeout` binary in the image (distroless → exit 127). Expired sandboxes are deleted within ~30s; stopped/failed ones after 10 minutes. Environment routes return 404 for sandbox IDs and vice versa.
+
+CLI: `ahc sandbox run --image python:3.12-slim -- python3 -V` (create, exec, delete; exit code propagated; a 404 on the final delete means it was already gone and is not an error; `--egress internet`, `--disk MB` where allowed), plus `ahc sandbox create|list|get|exec|logs|extend|delete` (alias `ahc sbx`).
+
+---
+
 ## Kanban (Vikunja)
 
 Provisions a per-tenant Vikunja kanban board in a dedicated container. Provisioning is async -- the `POST` returns immediately and the kanban URL becomes available once the container is ready. Poll `GET /v1/kanban` until the `url` field is populated.
@@ -2245,4 +2438,4 @@ Add to **POST and PUT** requests (not DELETE/PATCH; no PUT routes exist today):
 Idempotency-Key: <any-stable-uuid>
 ```
 Same key + same tenant + same method + same path + same body hash = replayed 2xx. TTL is 10 minutes.
-`POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.
+`POST /v1/auth/keys`, `POST /v1/environments/{id}/exec` and `POST /v1/sandboxes/{id}/exec` are excluded.

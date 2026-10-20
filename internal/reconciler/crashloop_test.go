@@ -259,3 +259,24 @@ func TestReconciler_StoppedExpiredEnvStillRunningIsStopped(t *testing.T) {
 	require.NoError(t, r.ReconcileOnce(ctx))
 	assert.Contains(t, mock.StopContainerCalls, "cid-env2")
 }
+
+// A user Start that extends the lease between the retry query and the stop
+// (environments.Start bumps the lease before starting the container) must not
+// have its container stopped by the retry pass.
+func TestReconciler_StoppedEnvBeingStartedIsNotStopped(t *testing.T) {
+	db := testutil.NewStateDB(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	seedService(t, db, "svc-z", "stopped", "")
+	_, err := db.Exec(`INSERT INTO environments (id, tenant_id, name, status, container_id, lease_expires_at, created_at, updated_at)
+		VALUES ('env-3','tenant-1','e','stopped','cid-env3',?,?,?)`, now-10, now, now)
+	require.NoError(t, err)
+	mock := mockWith("cid-env3", func() *docker.ContainerInfo {
+		// Simulate Start racing in: lease extended, container now running.
+		_, _ = db.Exec(`UPDATE environments SET lease_expires_at = ? WHERE id = 'env-3'`, time.Now().Unix()+600)
+		return &docker.ContainerInfo{Status: "running"}
+	})
+	r := reconciler.New(db, mock, time.Minute, nil)
+	require.NoError(t, r.ReconcileOnce(ctx))
+	assert.NotContains(t, mock.StopContainerCalls, "cid-env3")
+}

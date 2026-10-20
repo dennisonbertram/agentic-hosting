@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -27,7 +26,7 @@ Environments are ideal for:
 
 Quick start:
   # Create a Go dev environment
-  ahc env create my-env --template tmpl-golang
+  ahc env create my-env --template go
 
   # Run a command inside it
   ahc env exec my-env -- go version
@@ -84,7 +83,7 @@ Displays a table with NAME, STATUS, TEMPLATE, ID (truncated), and EXPIRES time.`
 				if err != nil {
 					return err
 				}
-				return writeJSON(cmd.OutOrStdout(), envs)
+				return printJSON(cmd.OutOrStdout(), envs)
 			}
 			return runEnvList(c, cmd.OutOrStdout())
 		},
@@ -106,10 +105,7 @@ func runEnvList(c *ahclient.Client, w io.Writer) error {
 	headers := []string{"NAME", "STATUS", "TEMPLATE", "ID", "EXPIRES"}
 	rows := make([][]string, 0, len(envs))
 	for _, e := range envs {
-		shortID := e.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
+		id := shortID(e.ID)
 		expires := "-"
 		if e.LeaseExpiresAt != nil {
 			expires = time.Unix(*e.LeaseExpiresAt, 0).Format("2006-01-02 15:04")
@@ -118,7 +114,7 @@ func runEnvList(c *ahclient.Client, w io.Writer) error {
 			e.Name,
 			e.Status,
 			e.TemplateID,
-			shortID,
+			id,
 			expires,
 		})
 	}
@@ -144,8 +140,8 @@ Use --lease to set how long (in seconds) the environment stays active before aut
 
 Examples:
   ahc env create my-env
-  ahc env create my-env --template tmpl-golang
-  ahc env create my-env --template tmpl-node --lease 7200`,
+  ahc env create my-env --template go
+  ahc env create my-env --template node --lease 7200`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient(root)
@@ -180,7 +176,7 @@ func runEnvCreate(c *ahclient.Client, w io.Writer, name, templateID string, leas
 		return fmt.Errorf("create environment: %w", err)
 	}
 
-	printSuccess(w, fmt.Sprintf("Environment %q created (id: %s, status: %s)", env.Name, env.ID[:8], env.Status))
+	printSuccess(w, fmt.Sprintf("Environment %q created (id: %s, status: %s)", env.Name, shortID(env.ID), env.Status))
 	fmt.Fprintf(w, "\nRun a command:\n  ahc env exec %s -- <command>\n", env.Name)
 	return nil
 }
@@ -211,7 +207,7 @@ Accepts either an environment name or a 32-character hex ID.`,
 				if err != nil {
 					return err
 				}
-				return writeJSON(cmd.OutOrStdout(), env)
+				return printJSON(cmd.OutOrStdout(), env)
 			}
 			return runEnvGet(c, cmd.OutOrStdout(), args[0])
 		},
@@ -263,18 +259,23 @@ Examples:
   ahc env exec my-env -- python3 script.py`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 2 {
+				return fmt.Errorf("no command given: ahc env exec <name-or-id> -- <command...>")
+			}
 			c, err := getClient(root)
 			if err != nil {
 				return err
 			}
-			return runEnvExec(c, os.Stdout, args[0], args[1:])
+			return runEnvExec(c, cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], args[1:])
 		},
 	}
 	return cmd
 }
 
-// runEnvExec is the testable core of the env exec command.
-func runEnvExec(c *ahclient.Client, w io.Writer, nameOrID string, command []string) error {
+// runEnvExec is the testable core of the env exec command. The remote
+// command's stdout goes to stdout and its stderr to errW, so piping
+// `ahc env exec` output does not mix in diagnostics.
+func runEnvExec(c *ahclient.Client, w, errW io.Writer, nameOrID string, command []string) error {
 	id, err := resolveEnvID(c, nameOrID)
 	if err != nil {
 		return err
@@ -285,18 +286,14 @@ func runEnvExec(c *ahclient.Client, w io.Writer, nameOrID string, command []stri
 		return fmt.Errorf("exec: %w", err)
 	}
 
-	if result.Stdout != "" {
-		fmt.Fprint(w, result.Stdout)
-	}
-	if result.Stderr != "" {
-		fmt.Fprint(w, result.Stderr)
-	}
+	fmt.Fprint(w, result.Stdout)
+	fmt.Fprint(errW, result.Stderr)
 
 	if result.Truncated {
-		fmt.Fprintln(os.Stderr, "ahc: warning: command output was truncated by the server")
+		fmt.Fprintln(errW, "ahc: warning: command output was truncated by the server")
 	}
 	if result.TimedOut {
-		fmt.Fprintln(os.Stderr, "ahc: command timed out")
+		fmt.Fprintln(errW, "ahc: command timed out")
 		code := result.ExitCode
 		if code == 0 {
 			code = 124 // same convention as timeout(1)
@@ -441,7 +438,7 @@ Example:
 				if err != nil {
 					return err
 				}
-				return writeJSON(cmd.OutOrStdout(), templates)
+				return printJSON(cmd.OutOrStdout(), templates)
 			}
 			return runEnvTemplates(c, cmd.OutOrStdout())
 		},
@@ -463,10 +460,7 @@ func runEnvTemplates(c *ahclient.Client, w io.Writer) error {
 	headers := []string{"ID", "NAME", "BASE_IMAGE", "MEMORY_MB", "CPU_MILLICORES", "DESCRIPTION"}
 	rows := make([][]string, 0, len(templates))
 	for _, t := range templates {
-		desc := t.Description
-		if len(desc) > 50 {
-			desc = desc[:47] + "..."
-		}
+		desc := shortStr(t.Description, 50)
 		rows = append(rows, []string{
 			t.ID,
 			t.Name,
@@ -482,7 +476,7 @@ func runEnvTemplates(c *ahclient.Client, w io.Writer) error {
 
 // resolveEnvID converts a name-or-ID argument into an environment ID.
 // If arg is exactly 32 lowercase hex characters, it is used directly.
-// Otherwise, ListEnvironments is called and filtered by name.
+// Otherwise, ListEnvironments is called and filtered by name, then by unique ID prefix.
 func resolveEnvID(c *ahclient.Client, arg string) (string, error) {
 	if isHexID(arg) {
 		return arg, nil
@@ -502,13 +496,17 @@ func resolveEnvID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("environment %q not found", arg)
+		ids := make([]string, len(envs))
+		for i := range envs {
+			ids[i] = envs[i].ID
+		}
+		return resolveIDPrefix("environment", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:
 		ids := make([]string, len(matches))
 		for i, e := range matches {
-			ids[i] = e.ID[:8]
+			ids[i] = shortID(e.ID)
 		}
 		return "", fmt.Errorf("ambiguous: %d environments named %q (ids: %s)", len(matches), arg, strings.Join(ids, ", "))
 	}

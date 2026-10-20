@@ -19,6 +19,37 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
+// esc escapes one user-supplied path segment (IDs, names, env keys) so that
+// '/', '?', '#' and '%' cannot change which endpoint is called. Dot segments
+// are not escaped by url.PathEscape; checkPath rejects them.
+func esc(segment string) string {
+	return url.PathEscape(segment)
+}
+
+// checkPath rejects request paths with empty, "." or ".." segments, or
+// segments containing an (escaped) slash or backslash. Go's
+// HTTP client sends dot segments unchanged and a path-cleaning proxy in front
+// of the API would resolve them, so an argument like "../../tenant" could
+// otherwise reach a different endpoint (e.g. DELETE /v1/tenant).
+func checkPath(path string) error {
+	p := path
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
+		dec, err := url.PathUnescape(seg)
+		if err != nil {
+			dec = seg
+		}
+		// Also reject escaped slashes/dots: a proxy that decodes them before
+		// cleaning the path would resolve them just the same.
+		if dec == "" || dec == "." || dec == ".." || strings.ContainsAny(dec, "/\\") {
+			return fmt.Errorf("invalid request path %q: empty, dot or slash in a path segment (check the ID argument)", path)
+		}
+	}
+	return nil
+}
+
 // NewClient creates a new Client.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
@@ -55,7 +86,13 @@ const longRequestTimeout = 330 * time.Second
 // ExecRequestTimeout returns the HTTP timeout for an exec request. The server
 // defaults to 60s and caps at 300s; a 5s response allowance is added.
 func ExecRequestTimeout(execSeconds int) time.Duration {
-	return environmentExecClientTimeout(execSeconds)
+	if execSeconds <= 0 {
+		execSeconds = 60
+	}
+	if execSeconds > 300 {
+		execSeconds = 300
+	}
+	return time.Duration(execSeconds)*time.Second + 5*time.Second
 }
 
 // doJSONLong is doJSON with a per-request timeout replacing the client default.
@@ -75,6 +112,9 @@ func (c *Client) doJSONWith(cl *http.Client, method, path string, body any, dest
 		bodyReader = bytes.NewReader(data)
 	}
 
+	if err := checkPath(path); err != nil {
+		return err
+	}
 	req, err := http.NewRequest(method, c.BaseURL+path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("ahclient: build request: %w", err)
@@ -113,6 +153,9 @@ func (c *Client) doJSONWith(cl *http.Client, method, path string, body any, dest
 // doStream sends a GET request and returns the response body as an io.ReadCloser.
 // Callers are responsible for closing the returned reader.
 func (c *Client) doStream(method, path string, extraHeaders map[string]string) (io.ReadCloser, error) {
+	if err := checkPath(path); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(method, c.BaseURL+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ahclient: build request: %w", err)
@@ -125,11 +168,10 @@ func (c *Client) doStream(method, path string, extraHeaders map[string]string) (
 		req.Header.Set(k, v)
 	}
 
-	// Use a client without timeout for streaming
-	cl := c.HTTPClient
-	if cl.Timeout != 0 {
-		cl = &http.Client{Transport: cl.Transport}
-	}
+	// Streams stay open as long as the server sends data, so drop the
+	// client-wide timeout while keeping its transport, jar and redirect policy.
+	cl := *c.HTTPClient
+	cl.Timeout = 0
 
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -144,9 +186,13 @@ func (c *Client) doStream(method, path string, extraHeaders map[string]string) (
 	return resp.Body, nil
 }
 
+// maxErrorBody caps how much of an error response is read into memory and
+// echoed back in APIError.Message (a misbehaving proxy can return huge pages).
+const maxErrorBody = 64 << 10
+
 // readError reads an API error response body and returns an *APIError.
 func (c *Client) readError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	var errResp struct {
 		Error string `json:"error"`
 	}
@@ -231,7 +277,7 @@ func (c *Client) DeleteTenant() error {
 func (c *Client) ReactivateTenant(tenantID, bootstrapToken string) (*ReactivateResponse, error) {
 	headers := map[string]string{"X-Bootstrap-Token": bootstrapToken}
 	var resp ReactivateResponse
-	if err := c.doJSON(http.MethodPost, "/v1/tenants/"+tenantID+"/reactivate", nil, &resp, headers); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/tenants/"+esc(tenantID)+"/reactivate", nil, &resp, headers); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -259,7 +305,7 @@ func (c *Client) CreateKey(req CreateKeyRequest) (*CreateKeyResponse, error) {
 
 // RevokeKey revokes an API key by ID.
 func (c *Client) RevokeKey(keyID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/auth/keys/"+keyID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/auth/keys/"+esc(keyID), nil, nil, nil)
 }
 
 // RecoverKey generates a new API key using the bootstrap token and email.
@@ -267,6 +313,18 @@ func (c *Client) RecoverKey(email, bootstrapToken string) (*KeyRecoverResponse, 
 	body := KeyRecoverRequest{Email: email, BootstrapToken: bootstrapToken}
 	var resp KeyRecoverResponse
 	if err := c.doJSON(http.MethodPost, "/v1/auth/recover", body, &resp, nil); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// RecoverKeyWithAdminToken is RecoverKey authenticated with the operator's
+// admin token (X-Admin-Token). A server with AH_ADMIN_TOKEN configured accepts
+// only that token for recovery and answers a bootstrap token with 403.
+func (c *Client) RecoverKeyWithAdminToken(email, adminToken string) (*KeyRecoverResponse, error) {
+	body := KeyRecoverRequest{Email: email}
+	var resp KeyRecoverResponse
+	if err := c.doJSON(http.MethodPost, "/v1/auth/recover", body, &resp, map[string]string{"X-Admin-Token": adminToken}); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -286,7 +344,7 @@ func (c *Client) ListServices() ([]Service, error) {
 // GetService returns a service by ID.
 func (c *Client) GetService(serviceID string) (*Service, error) {
 	var resp Service
-	if err := c.doJSON(http.MethodGet, "/v1/services/"+serviceID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/services/"+esc(serviceID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -305,7 +363,7 @@ func (c *Client) CreateService(req CreateServiceRequest) (*Service, error) {
 func (c *Client) UpdateService(serviceID, name string) (*Service, error) {
 	body := UpdateServiceRequest{Name: name}
 	var resp Service
-	if err := c.doJSON(http.MethodPatch, "/v1/services/"+serviceID, body, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPatch, "/v1/services/"+esc(serviceID), body, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -313,13 +371,13 @@ func (c *Client) UpdateService(serviceID, name string) (*Service, error) {
 
 // DeleteService deletes a service.
 func (c *Client) DeleteService(serviceID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/services/"+serviceID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/services/"+esc(serviceID), nil, nil, nil)
 }
 
 // StartService starts a stopped service.
 func (c *Client) StartService(serviceID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/start", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/start", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -328,7 +386,7 @@ func (c *Client) StartService(serviceID string) (*StatusResponse, error) {
 // StopService stops a running service.
 func (c *Client) StopService(serviceID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/stop", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/stop", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -337,7 +395,7 @@ func (c *Client) StopService(serviceID string) (*StatusResponse, error) {
 // RestartService restarts a service.
 func (c *Client) RestartService(serviceID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/restart", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/restart", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -346,7 +404,7 @@ func (c *Client) RestartService(serviceID string) (*StatusResponse, error) {
 // RedeployService redeploys a service (stops and restarts with current image and env).
 func (c *Client) RedeployService(serviceID string) (*Service, error) {
 	var resp Service
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/redeploy", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/redeploy", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -355,7 +413,7 @@ func (c *Client) RedeployService(serviceID string) (*Service, error) {
 // ResetService resets the circuit breaker for a service.
 func (c *Client) ResetService(serviceID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/reset", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/reset", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -364,7 +422,7 @@ func (c *Client) ResetService(serviceID string) (*StatusResponse, error) {
 // GetServiceEnv returns env vars for a service.
 // Pass reveal=true to return values (audit-logged server-side).
 func (c *Client) GetServiceEnv(serviceID string, reveal bool) (map[string]string, error) {
-	path := "/v1/services/" + serviceID + "/env"
+	path := "/v1/services/" + esc(serviceID) + "/env"
 	if reveal {
 		path += "?reveal=true"
 	}
@@ -378,7 +436,7 @@ func (c *Client) GetServiceEnv(serviceID string, reveal bool) (map[string]string
 // SetServiceEnv sets env vars for a service.
 func (c *Client) SetServiceEnv(serviceID string, vars map[string]string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/env", vars, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/env", vars, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -386,7 +444,7 @@ func (c *Client) SetServiceEnv(serviceID string, vars map[string]string) (*Statu
 
 // DeleteServiceEnv deletes an env var from a service.
 func (c *Client) DeleteServiceEnv(serviceID, key string) error {
-	return c.doJSON(http.MethodDelete, "/v1/services/"+serviceID+"/env/"+key, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/services/"+esc(serviceID)+"/env/"+esc(key), nil, nil, nil)
 }
 
 // GetServiceLogs returns service logs as a streaming reader.
@@ -397,14 +455,14 @@ func (c *Client) GetServiceLogs(serviceID string, follow bool, tail int) (io.Rea
 	if follow {
 		params.Set("follow", "true")
 	}
-	path := "/v1/services/" + serviceID + "/logs?" + params.Encode()
+	path := "/v1/services/" + esc(serviceID) + "/logs?" + params.Encode()
 	return c.doStream(http.MethodGet, path, nil)
 }
 
 // ListDeployments returns the deployment history for a service.
 func (c *Client) ListDeployments(serviceID string) ([]Deployment, error) {
 	var resp []Deployment
-	if err := c.doJSON(http.MethodGet, "/v1/services/"+serviceID+"/deployments", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/services/"+esc(serviceID)+"/deployments", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -413,7 +471,7 @@ func (c *Client) ListDeployments(serviceID string) ([]Deployment, error) {
 // CancelDeployment cancels a deployment that has not started yet (status pending).
 func (c *Client) CancelDeployment(serviceID, deploymentID string) (*Deployment, error) {
 	var resp Deployment
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/deployments/"+deploymentID+"/cancel", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/deployments/"+esc(deploymentID)+"/cancel", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -433,7 +491,7 @@ func (c *Client) ListSnapshots() ([]Snapshot, error) {
 // GetSnapshot returns a snapshot by ID.
 // Pass reveal=true to include env var values (audit-logged server-side).
 func (c *Client) GetSnapshot(snapshotID string, reveal bool) (*Snapshot, error) {
-	path := "/v1/snapshots/" + snapshotID
+	path := "/v1/snapshots/" + esc(snapshotID)
 	if reveal {
 		path += "?reveal=true"
 	}
@@ -447,7 +505,7 @@ func (c *Client) GetSnapshot(snapshotID string, reveal bool) (*Snapshot, error) 
 // CreateSnapshot creates a snapshot of a service.
 func (c *Client) CreateSnapshot(serviceID string, req CreateSnapshotRequest) (*Snapshot, error) {
 	var resp Snapshot
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/snapshots", req, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/snapshots", req, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -455,7 +513,7 @@ func (c *Client) CreateSnapshot(serviceID string, req CreateSnapshotRequest) (*S
 
 // DeleteSnapshot deletes a snapshot.
 func (c *Client) DeleteSnapshot(snapshotID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/snapshots/"+snapshotID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/snapshots/"+esc(snapshotID), nil, nil, nil)
 }
 
 // ---- Build endpoints ----
@@ -472,7 +530,7 @@ func (c *Client) ListBuilds() ([]Build, error) {
 // ListBuildsForService returns all builds for a specific service.
 func (c *Client) ListBuildsForService(serviceID string) ([]Build, error) {
 	var resp []Build
-	if err := c.doJSON(http.MethodGet, "/v1/services/"+serviceID+"/builds", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/services/"+esc(serviceID)+"/builds", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -481,7 +539,7 @@ func (c *Client) ListBuildsForService(serviceID string) ([]Build, error) {
 // GetBuild returns a build by ID.
 func (c *Client) GetBuild(serviceID, buildID string) (*Build, error) {
 	var resp Build
-	if err := c.doJSON(http.MethodGet, "/v1/services/"+serviceID+"/builds/"+buildID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/services/"+esc(serviceID)+"/builds/"+esc(buildID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -490,7 +548,7 @@ func (c *Client) GetBuild(serviceID, buildID string) (*Build, error) {
 // GetBuildLogs returns build logs as a streaming reader.
 // If follow is true, the connection stays open until the build completes.
 func (c *Client) GetBuildLogs(serviceID, buildID string, follow bool) (io.ReadCloser, error) {
-	path := "/v1/services/" + serviceID + "/builds/" + buildID + "/logs"
+	path := "/v1/services/" + esc(serviceID) + "/builds/" + esc(buildID) + "/logs"
 	if follow {
 		path += "?follow=true"
 	}
@@ -500,7 +558,7 @@ func (c *Client) GetBuildLogs(serviceID, buildID string, follow bool) (io.ReadCl
 // StartBuild starts a new build for a service.
 func (c *Client) StartBuild(serviceID string, req StartBuildRequest) (*StartBuildResponse, error) {
 	var resp StartBuildResponse
-	if err := c.doJSON(http.MethodPost, "/v1/services/"+serviceID+"/builds", req, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/services/"+esc(serviceID)+"/builds", req, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -509,7 +567,7 @@ func (c *Client) StartBuild(serviceID string, req StartBuildRequest) (*StartBuil
 // CancelBuild cancels a running or queued build.
 func (c *Client) CancelBuild(serviceID, buildID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodDelete, "/v1/services/"+serviceID+"/builds/"+buildID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodDelete, "/v1/services/"+esc(serviceID)+"/builds/"+esc(buildID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -531,7 +589,7 @@ func (c *Client) ListDatabases() ([]Database, error) {
 // GetDatabase returns a database by ID.
 func (c *Client) GetDatabase(dbID string) (*Database, error) {
 	var resp Database
-	if err := c.doJSON(http.MethodGet, "/v1/databases/"+dbID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/databases/"+esc(dbID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -551,14 +609,14 @@ func (c *Client) CreateDatabase(req CreateDatabaseRequest) (*Database, error) {
 
 // DeleteDatabase deletes a database.
 func (c *Client) DeleteDatabase(dbID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/databases/"+dbID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/databases/"+esc(dbID), nil, nil, nil)
 }
 
 // GetDatabaseConnectionString returns the connection string for a database.
 // The access is audit-logged server-side.
 func (c *Client) GetDatabaseConnectionString(dbID string) (string, error) {
 	var resp ConnectionStringResponse
-	if err := c.doJSON(http.MethodGet, "/v1/databases/"+dbID+"/connection-string", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/databases/"+esc(dbID)+"/connection-string", nil, &resp, nil); err != nil {
 		return "", err
 	}
 	return resp.ConnectionString, nil
@@ -578,7 +636,7 @@ func (c *Client) ListEnvironments() ([]Environment, error) {
 // GetEnvironment returns an environment by ID.
 func (c *Client) GetEnvironment(envID string) (*Environment, error) {
 	var resp Environment
-	if err := c.doJSON(http.MethodGet, "/v1/environments/"+envID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/environments/"+esc(envID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -595,13 +653,13 @@ func (c *Client) CreateEnvironment(req CreateEnvironmentRequest) (*Environment, 
 
 // DeleteEnvironment deletes an environment.
 func (c *Client) DeleteEnvironment(envID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/environments/"+envID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/environments/"+esc(envID), nil, nil, nil)
 }
 
 // StartEnvironment starts a stopped environment.
 func (c *Client) StartEnvironment(envID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/start", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/environments/"+esc(envID)+"/start", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -610,7 +668,7 @@ func (c *Client) StartEnvironment(envID string) (*StatusResponse, error) {
 // StopEnvironment stops a running environment.
 func (c *Client) StopEnvironment(envID string) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/stop", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/environments/"+esc(envID)+"/stop", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -632,27 +690,97 @@ func (c *Client) EnvironmentExec(envID string, command []string, workDir string,
 	// endpoint, bounding the request to the server's execution cap plus a
 	// response allowance.
 	var resp ExecResult
-	if err := c.doJSONLong(environmentExecClientTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+envID+"/exec", body, &resp); err != nil {
+	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+esc(envID)+"/exec", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
-}
-
-func environmentExecClientTimeout(timeoutSeconds int) time.Duration {
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 60
-	}
-	if timeoutSeconds > 300 {
-		timeoutSeconds = 300
-	}
-	return time.Duration(timeoutSeconds)*time.Second + 5*time.Second
 }
 
 // ExtendEnvironmentLease extends the lease on an environment.
 func (c *Client) ExtendEnvironmentLease(envID string, durationSeconds int) (*Environment, error) {
 	body := map[string]int{"duration_seconds": durationSeconds}
 	var resp Environment
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/lease", body, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/environments/"+esc(envID)+"/lease", body, &resp, nil); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ---- Sandbox endpoints ----
+
+// CreateSandbox creates a disposable sandbox. It may pull an image, so it
+// uses the long request timeout.
+func (c *Client) CreateSandbox(req CreateSandboxRequest) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSONLong(longRequestTimeout, http.MethodPost, "/v1/sandboxes", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ListSandboxes returns the tenant's sandboxes. status filters when non-empty.
+func (c *Client) ListSandboxes(status string) ([]Sandbox, error) {
+	path := "/v1/sandboxes"
+	if status != "" {
+		path += "?" + url.Values{"status": {status}}.Encode()
+	}
+	var resp []Sandbox
+	if err := c.doJSON(http.MethodGet, path, nil, &resp, nil); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// GetSandbox returns a sandbox by ID.
+func (c *Client) GetSandbox(id string) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSON(http.MethodGet, "/v1/sandboxes/"+esc(id), nil, &resp, nil); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DeleteSandbox deletes a sandbox (container, workspace and record).
+func (c *Client) DeleteSandbox(id string) error {
+	return c.doJSONLong(longRequestTimeout, http.MethodDelete, "/v1/sandboxes/"+esc(id), nil, nil)
+}
+
+// SandboxExec runs a command (argv, no shell) in a sandbox.
+func (c *Client) SandboxExec(id string, command []string, workDir string, timeoutSeconds int) (*ExecResult, error) {
+	body := map[string]any{"command": command}
+	if workDir != "" {
+		body["work_dir"] = workDir
+	}
+	if timeoutSeconds > 0 {
+		body["timeout"] = timeoutSeconds
+	}
+	var resp ExecResult
+	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/sandboxes/"+esc(id)+"/exec", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetSandboxLogs streams the logs of the sandbox's main process.
+func (c *Client) GetSandboxLogs(id string, follow bool, tail int) (io.ReadCloser, error) {
+	params := url.Values{}
+	if tail > 0 {
+		params.Set("tail", strconv.Itoa(tail))
+	}
+	if follow {
+		params.Set("follow", "true")
+	}
+	path := "/v1/sandboxes/" + esc(id) + "/logs"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	return c.doStream(http.MethodGet, path, nil)
+}
+
+// ExtendSandbox sets the sandbox to expire ttlSeconds from now.
+func (c *Client) ExtendSandbox(id string, ttlSeconds int) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSON(http.MethodPost, "/v1/sandboxes/"+esc(id)+"/extend", map[string]int{"ttl_seconds": ttlSeconds}, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -670,7 +798,7 @@ func (c *Client) ListEnvironmentTemplates() ([]EnvironmentTemplate, error) {
 // GetEnvironmentTemplate returns a specific environment template.
 func (c *Client) GetEnvironmentTemplate(templateID string) (*EnvironmentTemplate, error) {
 	var resp EnvironmentTemplate
-	if err := c.doJSON(http.MethodGet, "/v1/environments/templates/"+templateID, nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/environments/templates/"+esc(templateID), nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -679,7 +807,7 @@ func (c *Client) GetEnvironmentTemplate(templateID string) (*EnvironmentTemplate
 // SyncWorkspace syncs code from a git URL into an environment.
 func (c *Client) SyncWorkspace(envID string, req SyncRequest) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/sync", req, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/environments/"+esc(envID)+"/sync", req, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -688,7 +816,7 @@ func (c *Client) SyncWorkspace(envID string, req SyncRequest) (*StatusResponse, 
 // CreatePreview creates a preview route for an environment port.
 func (c *Client) CreatePreview(envID string, req CreatePreviewRequest) (*Preview, error) {
 	var resp Preview
-	if err := c.doJSON(http.MethodPost, "/v1/environments/"+envID+"/previews", req, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodPost, "/v1/environments/"+esc(envID)+"/previews", req, &resp, nil); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -697,7 +825,7 @@ func (c *Client) CreatePreview(envID string, req CreatePreviewRequest) (*Preview
 // ListPreviews returns all preview routes for an environment.
 func (c *Client) ListPreviews(envID string) ([]Preview, error) {
 	var resp []Preview
-	if err := c.doJSON(http.MethodGet, "/v1/environments/"+envID+"/previews", nil, &resp, nil); err != nil {
+	if err := c.doJSON(http.MethodGet, "/v1/environments/"+esc(envID)+"/previews", nil, &resp, nil); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -705,7 +833,7 @@ func (c *Client) ListPreviews(envID string) ([]Preview, error) {
 
 // DeletePreview deletes a preview route.
 func (c *Client) DeletePreview(envID, previewID string) error {
-	return c.doJSON(http.MethodDelete, "/v1/environments/"+envID+"/previews/"+previewID, nil, nil, nil)
+	return c.doJSON(http.MethodDelete, "/v1/environments/"+esc(envID)+"/previews/"+esc(previewID), nil, nil, nil)
 }
 
 // ---- Activity endpoints ----

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"text/tabwriter"
 	"time"
 
@@ -181,18 +180,4 @@ The --confirm flag is required as a safety guard.`,
 
 	cmd.Flags().BoolVar(&confirmFlag, "confirm", false, "Confirm revocation (required)")
 	return cmd
-}
-
-// resolveAPIKey returns the API key from the flag, then $AH_API_KEY.
-// This helper is used by register_test.go for legacy compatibility testing.
-func resolveAPIKey(flagVal string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	if v := os.Getenv("AH_API_KEY"); v != "" {
-		return v
-	}
-	fmt.Fprintln(os.Stderr, "error: API key required; set --key flag or AH_KEY env var")
-	os.Exit(1)
-	return ""
 }

@@ -1573,7 +1573,7 @@ func TestDeploymentCancel_ServiceNotFound_Returns404(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServiceList_StatusFilter_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 
 	// Helper to insert a service with a specific status directly in the DB.
 	insertService := func(t *testing.T, stateDB *sql.DB, id, name, status string) {
@@ -2004,7 +2004,7 @@ func createSnapshotViaAPI(t *testing.T, srv http.Handler, token, serviceID, name
 }
 
 func TestSnapshotReveal_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
 	t.Run("no_env_vars/reveal_true_returns_empty_or_absent_env_vars", func(t *testing.T) {
@@ -2210,7 +2210,7 @@ func insertSnapshotDirect(t *testing.T, stateDB *sql.DB, id, tenantID, serviceID
 }
 
 func TestSnapshotListFilter_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
 	t.Run("filter_by_service_id", func(t *testing.T) {
@@ -2514,8 +2514,8 @@ func TestSnapshotListFilter_Regression(t *testing.T) {
 
 // Regression: omitting the period param defaults to "daily" and returns 200.
 func TestMeteringAPI_Regression_MissingPeriodDefaults(t *testing.T) {
-	regLimiter.resetForTest()
-	t.Cleanup(regLimiter.resetForTest)
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 
 	stateDB := testutil.NewStateDB(t)
 	meteringDB := testutil.NewMeteringDB(t)
@@ -2543,8 +2543,8 @@ func TestMeteringAPI_Regression_MissingPeriodDefaults(t *testing.T) {
 
 // Regression: invalid period value returns 400.
 func TestMeteringAPI_Regression_InvalidPeriodReturns400(t *testing.T) {
-	regLimiter.resetForTest()
-	t.Cleanup(regLimiter.resetForTest)
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 
 	stateDB := testutil.NewStateDB(t)
 	meteringDB := testutil.NewMeteringDB(t)
@@ -2580,8 +2580,8 @@ func TestMeteringAPI_Regression_InvalidPeriodReturns400(t *testing.T) {
 
 // Regression: valid request returns 200 with a JSON metrics array.
 func TestMeteringAPI_Regression_ValidRequestReturnsMetrics(t *testing.T) {
-	regLimiter.resetForTest()
-	t.Cleanup(regLimiter.resetForTest)
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 
 	stateDB := testutil.NewStateDB(t)
 	meteringDB := testutil.NewMeteringDB(t)
@@ -2627,8 +2627,8 @@ func TestMeteringAPI_Regression_ValidRequestReturnsMetrics(t *testing.T) {
 // Regression: service-level metrics for a service belonging to a different
 // tenant must return 404 (tenant isolation at the API layer).
 func TestMeteringAPI_Regression_ServiceMetrics_WrongTenant404(t *testing.T) {
-	regLimiter.resetForTest()
-	t.Cleanup(regLimiter.resetForTest)
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 
 	stateDB := testutil.NewStateDB(t)
 	meteringDB := testutil.NewMeteringDB(t)
@@ -2682,7 +2682,7 @@ func TestMeteringAPI_Regression_ServiceMetrics_WrongTenant404(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestQuotaUpdate_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const bootstrapToken = "test-bootstrap-token-quota-update"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
@@ -2836,7 +2836,7 @@ func TestQuotaUpdate_Regression(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecoveryKeyringFull_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const bootstrapToken = "test-bootstrap-token-keyring-full"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
@@ -3005,7 +3005,7 @@ func TestRecoveryKeyringFull_Regression(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDeploymentCancel_Regression(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
 	// newCancelServerWithToken creates a fresh server with a service and deploy store,

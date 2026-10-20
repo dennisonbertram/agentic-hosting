@@ -18,3 +18,7 @@ jobs:
         run: CGO_ENABLED=1 go build ./...
       - name: Test
         run: CGO_ENABLED=1 go test ./... -timeout 60s
+      - name: Setup script checks (shellcheck + dry-run tests)
+        run: |
+          shellcheck scripts/setup-linux.sh scripts/setup-macos.sh scripts/sandbox.sh scripts/test-setup-scripts.sh docs/ops/sandbox-egress-firewall.sh
+          make test-scripts

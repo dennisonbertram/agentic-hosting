@@ -171,11 +171,11 @@ func TestActivityList_FilterByResourceType(t *testing.T) {
 	token, srv := seedActivityData(t)
 
 	tests := []struct {
-		name          string
-		resourceType  string
-		wantTypes     []string // all events should have one of these types
-		forbidTypes   []string // no event should have these types
-		wantNonEmpty  bool
+		name         string
+		resourceType string
+		wantTypes    []string // all events should have one of these types
+		forbidTypes  []string // no event should have these types
+		wantNonEmpty bool
 	}{
 		{
 			name:         "service only",

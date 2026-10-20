@@ -87,4 +87,18 @@ func TestWriteAPIError_UntypedError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "internal error")
+	assert.NotContains(t, w.Body.String(), "some random error", "untyped error details must not leak")
+}
+
+// Typed errors go through the shared httpx writer, so they carry the same
+// headers as every other API error response.
+func TestWriteAPIError_ConsistentHeaders(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteAPIError(w, DeployFailed(fmt.Errorf("no such image")))
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
+	assert.JSONEq(t, `{"error":"deploy failed: no such image"}`, w.Body.String())
+	assert.Empty(t, w.Header().Get("Retry-After"), "only 503 carries Retry-After")
 }

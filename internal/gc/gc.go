@@ -32,6 +32,10 @@ type GC struct {
 	snapCleaner       SnapshotCleaner
 	snapMaxPerService int
 	snapMaxAge        time.Duration
+
+	// skipDockerPrune disables the daemon-wide dangling-image and
+	// anonymous-volume prunes, which also touch objects ah does not own.
+	skipDockerPrune bool
 }
 
 // minResourceAge is the minimum time a resource must exist before GC considers
@@ -46,6 +50,14 @@ func New(db *sql.DB, dockerClient docker.Client, interval time.Duration, buildDi
 		interval: interval,
 		buildDir: buildDir,
 	}
+}
+
+// SetDockerPrune enables (the default) or disables the daemon-wide dangling
+// image and anonymous volume prunes. Disable it when the Docker daemon is
+// shared with unrelated work (a developer laptop running the local sandbox);
+// ah-labelled orphans are still collected either way.
+func (g *GC) SetDockerPrune(enabled bool) {
+	g.skipDockerPrune = !enabled
 }
 
 // SetSnapshotCleaner configures snapshot retention cleanup. When set, the GC
@@ -137,20 +149,27 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	buildDirsCleaned := g.cleanOldBuildDirs(g.buildDir, 1*time.Hour)
 	removed += buildDirsCleaned
 
-	// 4. Dangling images — prune images not referenced by any container
-	pruned, pruneErr := g.docker.PruneDanglingImages(ctx)
-	if pruneErr != nil {
-		log.Printf("gc: image prune failed: %v", pruneErr)
-	} else if pruned > 0 {
-		log.Printf("gc: pruned %d dangling images", pruned)
-		removed += pruned
+	// 4. Dangling images — prune images not referenced by any container.
+	// This and the anonymous-volume prune are daemon-wide, so they are
+	// skippable on a shared daemon.
+	if !g.skipDockerPrune {
+		pruned, pruneErr := g.docker.PruneDanglingImages(ctx)
+		if pruneErr != nil {
+			log.Printf("gc: image prune failed: %v", pruneErr)
+		} else if pruned > 0 {
+			log.Printf("gc: pruned %d dangling images", pruned)
+			removed += pruned
+		}
 	}
 
 	removed += g.removeUnusedBuiltImages(ctx)
-	if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
-		log.Printf("gc: anonymous volume prune failed: %v", err)
-	} else {
-		removed += n
+	removed += g.removeUnusedPulledImages(ctx)
+	if !g.skipDockerPrune {
+		if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
+			log.Printf("gc: anonymous volume prune failed: %v", err)
+		} else {
+			removed += n
+		}
 	}
 
 	// 5. Orphaned tenant, per-workload ingress, and per-database networks.
@@ -258,47 +277,43 @@ func short(id string) string {
 	return id
 }
 
+// volumeKinds maps each managed volume name prefix to the query counting rows
+// that own a volume of that name (the query takes the name once per '?').
+// A list failure for the first kind aborts the volume pass; later kinds are
+// skipped individually.
+var volumeKinds = []struct{ prefix, ownerQuery string }{
+	{"ah-db-", `SELECT COUNT(*) FROM databases WHERE volume_name = ?`},
+	{"ah-env-", `SELECT COUNT(*) FROM environments WHERE volume_name = ?`},
+	{"ah-kanban-", `SELECT COUNT(*) FROM kanbans WHERE volume_name = ?`},
+	// A claimed pool volume moves to its environment row.
+	{"ah-pool-", `SELECT (SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?) +
+	        (SELECT COUNT(*) FROM environments WHERE volume_name = ?)`},
+}
+
 func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
-	volumes, err := g.docker.ListVolumes(ctx, "ah-db-")
-	if err != nil {
-		return nil, err
-	}
-
 	var orphaned []string
-	for _, name := range volumes {
-		// Strict prefix match — Docker name filter can be substring-based
-		if !strings.HasPrefix(name, "ah-db-") {
-			continue
-		}
-
-		var count int
-		err := g.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM databases WHERE volume_name = ?`, name).Scan(&count)
+	for i, kind := range volumeKinds {
+		volumes, err := g.docker.ListVolumes(ctx, kind.prefix)
 		if err != nil {
-			// DB error — do NOT treat as orphaned. Log and skip.
-			log.Printf("gc: DB error checking volume %s, skipping: %v", name, err)
+			if i == 0 {
+				return nil, err
+			}
+			log.Printf("gc: %s* volume list failed: %v", kind.prefix, err)
 			continue
 		}
-		if count == 0 {
-			orphaned = append(orphaned, name)
-		}
-	}
-
-	// Check environment volumes
-	envVolumes, err := g.docker.ListVolumes(ctx, "ah-env-")
-	if err != nil {
-		log.Printf("gc: environment volume list failed: %v", err)
-	} else {
-		for _, name := range envVolumes {
-			if !strings.HasPrefix(name, "ah-env-") {
+		args := make([]any, strings.Count(kind.ownerQuery, "?"))
+		for _, name := range volumes {
+			// Strict prefix match — Docker name filter can be substring-based
+			if !strings.HasPrefix(name, kind.prefix) {
 				continue
 			}
-
+			for j := range args {
+				args[j] = name
+			}
 			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM environments WHERE volume_name = ?`, name).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking environment volume %s, skipping: %v", name, err)
+			if err := g.db.QueryRowContext(ctx, kind.ownerQuery, args...).Scan(&count); err != nil {
+				// DB error — do NOT treat as orphaned. Log and skip.
+				log.Printf("gc: DB error checking volume %s, skipping: %v", name, err)
 				continue
 			}
 			if count == 0 {
@@ -306,54 +321,6 @@ func (g *GC) findOrphanedVolumes(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-
-	// Check kanban volumes
-	kanbanVolumes, err := g.docker.ListVolumes(ctx, "ah-kanban-")
-	if err != nil {
-		log.Printf("gc: kanban volume list failed: %v", err)
-	} else {
-		for _, name := range kanbanVolumes {
-			if !strings.HasPrefix(name, "ah-kanban-") {
-				continue
-			}
-
-			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM kanbans WHERE volume_name = ?`, name).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking kanban volume %s, skipping: %v", name, err)
-				continue
-			}
-			if count == 0 {
-				orphaned = append(orphaned, name)
-			}
-		}
-	}
-
-	// Check warm pool volumes
-	poolVolumes, err := g.docker.ListVolumes(ctx, "ah-pool-")
-	if err != nil {
-		log.Printf("gc: pool volume list failed: %v", err)
-	} else {
-		for _, name := range poolVolumes {
-			if !strings.HasPrefix(name, "ah-pool-") {
-				continue
-			}
-
-			var count int
-			err := g.db.QueryRowContext(ctx,
-				`SELECT (SELECT COUNT(*) FROM warm_pool WHERE volume_name = ?) +
-				        (SELECT COUNT(*) FROM environments WHERE volume_name = ?)`, name, name).Scan(&count)
-			if err != nil {
-				log.Printf("gc: DB error checking pool volume %s, skipping: %v", name, err)
-				continue
-			}
-			if count == 0 {
-				orphaned = append(orphaned, name)
-			}
-		}
-	}
-
 	return orphaned, nil
 }
 
@@ -410,6 +377,7 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 			for _, n := range names {
 				if strings.TrimPrefix(n, "/") != "paas-traefik" {
 					inUse = true
+					break
 				}
 			}
 			if !inUse {
@@ -427,74 +395,67 @@ func (g *GC) findOrphanedNetworks(ctx context.Context) ([]docker.NetworkInfo, er
 // must fail closed because ownership is unknown.
 func (g *GC) persistedWorkloadNetworks(ctx context.Context) (map[string]struct{}, error) {
 	owned := make(map[string]struct{})
-	services, err := g.db.QueryContext(ctx, `SELECT tenant_id, id FROM services`)
-	if err != nil {
-		return nil, fmt.Errorf("query services for ingress ownership: %w", err)
-	}
-	for services.Next() {
+	if err := scanRows(ctx, g.db, `SELECT tenant_id, id FROM services`, func(rows *sql.Rows) error {
 		var tenantID, serviceID string
-		if err := services.Scan(&tenantID, &serviceID); err != nil {
-			_ = services.Close()
-			return nil, fmt.Errorf("scan service ingress owner: %w", err)
+		if err := rows.Scan(&tenantID, &serviceID); err != nil {
+			return err
 		}
 		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
 		owned[docker.ServiceIngressNetworkName(tenantID, serviceID)] = struct{}{}
-	}
-	if err := services.Err(); err != nil {
-		_ = services.Close()
-		return nil, fmt.Errorf("read service ingress owners: %w", err)
-	}
-	if err := services.Close(); err != nil {
-		return nil, fmt.Errorf("close service ingress owners: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("service ingress owners: %w", err)
 	}
 
-	environments, err := g.db.QueryContext(ctx, `
+	if err := scanRows(ctx, g.db, `
 		SELECT e.tenant_id, e.id,
 			EXISTS (SELECT 1 FROM environment_previews p WHERE p.environment_id = e.id AND p.tenant_id = e.tenant_id)
-		FROM environments e`)
-	if err != nil {
-		return nil, fmt.Errorf("query environment ingress ownership: %w", err)
-	}
-	for environments.Next() {
+		FROM environments e`, func(rows *sql.Rows) error {
 		var tenantID, environmentID string
 		var hasPreview bool
-		if err := environments.Scan(&tenantID, &environmentID, &hasPreview); err != nil {
-			_ = environments.Close()
-			return nil, fmt.Errorf("scan environment ingress owner: %w", err)
+		if err := rows.Scan(&tenantID, &environmentID, &hasPreview); err != nil {
+			return err
 		}
 		owned[docker.TenantNetworkName(tenantID)] = struct{}{}
 		if hasPreview {
 			owned[docker.EnvironmentIngressNetworkName(tenantID, environmentID)] = struct{}{}
 		}
-	}
-	if err := environments.Err(); err != nil {
-		_ = environments.Close()
-		return nil, fmt.Errorf("read environment ingress owners: %w", err)
-	}
-	if err := environments.Close(); err != nil {
-		return nil, fmt.Errorf("close environment ingress owners: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("environment ingress owners: %w", err)
 	}
 
-	databases, err := g.db.QueryContext(ctx, `SELECT tenant_id, id FROM databases WHERE status != 'failed'`)
-	if err != nil {
-		return nil, fmt.Errorf("query database network ownership: %w", err)
-	}
-	for databases.Next() {
+	if err := scanRows(ctx, g.db, `SELECT tenant_id, id FROM databases WHERE status != 'failed'`, func(rows *sql.Rows) error {
 		var tenantID, dbID string
-		if err := databases.Scan(&tenantID, &dbID); err != nil {
-			_ = databases.Close()
-			return nil, fmt.Errorf("scan database network owner: %w", err)
+		if err := rows.Scan(&tenantID, &dbID); err != nil {
+			return err
 		}
 		owned[docker.DatabaseNetworkName(tenantID, dbID)] = struct{}{}
-	}
-	if err := databases.Err(); err != nil {
-		_ = databases.Close()
-		return nil, fmt.Errorf("read database network owners: %w", err)
-	}
-	if err := databases.Close(); err != nil {
-		return nil, fmt.Errorf("close database network owners: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("database network owners: %w", err)
 	}
 	return owned, nil
+}
+
+// scanRows runs query and calls fn for each row. Any query, scan, iteration or
+// close error is returned, so callers can fail closed on partial results.
+func scanRows(ctx context.Context, db *sql.DB, query string, fn func(*sql.Rows) error) error {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		if err := fn(rows); err != nil {
+			_ = rows.Close()
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	return rows.Close()
 }
 
 func onlyTraefik(containerNames []string) bool {
@@ -521,19 +482,23 @@ func (g *GC) removeUnusedBuiltImages(ctx context.Context) int {
 	for _, r := range ctrImages {
 		inUse[r] = true
 	}
-	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`} {
-		rows, err := g.db.QueryContext(ctx, q)
-		if err != nil {
-			log.Printf("gc: image reference query failed: %v", err)
-			return 0 // unknown references: remove nothing
-		}
-		for rows.Next() {
+	// Sandboxes forked from a service or snapshot run from these local tags
+	// too; keep them while the sandbox row exists (including mid-create,
+	// before its container references the image).
+	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`,
+		`SELECT image_ref FROM environments WHERE kind = 'sandbox'`} {
+		// Unknown references (query, scan or iteration error): remove nothing.
+		if err := scanRows(ctx, g.db, q, func(rows *sql.Rows) error {
 			var ref sql.NullString
-			if rows.Scan(&ref) == nil {
-				inUse[ref.String] = true
+			if err := rows.Scan(&ref); err != nil {
+				return err
 			}
+			inUse[ref.String] = true
+			return nil
+		}); err != nil {
+			log.Printf("gc: image reference query failed: %v", err)
+			return 0
 		}
-		rows.Close()
 	}
 
 	removed := 0
@@ -558,9 +523,92 @@ func (g *GC) removeUnusedBuiltImages(ctx context.Context) int {
 	return removed
 }
 
+// removeUnusedPulledImages removes public images ah pulled for image-sourced
+// sandboxes (recorded in pulled_images) once no container uses them and no
+// service, snapshot, environment or template row references them. Without it
+// every distinct image a tenant runs a disposable sandbox from stays on disk
+// until the disk check blocks every tenant. A ref is only considered once it
+// was last requested more than minImageAge ago, so a create still pulling it
+// is not raced.
+func (g *GC) removeUnusedPulledImages(ctx context.Context) int {
+	cutoff := time.Now().Add(-minImageAge).Unix()
+	var refs []string
+	if err := scanRows(ctx, g.db, fmt.Sprintf(`SELECT ref FROM pulled_images WHERE pulled_at < %d`, cutoff), func(rows *sql.Rows) error {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return err
+		}
+		refs = append(refs, ref)
+		return nil
+	}); err != nil {
+		log.Printf("gc: pulled image query failed: %v", err)
+		return 0
+	}
+	if len(refs) == 0 {
+		return 0
+	}
+	ctrImages, err := g.docker.ListContainerImages(ctx)
+	if err != nil {
+		log.Printf("gc: container image list failed: %v", err)
+		return 0
+	}
+	inUse := map[string]bool{}
+	for _, r := range ctrImages {
+		inUse[r] = true
+	}
+	for _, q := range []string{`SELECT image FROM services`, `SELECT image_ref FROM snapshots`,
+		`SELECT image_ref FROM environments`, `SELECT base_image FROM environment_templates`} {
+		// Unknown references: remove nothing.
+		if err := scanRows(ctx, g.db, q, func(rows *sql.Rows) error {
+			var ref sql.NullString
+			if err := rows.Scan(&ref); err != nil {
+				return err
+			}
+			inUse[ref.String] = true
+			return nil
+		}); err != nil {
+			log.Printf("gc: image reference query failed: %v", err)
+			return 0
+		}
+	}
+
+	removed := 0
+	for _, ref := range refs {
+		if inUse[ref] {
+			continue
+		}
+		exists, err := g.docker.ImageExists(ctx, ref)
+		if err != nil {
+			continue
+		}
+		if exists {
+			// Docker refuses (without force) an image a container still uses.
+			if err := g.docker.RemoveImage(ctx, ref); err != nil {
+				log.Printf("gc: failed to remove pulled image %s: %v", ref, err)
+				continue
+			}
+			removed++
+		}
+		if _, err := g.db.ExecContext(ctx, `DELETE FROM pulled_images WHERE ref = ? AND pulled_at < ?`, ref, cutoff); err != nil {
+			log.Printf("gc: forget pulled image %s: %v", ref, err)
+		}
+	}
+	return removed
+}
+
 func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {
 	entries, err := os.ReadDir(basePath)
 	if err != nil {
+		return 0
+	}
+	// Resolve the base the same way as each entry, so a base under a symlinked
+	// directory (e.g. /tmp -> /private/tmp) still matches its own entries.
+	absBase, err := filepath.Abs(basePath)
+	if err == nil {
+		absBase, err = filepath.EvalSymlinks(absBase)
+	}
+	if err != nil {
+		log.Printf("gc: cannot resolve build dir %s, skipping: %v", basePath, err)
 		return 0
 	}
 
@@ -590,7 +638,6 @@ func (g *GC) cleanOldBuildDirs(basePath string, maxAge time.Duration) int {
 				log.Printf("gc: cannot resolve path %s, skipping: %v", path, evalErr)
 				continue
 			}
-			absBase, _ := filepath.Abs(basePath)
 			if !strings.HasPrefix(resolved, absBase+string(os.PathSeparator)) && resolved != absBase {
 				log.Printf("gc: SECURITY: path %s resolves outside base %s, skipping", path, basePath)
 				continue

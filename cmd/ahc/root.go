@@ -61,20 +61,9 @@ Getting Started:
 
 	root.AddCommand(newSnapshotCmd(state))
 	root.AddCommand(newEnvCmd(state))
+	root.AddCommand(newSandboxCmd(state))
 
 	return root
-}
-
-// newPlaceholderCmd creates a stub command that prints "not yet implemented".
-// These will be replaced with full implementations in subsequent tasks.
-func newPlaceholderCmd(use, short string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("command %q is not yet implemented — coming soon", use)
-		},
-	}
 }
 
 // getClient loads config (with flag overrides) and returns an *ahclient.Client.

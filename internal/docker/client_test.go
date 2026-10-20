@@ -155,9 +155,9 @@ func TestContainerName(t *testing.T) {
 		{"t", "s", "ah-t-s"},
 	}
 	for _, tc := range tests {
-		got := containerName(tc.tenantID, tc.serviceID)
+		got := ServiceContainerName(tc.tenantID, tc.serviceID)
 		if got != tc.want {
-			t.Errorf("containerName(%q, %q) = %q, want %q", tc.tenantID, tc.serviceID, got, tc.want)
+			t.Errorf("ServiceContainerName(%q, %q) = %q, want %q", tc.tenantID, tc.serviceID, got, tc.want)
 		}
 	}
 }
@@ -364,40 +364,6 @@ func TestBuildServiceContainerConfig_LabelImmutability(t *testing.T) {
 	}
 }
 
-// TestFindTraefikContainerNameMatching verifies the exact-name matching logic used
-// by findTraefikContainer. Only the name "paas-traefik" (with or without leading "/")
-// should match — any other name, including ones that merely contain "traefik", must not.
-//
-// Because findTraefikContainer is an unexported method that calls the Docker API,
-// we replicate its name-matching predicate here so it can be tested without a daemon.
-func TestFindTraefikContainerNameMatching(t *testing.T) {
-	// matchesTraefik replicates the predicate inside findTraefikContainer.
-	matchesTraefik := func(name string) bool {
-		return name == "/paas-traefik" || name == "paas-traefik"
-	}
-
-	tests := []struct {
-		name      string
-		wantMatch bool
-	}{
-		{"/paas-traefik", true},
-		{"paas-traefik", true},
-		// Must NOT match unrelated containers that happen to contain "traefik".
-		{"/traefik", false},
-		{"traefik", false},
-		{"/myapp-traefik", false},
-		{"/paas-traefik-v2", false},
-		{"", false},
-		{"/paas-Traefik", false}, // case-sensitive
-	}
-	for _, tc := range tests {
-		got := matchesTraefik(tc.name)
-		if got != tc.wantMatch {
-			t.Errorf("matchesTraefik(%q) = %v, want %v", tc.name, got, tc.wantMatch)
-		}
-	}
-}
-
 // TestBuildServiceContainerConfig_NoHealthcheck verifies that buildServiceContainerConfig
 // does not inject a healthcheck. Images that ship without curl/wget would break
 // if a shell-based probe were added automatically.
@@ -463,7 +429,7 @@ func TestRunDatabaseConfig_DefaultLabels(t *testing.T) {
 }
 
 func TestWipeConfigs(t *testing.T) {
-	cfg, host := wipeConfigs("vol1")
+	cfg, host := wipeConfigs("vol1", DefaultRuntime)
 	if !strings.HasPrefix(cfg.Image, "busybox:") || strings.HasSuffix(cfg.Image, ":latest") {
 		t.Errorf("image must be pinned, got %q", cfg.Image)
 	}

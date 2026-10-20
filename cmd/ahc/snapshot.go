@@ -56,7 +56,7 @@ Displays a table with ID (truncated), NAME, SERVICE ID (truncated), and CREATED 
 				if err != nil {
 					return err
 				}
-				return writeJSON(cmd.OutOrStdout(), snapshots)
+				return printJSON(cmd.OutOrStdout(), snapshots)
 			}
 			return runSnapshotList(c, cmd.OutOrStdout())
 		},
@@ -78,16 +78,10 @@ func runSnapshotList(c *ahclient.Client, w io.Writer) error {
 	headers := []string{"ID", "NAME", "SERVICE", "CREATED"}
 	rows := make([][]string, 0, len(snapshots))
 	for _, s := range snapshots {
-		shortID := s.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		shortSvcID := s.ServiceID
-		if len(shortSvcID) > 8 {
-			shortSvcID = shortSvcID[:8]
-		}
+		id := shortID(s.ID)
+		shortSvcID := shortID(s.ServiceID)
 		rows = append(rows, []string{
-			shortID,
+			id,
 			s.Name,
 			shortSvcID,
 			formatTimestamp(s.CreatedAt),
@@ -147,7 +141,7 @@ func runSnapshotTake(c *ahclient.Client, w io.Writer, nameOrID, name string) err
 		return fmt.Errorf("create snapshot: %w", err)
 	}
 
-	printSuccess(w, fmt.Sprintf("Snapshot %q created (id: %s)", snap.Name, snap.ID[:8]))
+	printSuccess(w, fmt.Sprintf("Snapshot %q created (id: %s)", snap.Name, shortID(snap.ID)))
 	return nil
 }
 
@@ -197,7 +191,7 @@ func runSnapshotDelete(c *ahclient.Client, nameOrID string, confirm bool) error 
 
 // resolveSnapshotID converts a name-or-ID argument into a snapshot ID.
 // If arg is exactly 32 lowercase hex characters, it is used directly.
-// Otherwise, ListSnapshots is called and filtered by name.
+// Otherwise, ListSnapshots is called and filtered by name, then by unique ID prefix.
 func resolveSnapshotID(c *ahclient.Client, arg string) (string, error) {
 	if isHexID(arg) {
 		return arg, nil
@@ -217,7 +211,11 @@ func resolveSnapshotID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("snapshot %q not found", arg)
+		ids := make([]string, len(snapshots))
+		for i := range snapshots {
+			ids[i] = snapshots[i].ID
+		}
+		return resolveIDPrefix("snapshot", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:

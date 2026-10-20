@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -60,9 +59,9 @@ truncated ID.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, dbs)
+				return printJSON(cmd.OutOrStdout(), dbs)
 			}
-			writeDbTable(os.Stdout, dbs)
+			writeDbTable(cmd.OutOrStdout(), dbs)
 			return nil
 		},
 	}
@@ -73,15 +72,12 @@ func writeDbTable(w io.Writer, dbs []ahclient.Database) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tTYPE\tSTATUS\tSERVICE\tID")
 	for _, db := range dbs {
-		shortID := db.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
+		id := shortID(db.ID)
 		// The Database type does not expose a service name/ID directly;
 		// show "-" as placeholder until the API returns that field.
 		service := "-"
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			db.Name, db.Type, db.Status, service, shortID)
+			db.Name, db.Type, db.Status, service, id)
 	}
 	tw.Flush()
 }
@@ -116,9 +112,9 @@ The connection string host:port is shown but the password is masked.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, db)
+				return printJSON(cmd.OutOrStdout(), db)
 			}
-			printDatabase(os.Stdout, db)
+			printDatabase(cmd.OutOrStdout(), db)
 			return nil
 		},
 	}
@@ -244,7 +240,7 @@ The --name flag controls the database name (defaults to
 			}
 
 			if root.jsonOutput {
-				return writeJSON(cmd.OutOrStdout(), db)
+				return printJSON(cmd.OutOrStdout(), db)
 			}
 			fmt.Fprintf(progress, "Done. %s is ready. Connection host: %s\n",
 				db.Name, maskConnString(connStr))
@@ -322,7 +318,7 @@ func runDbDelete(c *ahclient.Client, nameOrID string, confirm bool) error {
 
 // resolveDbID converts a name-or-ID argument into a database ID.
 // If arg is exactly 32 lowercase hex characters, it is used directly.
-// Otherwise, ListDatabases is called and the result is filtered by name.
+// Otherwise, ListDatabases is called and filtered by name, then by unique ID prefix.
 func resolveDbID(c *ahclient.Client, arg string) (string, error) {
 	if isHexID(arg) {
 		return arg, nil
@@ -342,7 +338,11 @@ func resolveDbID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("database %q not found", arg)
+		ids := make([]string, len(dbs))
+		for i := range dbs {
+			ids[i] = dbs[i].ID
+		}
+		return resolveIDPrefix("database", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:
@@ -350,16 +350,17 @@ func resolveDbID(c *ahclient.Client, arg string) (string, error) {
 	}
 }
 
-// maskConnString returns only the host:port portion of a connection URL string.
-// The password is replaced with "***". For non-URL strings, the input is returned as-is.
+// maskConnString returns only the scheme://host:port portion of a connection
+// URL string, dropping credentials, path and query. Strings that do not parse
+// as a URL with a host (e.g. key=value DSNs, or URLs whose password breaks
+// parsing) are fully masked: they may carry a password we cannot locate.
 func maskConnString(s string) string {
 	if s == "" {
 		return s
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" {
-		// Not a parseable URL — return as-is
-		return s
+		return "***"
 	}
 	// Rebuild showing scheme://host only
 	masked := &url.URL{

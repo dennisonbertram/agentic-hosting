@@ -47,7 +47,7 @@ func adminCalls(ip, token string) map[string]*http.Request {
 }
 
 func TestAdminToken_BootstrapTokenRejectedWhenAdminSet(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	srv := newAdminTestServer(t, []string{atAdmin})
 	for name, req := range adminCalls("10.9.0.1", atBootstrap) {
 		rr := httptest.NewRecorder()
@@ -57,7 +57,7 @@ func TestAdminToken_BootstrapTokenRejectedWhenAdminSet(t *testing.T) {
 }
 
 func TestAdminToken_AdminTokenAccepted(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	srv := newAdminTestServer(t, []string{atAdmin})
 	// Recover and quota succeed; reactivate of an active tenant is 409 (past auth).
 	want := map[string]int{"recover": http.StatusCreated, "reactivate": http.StatusConflict, "quota": http.StatusOK}
@@ -76,7 +76,7 @@ func TestAdminToken_AdminTokenAccepted(t *testing.T) {
 }
 
 func TestAdminToken_FallbackToBootstrapWhenUnset(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	srv := newAdminTestServer(t, nil)
 	want := map[string]int{"recover": http.StatusCreated, "reactivate": http.StatusConflict, "quota": http.StatusOK}
 	for name, req := range adminCalls("10.9.0.3", atBootstrap) {
@@ -87,8 +87,8 @@ func TestAdminToken_FallbackToBootstrapWhenUnset(t *testing.T) {
 }
 
 func TestRateLimit_InvalidTokensDoNotConsumeGlobalBudget(t *testing.T) {
-	regLimiter.resetForTest()
-	t.Cleanup(regLimiter.resetForTest)
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
 	srv := newAdminTestServer(t, nil)
 
 	// 30 invalid registrations from distinct IPs (so the per-IP cap never fires).
@@ -110,4 +110,47 @@ func TestRateLimit_InvalidTokensDoNotConsumeGlobalBudget(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+}
+
+// Bootstrap-token holders spending the registration budget (validate calls,
+// registrations with bad bodies) must not lock the operator out of admin routes.
+func TestRateLimit_BootstrapHolderCannotExhaustAdminBudget(t *testing.T) {
+	resetLimitersForTest()
+	t.Cleanup(resetLimitersForTest)
+	srv := newAdminTestServer(t, []string{atAdmin})
+
+	for i := 0; i < 2*regGlobalPerHour; i++ {
+		var req *http.Request
+		if i%2 == 0 {
+			body, _ := json.Marshal(BootstrapTokenValidateRequest{Token: atBootstrap})
+			req = httptest.NewRequest(http.MethodPost, "/v1/system/bootstrap-token/validate", bytes.NewReader(body))
+		} else {
+			req = httptest.NewRequest(http.MethodPost, "/v1/tenants/register", bytes.NewReader([]byte(`not json`)))
+			req.Header.Set("X-Bootstrap-Token", atBootstrap)
+		}
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-Real-Ip", fmt.Sprintf("10.7.%d.1", i))
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		require.NotEqual(t, http.StatusTooManyRequests, rr.Code, "request %d", i)
+	}
+
+	// Registration's global budget was not charged by failed/validate calls.
+	body, _ := json.Marshal(RegisterRequest{Name: "Legit User", Email: "legit2@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/tenants/register", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Real-Ip", "10.7.200.1")
+	req.Header.Set("X-Bootstrap-Token", atBootstrap)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+
+	// Even with the registration global bucket full, admin routes still work.
+	for i := 0; i < regGlobalPerHour; i++ {
+		regLimiter.chargeGlobal()
+	}
+	quota := quotaRequest("10.7.201.1", "t-admin", atAdmin, []byte(`{"max_services": 20}`))
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, quota)
+	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 }

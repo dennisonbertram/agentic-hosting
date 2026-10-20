@@ -28,10 +28,46 @@ func TestCreate_SuspendedBeforeContainerIDRemovesContainer(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, apierr.ErrConflict)
 	assert.Contains(t, mock.RemoveContainerCalls, "c-orphan")
-	assert.Empty(t, mock.RemoveVolumeCalls, "the volume is kept for reactivation")
 	var status string
 	require.NoError(t, stateDB.QueryRow(`SELECT status FROM kanbans WHERE tenant_id = 'tenant-1'`).Scan(&status))
-	assert.Equal(t, "stopped", status)
+	assert.Equal(t, "failed", status, "a board that was never set up is not kept for reactivation")
+}
+
+// Regression: a board suspended before container_id was recorded never ran
+// setup (no admin user or credentials). Reactivation must not start it and
+// report it ready; the next Create must replace it.
+func TestCreate_SuspendedBeforeSetupNotRevivedAsReady(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedKanbanTestData(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	mgr := newTestManager(t, stateDB, mock)
+	suspend := true
+	mock.RunDatabaseFn = func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+		if suspend {
+			mgr.StopForTenant(context.Background(), "tenant-1")
+		}
+		return "c-1", nil
+	}
+
+	_, err := mgr.Create(context.Background(), "tenant-1")
+	require.ErrorIs(t, err, apierr.ErrConflict)
+	var firstID string
+	require.NoError(t, stateDB.QueryRow(`SELECT id FROM kanbans WHERE tenant_id = 'tenant-1'`).Scan(&firstID))
+
+	runs := mock.RunDatabaseCalls
+	mgr.StartForTenant(context.Background(), "tenant-1")
+	mgr.waitBackground()
+	assert.Equal(t, runs, mock.RunDatabaseCalls, "reactivation must not start a board that was never set up")
+	var status string
+	require.NoError(t, stateDB.QueryRow(`SELECT status FROM kanbans WHERE id = ?`, firstID).Scan(&status))
+	assert.NotEqual(t, "ready", status)
+
+	suspend = false
+	k, err := mgr.Create(context.Background(), "tenant-1")
+	require.NoError(t, err, "a re-create replaces the never-set-up board")
+	mgr.waitBackground()
+	assert.NotEqual(t, firstID, k.ID)
+	assert.Contains(t, mock.RemoveVolumeCalls, "ah-kanban-"+firstID)
 }
 
 // Regression: when another Create already reserved the failed board, the

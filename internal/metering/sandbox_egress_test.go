@@ -116,3 +116,39 @@ func TestCollectorTick_FreshSandboxFirstSampleRecordsTotals(t *testing.T) {
 	assert.Zero(t, in)
 	assert.Zero(t, out)
 }
+
+// Regression: a failed sandbox query must not drop sandbox baselines. Without
+// a baseline a fresh (fromZero) sandbox re-records its whole cumulative CPU
+// and network counters on the next tick, billing usage already recorded.
+func TestCollectorTick_SandboxQueryFailureKeepsBaselines(t *testing.T) {
+	store := newCollectorStore(t)
+	var cpu, rx, tx uint64 = 3e9, 7000, 9000
+	mock := &testutil.MockDockerClient{ContainerStatsFn: func(_ context.Context, id string) (*docker.ContainerStats, error) {
+		return &docker.ContainerStats{CPUTotalNanos: cpu, MemoryBytes: 1 << 20, NetRxBytes: rx, NetTxBytes: tx}, nil
+	}}
+	c := NewCollector(store.StateDB, store.MeteringDB, mock)
+	created := c.startedAt + 5
+	_, err := store.StateDB.Exec(`INSERT INTO environments (id, tenant_id, name, kind, status, container_id, egress, created_at, updated_at)
+		VALUES ('sbx-1', 't1', 'sbx-1', 'sandbox', 'running', 'csbx1', 'internet', ?, ?)`, created, created)
+	require.NoError(t, err)
+
+	c.Tick(context.Background()) // records the full counters (fromZero)
+
+	// Make the sandbox query fail for one tick.
+	_, err = store.StateDB.Exec(`ALTER TABLE environments RENAME TO environments_hidden`)
+	require.NoError(t, err)
+	c.Tick(context.Background())
+	_, err = store.StateDB.Exec(`ALTER TABLE environments_hidden RENAME TO environments`)
+	require.NoError(t, err)
+
+	cpu, rx, tx = 5e9, 8000, 9500
+	c.Tick(context.Background())
+
+	var cpuSec float64
+	var in, out int64
+	require.NoError(t, store.MeteringDB.QueryRow(
+		`SELECT cpu_seconds, network_ingress_bytes, network_egress_bytes FROM usage_daily WHERE service_id = 'sbx-1'`).Scan(&cpuSec, &in, &out))
+	assert.InDelta(t, 5.0, cpuSec, 1e-9, "only the delta since the last sample is recorded")
+	assert.EqualValues(t, 8000, in)
+	assert.EqualValues(t, 9500, out)
+}

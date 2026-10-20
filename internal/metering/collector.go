@@ -84,14 +84,20 @@ func (c *Collector) Tick(ctx context.Context) {
 	// egress shows in /v1/tenant/usage/metrics?kind=sandbox.
 	sbxRows, err := c.state.QueryContext(ctx, `SELECT id, tenant_id, container_id, egress = 'internet', created_at FROM environments
 		WHERE kind = 'sandbox' AND status = 'running' AND container_id IS NOT NULL AND container_id != ''`)
+	// sandboxesListed is false unless every running sandbox was read. A
+	// partial list must not drop baselines below: a fromZero sandbox without
+	// a baseline re-records its whole cumulative counters, billing twice.
+	sandboxesListed := false
 	if err != nil {
 		log.Printf("metering: list running sandboxes: %v", err)
 	} else {
+		sandboxesListed = true
 		for sbxRows.Next() {
 			s := svc{kind: ResourceKindSandbox}
 			var createdAt int64
 			if err := sbxRows.Scan(&s.id, &s.tenant, &s.container, &s.meterNet, &createdAt); err != nil {
 				log.Printf("metering: scan sandbox: %v", err)
+				sandboxesListed = false
 				continue
 			}
 			// A sandbox created after this collector started has a container
@@ -99,6 +105,10 @@ func (c *Collector) Tick(ctx context.Context) {
 			// sandbox living less than one tick would record no CPU or egress.
 			s.fromZero = createdAt > c.startedAt
 			svcs = append(svcs, s)
+		}
+		if err := sbxRows.Err(); err != nil {
+			log.Printf("metering: list running sandboxes: %v", err)
+			sandboxesListed = false
 		}
 		sbxRows.Close()
 	}
@@ -159,7 +169,12 @@ func (c *Collector) Tick(ctx context.Context) {
 			c.lastNet[s.container] = [2]uint64{st.NetRxBytes, st.NetTxBytes}
 		}
 	}
-	// Drop state for containers that are no longer running services.
+	// Drop state for containers that are no longer running services. Skipped
+	// when the sandbox list was incomplete, since an unseen container may be
+	// a still-running sandbox; stale entries are dropped on the next full tick.
+	if !sandboxesListed {
+		return
+	}
 	for id := range c.lastCPU {
 		if !seen[id] {
 			delete(c.lastCPU, id)

@@ -306,9 +306,20 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
 		if m.rowExists(id) {
 			// Stopped (tenant suspended) before the container was recorded, so
-			// the suspension could not remove it. Keep the volume.
+			// the suspension could not remove it. provision() never runs, so
+			// the board has no admin user or credentials: mark it failed so
+			// reactivation (StartForTenant restarts only 'stopped' rows) does
+			// not report it ready, and the next Create replaces it.
 			log.Printf("kanbans: %s was stopped during provisioning (tenant suspended?); removing unrecorded container", id)
 			m.removeContainerDetached(ctx, containerID)
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if _, err := m.db.ExecContext(fctx,
+				`UPDATE kanbans SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'stopped' AND COALESCE(admin_token_encrypted, '') = ''`,
+				time.Now().Unix(), id,
+			); err != nil {
+				log.Printf("kanbans: failed to mark never-set-up kanban %s failed: %v", id, err)
+			}
 			return nil, apierr.Conflict("kanban board was stopped during provisioning (tenant suspended)")
 		}
 		log.Printf("kanbans: record %s was deleted during provisioning, cleaning up", id)

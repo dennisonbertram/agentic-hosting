@@ -334,6 +334,8 @@ GET    /v1/databases/{dbID}/connection-string # Get connection string (decrypted
 DELETE /v1/databases/{dbID}                   # Delete database and data (not limited to 30s; stops the container, wipes and removes the volume)
 ```
 
+**Known issue ([#164](https://github.com/dennisonbertram/agentic-hosting/issues/164)):** the connection string host is `127.0.0.1` and the engine port is published on the host loopback only. A service container cannot reach that database. Investigation: [docs/investigations/issue-164-database-connectivity.md](docs/investigations/issue-164-database-connectivity.md). Do not inject `DATABASE_URL` / `REDIS_URL` expecting the service to connect.
+
 ## Operational Details
 
 ### File Layout

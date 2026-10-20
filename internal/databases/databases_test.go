@@ -396,6 +396,120 @@ func TestCreate_UsesTenantMaxDatabasesQuota(t *testing.T) {
 	assert.Equal(t, []string{"postgres:16-alpine", "postgres:16-alpine"}, dockerClient.PullImageCalls)
 }
 
+// TestIssue164_CreateConnectionStringUsesHostLoopbackAndSkipsTenantNetwork
+// reproduces issue #164: the API returns a connection string whose host is
+// 127.0.0.1, stored that way in the databases row, and Create never attaches
+// the container to the tenant network. Combined with databaseHostConfig
+// publishing only on host loopback, a service container cannot use this URL.
+func TestIssue164_CreateConnectionStringUsesHostLoopbackAndSkipsTenantNetwork(t *testing.T) {
+	for _, tc := range []struct {
+		dbType     string
+		wantScheme string
+		wantPath   string
+		fakeReady  func(t *testing.T, port int)
+	}{
+		{
+			dbType:     "postgres",
+			wantScheme: "postgres://",
+			wantPath:   "/ah?sslmode=disable",
+			fakeReady:  startFakePostgresOnPort,
+		},
+		{
+			dbType:     "redis",
+			wantScheme: "redis://",
+			wantPath:   "/0",
+			fakeReady:  startFakeRedisOnPort,
+		},
+	} {
+		t.Run(tc.dbType, func(t *testing.T) {
+			stateDB := testutil.NewStateDB(t)
+			seedDatabaseTestData(t, stateDB, 5)
+			mock := &testutil.MockDockerClient{
+				RunDatabaseFn: func(ctx context.Context, cfg docker.RunDatabaseConfig) (string, error) {
+					tc.fakeReady(t, cfg.HostPort)
+					return "container-" + cfg.Name, nil
+				},
+			}
+			mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"))
+			db, err := mgr.Create(context.Background(), "tenant-1", CreateRequest{Name: "app-data", Type: tc.dbType})
+			require.NoError(t, err)
+			require.Equal(t, "ready", db.Status)
+
+			assert.Equal(t, "127.0.0.1", db.Host, "Create response host")
+			require.True(t, strings.HasPrefix(db.ConnectionString, tc.wantScheme), db.ConnectionString)
+			assert.Contains(t, db.ConnectionString, "@127.0.0.1:")
+			assert.True(t, strings.HasSuffix(db.ConnectionString, strconv.Itoa(db.Port)+tc.wantPath), db.ConnectionString)
+
+			var storedHost string
+			require.NoError(t, stateDB.QueryRow(`SELECT host FROM databases WHERE id = ?`, db.ID).Scan(&storedHost))
+			assert.Equal(t, "127.0.0.1", storedHost)
+
+			got, err := mgr.GetConnectionString(context.Background(), "tenant-1", db.ID)
+			require.NoError(t, err)
+			assert.Equal(t, db.ConnectionString, got, "stored connection string must match create response")
+
+			assert.Empty(t, mock.EnsureNetworkCalls, "Create must not create a tenant/data network for the database")
+			assert.Empty(t, mock.EnsureIngressNetworkCalls)
+			assert.Empty(t, mock.ConnectNetworkCalls, "database container is not attached to any extra network")
+			assert.Empty(t, mock.ConnectNetworkAliasCalls)
+			assert.Equal(t, 1, mock.RunDatabaseCalls)
+		})
+	}
+}
+
+func startFakePostgresOnPort(t *testing.T, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 256)
+				c.Read(buf) //nolint:errcheck
+				resp := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}
+				c.Write(resp) //nolint:errcheck
+			}(conn)
+		}
+	}()
+}
+
+func startFakeRedisOnPort(t *testing.T, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				reader := bufio.NewReader(c)
+				auth, err := readTestRedisCommand(reader)
+				if err != nil || len(auth) != 2 || auth[0] != "AUTH" {
+					return
+				}
+				if _, err := c.Write([]byte("+OK\r\n")); err != nil {
+					return
+				}
+				ping, err := readTestRedisCommand(reader)
+				if err != nil || !reflect.DeepEqual(ping, []string{"PING"}) {
+					return
+				}
+				_, _ = c.Write([]byte("+PONG\r\n"))
+			}(conn)
+		}
+	}()
+}
+
 // TestDelete_WipesVolumeBeforeRemoval verifies that WipeVolume is called before
 // RemoveVolume when a database is deleted, ensuring data cannot be recovered by
 // a future tenant (issue #9).

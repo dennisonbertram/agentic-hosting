@@ -502,14 +502,20 @@ func (m *Manager) imageReferencedByService(ctx context.Context, imageRef string)
 // deletion before untagging a snapshot image.
 func ImageReferencedByService(ctx context.Context, db *sql.DB, imageRef string) bool {
 	var one int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM services WHERE image = ? LIMIT 1`, imageRef).Scan(&one)
+	// Sandboxes created from a snapshot resolve to its image before pulling
+	// it, so a live sandbox row (including one still being created) keeps
+	// the tag too.
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM services WHERE image = ?
+		UNION ALL
+		SELECT 1 FROM environments WHERE kind = 'sandbox' AND image_ref = ? AND status != 'deleting'
+		LIMIT 1`, imageRef, imageRef).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false
 	}
 	if err != nil {
 		log.Printf("snapshots: image reference check for %s failed: %v (keeping tag)", imageRef, err)
 	} else {
-		log.Printf("snapshots: keeping image %s: still used by a service", imageRef)
+		log.Printf("snapshots: keeping image %s: still used by a service or sandbox", imageRef)
 	}
 	return true
 }

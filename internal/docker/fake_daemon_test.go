@@ -337,7 +337,7 @@ func TestFakeDaemon_VolumesAndInfo(t *testing.T) {
 	f.on("DELETE /volumes/v1", noContent)
 	f.json("GET /volumes", 200, map[string]any{"Volumes": []map[string]any{{"Name": "ah-db-1"}, {"Name": "ah-db-2"}}})
 	f.json("POST /volumes/prune", 200, map[string]any{"VolumesDeleted": []string{"x"}})
-	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{"runsc": map[string]any{}}})
+	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{"runsc": map[string]any{"path": "/usr/bin/runsc"}}})
 	f.json("GET /system/df", 200, map[string]any{
 		"Images":     []map[string]any{{"Size": 10}},
 		"Containers": []map[string]any{{"SizeRw": 5}},
@@ -361,6 +361,12 @@ func TestFakeDaemon_VolumesAndInfo(t *testing.T) {
 
 	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{"runc": map[string]any{}}})
 	assert.Error(t, c.VerifyGVisorRuntime(ctx), "missing runsc is fatal")
+
+	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{"runsc": map[string]any{"runtimeType": "io.containerd.runc.v2"}}})
+	assert.Error(t, c.VerifyGVisorRuntime(ctx), "runc registered under the runsc name is fatal")
+
+	f.json("GET /info", 200, map[string]any{"Runtimes": map[string]any{"runsc": map[string]any{"runtimeType": "io.containerd.runsc.v1"}}})
+	assert.NoError(t, c.VerifyGVisorRuntime(ctx), "gVisor shim runtime is accepted")
 }
 
 func TestFakeDaemon_RunDatabaseAndEnvironment(t *testing.T) {

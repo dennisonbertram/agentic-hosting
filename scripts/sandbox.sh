@@ -417,11 +417,11 @@ cmd_up() {
 cmd_down() {
   if ((dry_run)); then
     log "[dry-run] would delete sandbox services via $api_url, stop ah (pid file $pid_file)"
-    log "[dry-run] would remove the sandbox-labelled $traefik_name container and the demo tenant's ah-tenant-*/ah-ingress-* networks"
+    log "[dry-run] would remove the sandbox-labelled $traefik_name container and the demo tenant's ah-tenant-*/ah-ingress-* networks and ah-env-* workspace volumes"
     if ((keep_data)); then log "[dry-run] would keep $sandbox_dir"; else log "[dry-run] would delete $sandbox_dir"; fi
     return 0
   fi
-  local out=$sandbox_dir/.svc.json id tid='' i pid
+  local out=$sandbox_dir/.svc.json id tid='' i pid vols v
   if load_tenant; then tid=${AH_SANDBOX_TENANT_ID:-}; fi
   if [[ -n $tid ]] && ah_running && api_healthy; then
     if [[ $(api GET /v1/services "$out") == 200 ]]; then
@@ -452,7 +452,16 @@ cmd_down() {
       docker rm -f "$traefik_name" >/dev/null
     fi
     if [[ -n $tid ]]; then
+      # Workspace volumes (ah-env-<id>) carry no tenant label, and the state
+      # dir that records them is deleted below, so collect them from the
+      # tenant's containers before removing those.
+      vols=$(docker ps -aq --filter "label=ah.tenant=$tid" |
+        xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' 2>/dev/null |
+        grep -E '^ah-env-' | sort -u || :)
       for id in $(docker ps -aq --filter "label=ah.tenant=$tid"); do docker rm -f "$id" >/dev/null || :; done
+      for v in $vols; do
+        docker volume rm "$v" >/dev/null 2>&1 || warn "could not remove volume $v"
+      done
       for id in $(docker network ls --format '{{.Name}}' | grep -E "^ah-(tenant|ingress)-$tid(-|$)" || :); do
         docker network rm "$id" >/dev/null 2>&1 || warn "could not remove network $id"
       done

@@ -748,12 +748,16 @@ func (c *DockerClient) VerifyGVisorRuntime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("docker info: %w", err)
 	}
-	for name := range info.Runtimes {
-		if name == DefaultRuntime {
-			return nil
-		}
+	rt, ok := info.Runtimes[DefaultRuntime]
+	if !ok {
+		return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon")
 	}
-	return fmt.Errorf("gVisor runtime (runsc) not found in Docker daemon")
+	// The name alone proves nothing: {"runsc": {"runtimeType":
+	// "io.containerd.runc.v2"}} registers runc under gVisor's name.
+	if !IsGVisorRuntime(DefaultRuntime, RuntimeInfo{Path: rt.Path, Type: rt.Type}) {
+		return fmt.Errorf("docker runtime %q is not gVisor (path %q, type %q)", DefaultRuntime, rt.Path, rt.Type)
+	}
+	return nil
 }
 
 // RunDatabaseConfig holds parameters for running a database container.

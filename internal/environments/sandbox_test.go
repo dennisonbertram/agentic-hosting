@@ -688,3 +688,27 @@ func assertAPICode(t *testing.T, err error, code int) {
 	require.True(t, errors.As(err, &apiErr), "want APIError %d, got %v", code, err)
 	assert.Equal(t, code, apiErr.Code, apiErr.Message)
 }
+
+// The API accepts limit up to 200; the manager must honour 101-200 instead
+// of silently falling back to the default page size.
+func TestListSandboxes_HonoursLimitsUpTo200(t *testing.T) {
+	mgr, _, _, _ := newSandboxManager(t)
+	ctx := context.Background()
+	s, err := mgr.CreateSandbox(ctx, testTenantID, SandboxCreateRequest{Source: SandboxSource{Type: "template"}})
+	require.NoError(t, err)
+	// Clone the row directly; creating 250 sandboxes would hit the quota.
+	_, err = mgr.db.Exec(`CREATE TEMP TABLE sbx_clone AS SELECT * FROM environments WHERE id = ?`, s.ID)
+	require.NoError(t, err)
+	for i := 0; i < 249; i++ {
+		id := fmt.Sprintf("clone-%03d", i)
+		_, err = mgr.db.Exec(`UPDATE sbx_clone SET id = ?, name = ?`, id, id)
+		require.NoError(t, err)
+		_, err = mgr.db.Exec(`INSERT INTO environments SELECT * FROM sbx_clone`)
+		require.NoError(t, err)
+	}
+	for limit, want := range map[int]int{150: 150, 200: 200, 500: 200, 0: 50} {
+		got, err := mgr.ListSandboxes(ctx, testTenantID, limit, 0, "")
+		require.NoError(t, err)
+		assert.Len(t, got, want, "limit=%d", limit)
+	}
+}

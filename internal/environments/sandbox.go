@@ -483,8 +483,12 @@ func (m *Manager) GetSandbox(ctx context.Context, tenantID, sandboxID string) (*
 // ListSandboxes returns a tenant's sandboxes, newest first, optionally
 // filtered by status.
 func (m *Manager) ListSandboxes(ctx context.Context, tenantID string, limit, offset int, status string) ([]*Sandbox, error) {
-	if limit <= 0 || limit > 100 {
+	// The API accepts up to 200 (maxPageLimit); honour that instead of
+	// silently falling back to the default for 101-200.
+	if limit <= 0 {
 		limit = 50
+	} else if limit > 200 {
+		limit = 200
 	}
 	if offset < 0 {
 		offset = 0

@@ -36,7 +36,27 @@ type Config struct {
 	// Snapshot retention
 	SnapshotMaxPerService int           // max snapshots kept per service (default: 10, 0 = unlimited)
 	SnapshotMaxAge        time.Duration // max age before a snapshot is eligible for cleanup (default: 30d, 0 = unlimited)
+
+	// ContainerRuntime is the OCI runtime for tenant workloads (AH_CONTAINER_RUNTIME).
+	// Default runsc (gVisor). RuntimeRunc is a dev-only fallback for hosts
+	// that cannot run gVisor (macOS); cmd/ah refuses it without --dev.
+	ContainerRuntime string
+
+	// WarmPoolEnabled keeps pre-started environment containers (AH_WARM_POOL_ENABLED,
+	// default true). Local sandboxes turn it off to avoid pulling every template image.
+	WarmPoolEnabled bool
+
+	// GCPruneDocker lets GC run daemon-wide dangling-image and anonymous-volume
+	// prunes (AH_GC_PRUNE_DOCKER, default true). Set false when the Docker daemon
+	// is shared with unrelated work, such as a developer laptop.
+	GCPruneDocker bool
 }
+
+// Container runtimes accepted in AH_CONTAINER_RUNTIME.
+const (
+	RuntimeRunsc = "runsc" // gVisor: the only runtime allowed in production
+	RuntimeRunc  = "runc"  // dev-only fallback: no syscall sandbox
+)
 
 const defaultDataDir = "/var/lib/ah"
 
@@ -68,6 +88,9 @@ func Default() Config {
 		SnapshotMaxPerService: DefaultSnapshotMaxPerService,
 		SnapshotMaxAge:        DefaultSnapshotMaxAge,
 		CORSOrigins:           DefaultCORSOrigins(),
+		ContainerRuntime:      RuntimeRunsc,
+		WarmPoolEnabled:       true,
+		GCPruneDocker:         true,
 	}
 }
 
@@ -110,6 +133,13 @@ func LoadFromEnv() (Config, error) {
 		SnapshotMaxPerService: envOrInt("AH_SNAPSHOT_MAX_PER_SERVICE", DefaultSnapshotMaxPerService, &errs),
 		SnapshotMaxAge:        envOrDuration("AH_SNAPSHOT_MAX_AGE", DefaultSnapshotMaxAge, &errs),
 		CORSOrigins:           ParseCORSOrigins(os.Getenv("AH_CORS_ORIGINS")),
+		ContainerRuntime:      strings.TrimSpace(envOr("AH_CONTAINER_RUNTIME", RuntimeRunsc)),
+		WarmPoolEnabled:       envOrBool("AH_WARM_POOL_ENABLED", true, &errs),
+		GCPruneDocker:         envOrBool("AH_GC_PRUNE_DOCKER", true, &errs),
+	}
+	if cfg.ContainerRuntime != RuntimeRunsc && cfg.ContainerRuntime != RuntimeRunc {
+		errs = append(errs, fmt.Errorf("AH_CONTAINER_RUNTIME must be %q or %q, got %q", RuntimeRunsc, RuntimeRunc, cfg.ContainerRuntime))
+		cfg.ContainerRuntime = RuntimeRunsc
 	}
 	if cfg.KanbanPortStart > cfg.KanbanPortEnd {
 		errs = append(errs, fmt.Errorf("AH_KANBAN_PORT_START (%d) must not exceed AH_KANBAN_PORT_END (%d)", cfg.KanbanPortStart, cfg.KanbanPortEnd))
@@ -179,6 +209,19 @@ func envOrInt(key string, fallback int, errs *[]error) int {
 		return fallback
 	}
 	return n
+}
+
+func envOrBool(key string, fallback bool, errs *[]error) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("invalid %s=%q: must be true or false", key, v))
+		return fallback
+	}
+	return b
 }
 
 func envOrDuration(key string, fallback time.Duration, errs *[]error) time.Duration {

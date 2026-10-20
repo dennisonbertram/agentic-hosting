@@ -429,7 +429,7 @@ func TestRunDatabaseConfig_DefaultLabels(t *testing.T) {
 }
 
 func TestWipeConfigs(t *testing.T) {
-	cfg, host := wipeConfigs("vol1")
+	cfg, host := wipeConfigs("vol1", DefaultRuntime)
 	if !strings.HasPrefix(cfg.Image, "busybox:") || strings.HasSuffix(cfg.Image, ":latest") {
 		t.Errorf("image must be pinned, got %q", cfg.Image)
 	}

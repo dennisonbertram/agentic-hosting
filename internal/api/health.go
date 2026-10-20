@@ -24,6 +24,9 @@ type DetailedHealthResponse struct {
 	DockerDisk      DiskInfo           `json:"docker_disk"`
 	DockerStorage   *DockerStorageInfo `json:"docker_storage,omitempty"`
 	TraefikNetworks *int               `json:"traefik_networks,omitempty"`
+	// ContainerRuntime is the OCI runtime tenant workloads use ("runsc" in
+	// production; "runc" only in a --dev sandbox).
+	ContainerRuntime string `json:"container_runtime,omitempty"`
 }
 
 type DockerInfo struct {
@@ -118,9 +121,10 @@ func cachedDetailedHealth(maxAge time.Duration) (DetailedHealthResponse, bool) {
 
 func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 	resp := DetailedHealthResponse{
-		Status: "ok",
-		Docker: DockerInfo{Available: false},
-		GVisor: GVisorInfo{Available: false},
+		Status:           "ok",
+		Docker:           DockerInfo{Available: false},
+		GVisor:           GVisorInfo{Available: false},
+		ContainerRuntime: s.containerRuntime,
 	}
 
 	// Check Docker with 5s timeout

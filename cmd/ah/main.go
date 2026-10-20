@@ -138,6 +138,16 @@ func main() {
 		log.Fatalf("--open-registration requires --dev")
 	}
 
+	// Workload runtime: runsc (gVisor) unless a dev sandbox explicitly opts
+	// into the runc fallback. Never weakened silently or outside --dev.
+	runtimeWarnings, err := checkContainerRuntime(cfg.ContainerRuntime, *devMode)
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	for _, line := range runtimeWarnings {
+		log.Print(line)
+	}
+
 	// In production (non-dev) mode, refuse to bind to non-loopback addresses.
 	// The server must be behind a TLS-terminating reverse proxy on loopback.
 	if !*devMode && *listenAddr != "" && *listenAddr != "127.0.0.1" && *listenAddr != "::1" {
@@ -178,20 +188,22 @@ func main() {
 	defer store.Close()
 
 	// Create Docker client
-	dockerClient, err := docker.NewClient()
+	dockerClient, err := docker.NewClientWithRuntime(cfg.ContainerRuntime)
 	if err != nil {
 		log.Fatalf("failed to create Docker client: %v", err)
 	}
 	defer dockerClient.Close()
 
 	// Verify gVisor runtime is available (fail closed in production)
-	if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
-		if !*devMode {
-			log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+	if cfg.ContainerRuntime == config.RuntimeRunsc {
+		if err := dockerClient.VerifyGVisorRuntime(context.Background()); err != nil {
+			if !*devMode {
+				log.Fatalf("FATAL: %v. gVisor is required for container isolation in production.", err)
+			}
+			log.Printf("WARNING: %v. Containers will fail to start without gVisor (set AH_CONTAINER_RUNTIME=runc for a dev-only sandbox).", err)
+		} else {
+			log.Printf("gVisor (runsc) runtime verified")
 		}
-		log.Printf("WARNING: %v. Containers will fail to start without gVisor.", err)
-	} else {
-		log.Printf("gVisor (runsc) runtime verified")
 	}
 
 	// Create Nixpacks builder and build manager
@@ -224,7 +236,7 @@ func main() {
 	envMgr := environments.NewManager(store.StateDB, dockerClient, *baseDomain, cfg.TraefikConfigDir)
 	envMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 	envPool := environments.NewPoolManager(store.StateDB, dockerClient, environments.PoolConfig{
-		Enabled:      true,
+		Enabled:      cfg.WarmPoolEnabled,
 		PoolSize:     2,
 		MaxTotal:     6,
 		RefillPeriod: 60 * time.Second,
@@ -276,6 +288,7 @@ func main() {
 		DataDir:               filepath.Dir(*dbPath),
 		ExternalTLSTerminated: cfg.ExternalTLSTerminated,
 		CORSOrigins:           corsAllow,
+		ContainerRuntime:      dockerClient.Runtime(),
 	})
 
 	// Default to 127.0.0.1 in ALL modes (loopback only).
@@ -295,6 +308,9 @@ func main() {
 	log.Printf("ah listening on %s", addr)
 	if *devMode {
 		log.Printf("WARNING: running in dev mode — HTTPS enforcement disabled")
+		if cfg.ContainerRuntime != config.RuntimeRunsc {
+			log.Printf("WARNING: workloads run under %s, not gVisor — local dev sandbox only", cfg.ContainerRuntime)
+		}
 	} else {
 		log.Printf("HTTPS enforcement is ON. The server must be behind a TLS-terminating proxy (e.g. Traefik) that connects via loopback (127.0.0.1). X-Forwarded-Proto is only trusted from loopback RemoteAddr.")
 	}
@@ -309,6 +325,10 @@ func main() {
 	gcCtx, gcCancel := context.WithCancel(context.Background())
 	defer gcCancel()
 	garbageCollector := gc.New(store.StateDB, dockerClient, 5*time.Minute, cfg.BuildDir)
+	garbageCollector.SetDockerPrune(cfg.GCPruneDocker)
+	if !cfg.GCPruneDocker {
+		log.Printf("gc: daemon-wide dangling image and anonymous volume prune disabled (AH_GC_PRUNE_DOCKER=false)")
+	}
 
 	// Wire snapshot retention into GC
 	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])

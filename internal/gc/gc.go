@@ -32,6 +32,10 @@ type GC struct {
 	snapCleaner       SnapshotCleaner
 	snapMaxPerService int
 	snapMaxAge        time.Duration
+
+	// skipDockerPrune disables the daemon-wide dangling-image and
+	// anonymous-volume prunes, which also touch objects ah does not own.
+	skipDockerPrune bool
 }
 
 // minResourceAge is the minimum time a resource must exist before GC considers
@@ -46,6 +50,14 @@ func New(db *sql.DB, dockerClient docker.Client, interval time.Duration, buildDi
 		interval: interval,
 		buildDir: buildDir,
 	}
+}
+
+// SetDockerPrune enables (the default) or disables the daemon-wide dangling
+// image and anonymous volume prunes. Disable it when the Docker daemon is
+// shared with unrelated work (a developer laptop running the local sandbox);
+// ah-labelled orphans are still collected either way.
+func (g *GC) SetDockerPrune(enabled bool) {
+	g.skipDockerPrune = !enabled
 }
 
 // SetSnapshotCleaner configures snapshot retention cleanup. When set, the GC
@@ -137,20 +149,26 @@ func (g *GC) collectOnce(ctx context.Context) error {
 	buildDirsCleaned := g.cleanOldBuildDirs(g.buildDir, 1*time.Hour)
 	removed += buildDirsCleaned
 
-	// 4. Dangling images — prune images not referenced by any container
-	pruned, pruneErr := g.docker.PruneDanglingImages(ctx)
-	if pruneErr != nil {
-		log.Printf("gc: image prune failed: %v", pruneErr)
-	} else if pruned > 0 {
-		log.Printf("gc: pruned %d dangling images", pruned)
-		removed += pruned
+	// 4. Dangling images — prune images not referenced by any container.
+	// This and the anonymous-volume prune are daemon-wide, so they are
+	// skippable on a shared daemon.
+	if !g.skipDockerPrune {
+		pruned, pruneErr := g.docker.PruneDanglingImages(ctx)
+		if pruneErr != nil {
+			log.Printf("gc: image prune failed: %v", pruneErr)
+		} else if pruned > 0 {
+			log.Printf("gc: pruned %d dangling images", pruned)
+			removed += pruned
+		}
 	}
 
 	removed += g.removeUnusedBuiltImages(ctx)
-	if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
-		log.Printf("gc: anonymous volume prune failed: %v", err)
-	} else {
-		removed += n
+	if !g.skipDockerPrune {
+		if n, err := g.docker.PruneAnonymousVolumes(ctx); err != nil {
+			log.Printf("gc: anonymous volume prune failed: %v", err)
+		} else {
+			removed += n
+		}
 	}
 
 	// 5. Orphaned tenant, per-workload ingress, and per-database networks.

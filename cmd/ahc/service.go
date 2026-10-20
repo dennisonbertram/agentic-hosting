@@ -2,10 +2,8 @@ package main
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -68,9 +66,9 @@ public URL, and the number of container restarts.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, svcs)
+				return printJSON(cmd.OutOrStdout(), svcs)
 			}
-			writeServiceTable(os.Stdout, svcs)
+			writeServiceTable(cmd.OutOrStdout(), svcs)
 			return nil
 		},
 	}
@@ -81,12 +79,9 @@ func writeServiceTable(w io.Writer, svcs []ahclient.Service) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tSTATUS\tID\tURL\tRESTARTS")
 	for _, s := range svcs {
-		shortID := s.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
+		id := shortID(s.ID)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n",
-			s.Name, s.Status, shortID, s.URL, s.CrashCount)
+			s.Name, s.Status, id, s.URL, s.CrashCount)
 	}
 	tw.Flush()
 }
@@ -118,9 +113,9 @@ When a name is given, all services are fetched and filtered by name.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, svc)
+				return printJSON(cmd.OutOrStdout(), svc)
 			}
-			printService(os.Stdout, svc)
+			printService(cmd.OutOrStdout(), svc)
 			return nil
 		},
 	}
@@ -187,9 +182,9 @@ Both --name and --image are required.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, svc)
+				return printJSON(cmd.OutOrStdout(), svc)
 			}
-			fmt.Fprintf(os.Stdout, "Service %q created (id: %s, status: %s)\n", svc.Name, svc.ID, svc.Status)
+			fmt.Fprintf(cmd.OutOrStdout(), "Service %q created (id: %s, status: %s)\n", svc.Name, svc.ID, svc.Status)
 			return nil
 		},
 	}
@@ -261,7 +256,7 @@ func newServiceStartCmd(root *rootState) *cobra.Command {
 			if _, err := c.StartService(id); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, "Service started.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Service started.")
 			return nil
 		},
 	}
@@ -286,7 +281,7 @@ func newServiceStopCmd(root *rootState) *cobra.Command {
 			if _, err := c.StopService(id); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, "Service stopped.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Service stopped.")
 			return nil
 		},
 	}
@@ -311,7 +306,7 @@ func newServiceRestartCmd(root *rootState) *cobra.Command {
 			if _, err := c.RestartService(id); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, "Service restarted.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Service restarted.")
 			return nil
 		},
 	}
@@ -342,9 +337,9 @@ No new build is triggered. This is useful after updating env vars (via
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, svc)
+				return printJSON(cmd.OutOrStdout(), svc)
 			}
-			fmt.Fprintf(os.Stdout, "Service %q redeployed (status: %s)\n", svc.Name, svc.Status)
+			fmt.Fprintf(cmd.OutOrStdout(), "Service %q redeployed (status: %s)\n", svc.Name, svc.Status)
 			return nil
 		},
 	}
@@ -373,7 +368,7 @@ command to reset the breaker and allow the service to restart again.`,
 			if _, err := c.ResetService(id); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stdout, "Circuit breaker reset.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Circuit breaker reset.")
 			return nil
 		},
 	}
@@ -402,9 +397,9 @@ func newServiceRenameCmd(root *rootState) *cobra.Command {
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, svc)
+				return printJSON(cmd.OutOrStdout(), svc)
 			}
-			fmt.Fprintf(os.Stdout, "Service renamed to %q\n", svc.Name)
+			fmt.Fprintf(cmd.OutOrStdout(), "Service renamed to %q\n", svc.Name)
 			return nil
 		},
 	}
@@ -443,7 +438,7 @@ Use --follow to stream logs continuously (like 'docker logs -f').`,
 				return err
 			}
 			defer reader.Close()
-			_, err = io.Copy(os.Stdout, reader)
+			_, err = io.Copy(cmd.OutOrStdout(), reader)
 			return err
 		},
 	}
@@ -480,9 +475,9 @@ This is useful for auditing which image versions were deployed and when.`,
 				return err
 			}
 			if root.jsonOutput {
-				return writeJSON(os.Stdout, deps)
+				return printJSON(cmd.OutOrStdout(), deps)
 			}
-			writeDeploymentTable(os.Stdout, deps)
+			writeDeploymentTable(cmd.OutOrStdout(), deps)
 			return nil
 		},
 	}
@@ -492,17 +487,11 @@ func writeDeploymentTable(w io.Writer, deps []ahclient.Deployment) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tSTATUS\tTRIGGER\tIMAGE\tSTARTED")
 	for _, d := range deps {
-		shortID := d.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		shortImage := d.Image
-		if len(shortImage) > 40 {
-			shortImage = shortImage[:37] + "..."
-		}
+		id := shortID(d.ID)
+		shortImage := shortStr(d.Image, 40)
 		started := time.Unix(d.StartedAt, 0).Format("2006-01-02 15:04:05")
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			shortID, d.Status, d.Trigger, shortImage, started)
+			id, d.Status, d.Trigger, shortImage, started)
 	}
 	tw.Flush()
 }
@@ -604,13 +593,6 @@ func parseEnvPairs(pairs []string) (map[string]string, error) {
 	return out, nil
 }
 
-// writeJSON encodes v as indented JSON to w.
-func writeJSON(w io.Writer, v interface{}) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
 // formatTimestamp formats a Unix timestamp as a human-readable string.
 // If ts is 0, it returns "-".
 func formatTimestamp(ts int64) string {
@@ -618,6 +600,15 @@ func formatTimestamp(ts int64) string {
 		return "-"
 	}
 	return time.Unix(ts, 0).Format(time.RFC3339)
+}
+
+// shortID returns the first 8 characters of an ID for table output. Shorter
+// (or empty) IDs are returned unchanged rather than panicking on a slice.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // shortStr truncates s to at most n characters, appending "..." if truncated.

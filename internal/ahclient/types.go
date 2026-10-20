@@ -2,6 +2,8 @@
 // It has no dependencies on internal server packages — types are defined independently.
 package ahclient
 
+import "strconv"
+
 // ---- Error type ----
 
 // APIError represents a non-2xx response from the API.
@@ -11,31 +13,7 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return "ahclient: API error " + itoa(e.StatusCode) + ": " + e.Message
-}
-
-// itoa converts an integer to string without importing strconv at the package level.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	buf := [20]byte{}
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return "ahclient: API error " + strconv.Itoa(e.StatusCode) + ": " + e.Message
 }
 
 // ---- Service types ----

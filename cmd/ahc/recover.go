@@ -63,17 +63,14 @@ The new key is shown exactly once — save it immediately.`,
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
 
-			if !root.jsonOutput {
-				fmt.Fprintf(cmd.OutOrStdout(), "Key ID : %s\n", result.ID)
-				fmt.Fprintf(cmd.OutOrStdout(), "Name   : %s\n", result.Name)
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
-				fmt.Fprintln(cmd.OutOrStdout(), "║           SAVE THIS RECOVERY KEY         ║")
-				fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
-				fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
-				fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.Key)
-			}
-
+			fmt.Fprintf(cmd.OutOrStdout(), "Key ID : %s\n", result.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Name   : %s\n", result.Name)
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "╔══════════════════════════════════════════╗")
+			fmt.Fprintln(cmd.OutOrStdout(), "║           SAVE THIS RECOVERY KEY         ║")
+			fmt.Fprintln(cmd.OutOrStdout(), "║    It will NOT be shown again.           ║")
+			fmt.Fprintln(cmd.OutOrStdout(), "╚══════════════════════════════════════════╝")
+			fmt.Fprintf(cmd.OutOrStdout(), "\n  API Key: %s\n\n", result.Key)
 			return nil
 		},
 	}

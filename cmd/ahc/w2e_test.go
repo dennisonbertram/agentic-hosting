@@ -199,7 +199,7 @@ func TestEnvExec_ExitCodePropagates(t *testing.T) {
 				json.NewEncoder(w).Encode(tc.res)
 			}))
 			defer srv.Close()
-			err := runEnvExec(newTestClient(srv), &bytes.Buffer{}, svcID, []string{"x"})
+			err := runEnvExec(newTestClient(srv), &bytes.Buffer{}, &bytes.Buffer{}, svcID, []string{"x"})
 			require.Error(t, err)
 			var ec interface{ ExitCode() int }
 			require.True(t, errors.As(err, &ec), "error must expose ExitCode()")

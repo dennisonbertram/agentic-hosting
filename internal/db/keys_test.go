@@ -3,10 +3,12 @@ package db_test
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,12 +17,11 @@ import (
 // and a single active tenant.
 func newStoreWithTenant(t *testing.T, tenantID string) *db.Store {
 	t.Helper()
-	stateDB, err := sql.Open("sqlite3", "file::memory:?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000")
-	require.NoError(t, err)
-	t.Cleanup(func() { stateDB.Close() })
-	require.NoError(t, db.ApplyStateMigrations(stateDB))
+	// A uniquely named database per test: the previous shared
+	// "file::memory:" DSN let every caller in the process share one schema.
+	stateDB := testutil.NewStateDB(t)
 
-	_, err = stateDB.Exec(
+	_, err := stateDB.Exec(
 		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
 		 VALUES (?, 'Test', ?, 'active', 1, 1)`,
 		tenantID, tenantID+"@example.com",
@@ -161,4 +162,79 @@ func TestRevokeOldest(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "key-active", revokedID, "should skip revoked keys and revoke the active one")
 	})
+}
+
+func TestRevokeOldest_ScopedToTenant(t *testing.T) {
+	store := newStoreWithTenant(t, "ta")
+	_, err := store.StateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES ('tb', 'B', 'tb@example.com', 'active', 1, 1)`)
+	require.NoError(t, err)
+	now := time.Now().Unix()
+	// Tenant B owns the globally oldest key, which is also expired.
+	_, err = store.StateDB.Exec(
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
+		 VALUES ('key-b', 'tb', 'b', 'prefixb1', 'hash', ?, ?)`, now-1000, now-500)
+	require.NoError(t, err)
+	_, err = store.StateDB.Exec(
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
+		 VALUES ('key-a', 'ta', 'a', 'prefixa1', 'hash', ?, ?)`, now-10, now-5)
+	require.NoError(t, err)
+
+	id, err := store.RevokeOldestExpired("ta")
+	require.NoError(t, err)
+	assert.Equal(t, "key-a", id)
+
+	id, err = store.RevokeOldest("ta")
+	require.NoError(t, err)
+	assert.Empty(t, id, "tenant A has no live keys left; tenant B's key must not be touched")
+
+	var revokedAt sql.NullInt64
+	require.NoError(t, store.StateDB.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = 'key-b'`).Scan(&revokedAt))
+	assert.False(t, revokedAt.Valid, "other tenant's key must stay active")
+}
+
+// Concurrent callers must each revoke a distinct key: the select and update
+// happen in one statement so two recoveries cannot both pick the same row.
+func TestRevokeOldest_ConcurrentCallersRevokeDistinctKeys(t *testing.T) {
+	stateDB := testutil.NewFileStateDB(t)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES ('tc', 'C', 'tc@example.com', 'active', 1, 1)`)
+	require.NoError(t, err)
+	store := &db.Store{StateDB: stateDB}
+
+	const n = 8
+	now := time.Now().Unix()
+	for i := 0; i < n; i++ {
+		_, err := stateDB.Exec(
+			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
+			 VALUES (?, 'tc', ?, ?, 'hash', ?)`,
+			fmt.Sprintf("k%d", i), fmt.Sprintf("k%d", i), fmt.Sprintf("pfx%05d", i), now-int64(n-i))
+		require.NoError(t, err)
+	}
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		seen = map[string]int{}
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := store.RevokeOldest("tc")
+			assert.NoError(t, err)
+			mu.Lock()
+			seen[id]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	assert.Len(t, seen, n, "every caller must revoke a different key")
+	for id, c := range seen {
+		assert.NotEmpty(t, id)
+		assert.Equal(t, 1, c, "key %s revoked by more than one caller", id)
+	}
 }

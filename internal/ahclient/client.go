@@ -86,7 +86,13 @@ const longRequestTimeout = 330 * time.Second
 // ExecRequestTimeout returns the HTTP timeout for an exec request. The server
 // defaults to 60s and caps at 300s; a 5s response allowance is added.
 func ExecRequestTimeout(execSeconds int) time.Duration {
-	return environmentExecClientTimeout(execSeconds)
+	if execSeconds <= 0 {
+		execSeconds = 60
+	}
+	if execSeconds > 300 {
+		execSeconds = 300
+	}
+	return time.Duration(execSeconds)*time.Second + 5*time.Second
 }
 
 // doJSONLong is doJSON with a per-request timeout replacing the client default.
@@ -162,11 +168,10 @@ func (c *Client) doStream(method, path string, extraHeaders map[string]string) (
 		req.Header.Set(k, v)
 	}
 
-	// Use a client without timeout for streaming
-	cl := c.HTTPClient
-	if cl.Timeout != 0 {
-		cl = &http.Client{Transport: cl.Transport}
-	}
+	// Streams stay open as long as the server sends data, so drop the
+	// client-wide timeout while keeping its transport, jar and redirect policy.
+	cl := *c.HTTPClient
+	cl.Timeout = 0
 
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -181,9 +186,13 @@ func (c *Client) doStream(method, path string, extraHeaders map[string]string) (
 	return resp.Body, nil
 }
 
+// maxErrorBody caps how much of an error response is read into memory and
+// echoed back in APIError.Message (a misbehaving proxy can return huge pages).
+const maxErrorBody = 64 << 10
+
 // readError reads an API error response body and returns an *APIError.
 func (c *Client) readError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	var errResp struct {
 		Error string `json:"error"`
 	}
@@ -669,20 +678,10 @@ func (c *Client) EnvironmentExec(envID string, command []string, workDir string,
 	// endpoint, bounding the request to the server's execution cap plus a
 	// response allowance.
 	var resp ExecResult
-	if err := c.doJSONLong(environmentExecClientTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+esc(envID)+"/exec", body, &resp); err != nil {
+	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/environments/"+esc(envID)+"/exec", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
-}
-
-func environmentExecClientTimeout(timeoutSeconds int) time.Duration {
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 60
-	}
-	if timeoutSeconds > 300 {
-		timeoutSeconds = 300
-	}
-	return time.Duration(timeoutSeconds)*time.Second + 5*time.Second
 }
 
 // ExtendEnvironmentLease extends the lease on an environment.

@@ -586,8 +586,8 @@ func (m *MockDockerClient) ExecRun(ctx context.Context, execID string, timeout t
 func (m *MockDockerClient) RenameContainer(ctx context.Context, containerID, newName string) error {
 	m.mu.Lock()
 	m.RenameContainerCalls++
-	m.mu.Unlock()
 	m.RenameContainerArgs = append(m.RenameContainerArgs, [2]string{containerID, newName})
+	m.mu.Unlock()
 	if m.RenameContainerFn != nil {
 		return m.RenameContainerFn(ctx, containerID, newName)
 	}

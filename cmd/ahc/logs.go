@@ -2,7 +2,6 @@ package main
 
 import (
 	"io"
-	"os"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
 	"github.com/spf13/cobra"
@@ -34,7 +33,7 @@ The service can be identified by name or by its 32-character hex ID.`,
 			if err != nil {
 				return err
 			}
-			return runServiceRuntimeLogs(c, args[0], tail, follow, os.Stdout)
+			return runServiceRuntimeLogs(c, args[0], tail, follow, cmd.OutOrStdout())
 		},
 	}
 

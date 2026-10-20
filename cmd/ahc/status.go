@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/ahclient"
@@ -24,19 +23,22 @@ Examples:
 
 Exit codes:
   0  All systems healthy
-  1  Health not ok, Docker unavailable, a disk over 90% full, or a service
+  1  Health not ok, Docker or gVisor unavailable, a disk over 90% full, or a service
      failed, crashed, or has its circuit breaker open`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient(root)
 			if err != nil {
 				return err
 			}
-			code, err := runStatusCmd(c, os.Stdout, root.jsonOutput)
+			code, err := runStatusCmd(c, cmd.OutOrStdout(), root.jsonOutput)
 			if err != nil {
 				return err
 			}
 			if code != 0 {
-				os.Exit(code)
+				// Returned rather than os.Exit so deferred cleanup and
+				// in-process callers (tests) see the outcome; Execute maps
+				// it to the process exit code without printing anything.
+				return &exitCodeError{code: code, msg: "system unhealthy"}
 			}
 			return nil
 		},
@@ -83,11 +85,8 @@ func runStatusCmd(c *ahclient.Client, w io.Writer, jsonOutput bool) (int, error)
 
 	// Determine exit code
 	exitCode := 0
-	if health.Status != "ok" || !health.Docker.Available ||
+	if health.Status != "ok" || !health.Docker.Available || !health.GVisor.Available ||
 		health.Disk.UsedPercent > 90.0 || health.DockerDisk.UsedPercent > 90.0 {
-		exitCode = 1
-	}
-	if health.Status != "ok" || !health.Docker.Available || !health.GVisor.Available {
 		exitCode = 1
 	}
 	for _, svc := range services {

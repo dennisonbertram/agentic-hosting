@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -122,4 +124,57 @@ func tableExists(t *testing.T, db *sql.DB, tableName string) {
 	).Scan(&count)
 	require.NoError(t, err, "querying sqlite_master for table %q failed", tableName)
 	assert.Equal(t, 1, count, "table %q should exist", tableName)
+}
+
+func TestApplyMigrations_SplitByPrefix(t *testing.T) {
+	state := testutil.NewStateDB(t)
+	metering := testutil.NewMeteringDB(t)
+
+	tableExists(t, state, "services")
+	tableExists(t, metering, "schema_migrations")
+
+	// State migrations must not have been recorded in the metering DB and
+	// vice versa.
+	var n int
+	require.NoError(t, metering.QueryRow(
+		`SELECT COUNT(*) FROM schema_migrations WHERE name LIKE 'state_%'`).Scan(&n))
+	assert.Zero(t, n)
+	require.NoError(t, state.QueryRow(
+		`SELECT COUNT(*) FROM schema_migrations WHERE name LIKE 'metering_%'`).Scan(&n))
+	assert.Zero(t, n)
+
+	// Every embedded state migration is recorded exactly once, and a second
+	// run is a no-op.
+	entries, err := db.MigrationsFS.ReadDir("migrations")
+	require.NoError(t, err)
+	want := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "state_") {
+			want++
+		}
+	}
+	require.NoError(t, db.ApplyStateMigrations(state))
+	require.NoError(t, state.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n))
+	assert.Equal(t, want, n)
+}
+
+func TestStoreClose_NilDBs(t *testing.T) {
+	assert.NoError(t, (&db.Store{}).Close())
+}
+
+func TestOpen_InvalidPath(t *testing.T) {
+	_, err := db.Open(filepath.Join(t.TempDir(), "missing-dir", "x.db"))
+	assert.Error(t, err)
+}
+
+func TestOpenWithMetering_InvalidMeteringPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := db.OpenWithMetering(filepath.Join(dir, "ok.db"), filepath.Join(dir, "missing", "m.db"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metering")
+}
+
+func TestMeteringPath(t *testing.T) {
+	assert.Equal(t, "/d/ah-metering.db", db.MeteringPath("/d/ah.db"))
+	assert.Equal(t, "/d/state-metering.db", db.MeteringPath("/d/state"))
 }

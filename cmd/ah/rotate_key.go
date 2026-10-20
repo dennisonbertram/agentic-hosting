@@ -185,7 +185,7 @@ Example:
   chmod 600 /var/lib/ah/master-new.key
 
   # Stop the server
-  systemctl stop paasd.service
+  systemctl stop ah.service
 
   # Dry-run first
   ah rotate-key --old-key-path /var/lib/ah/master.key \
@@ -201,6 +201,6 @@ Example:
   mv /var/lib/ah/master-new.key /var/lib/ah/master.key
 
   # Restart the server
-  systemctl start paasd.service
+  systemctl start ah.service
 `)
 }

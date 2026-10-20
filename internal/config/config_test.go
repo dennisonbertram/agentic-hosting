@@ -32,6 +32,7 @@ func TestFromEnv_Defaults(t *testing.T) {
 		"AH_MASTER_KEY_PATH", "AH_BUILD_DIR", "AH_NIXPACKS_PATH",
 		"AH_DOCKER_DATA_DIR", "AH_KANBAN_PORT_START", "AH_KANBAN_PORT_END",
 		"AH_EXTERNAL_TLS_TERMINATED", "AH_CORS_ORIGINS",
+		"AH_CONTAINER_RUNTIME", "AH_WARM_POOL_ENABLED", "AH_GC_PRUNE_DOCKER",
 	} {
 		t.Setenv(k, "")
 	}
@@ -211,4 +212,52 @@ func TestFromEnv_SnapshotRetention(t *testing.T) {
 func TestParseCORSOrigins_DedupesAndDropsWildcard(t *testing.T) {
 	got := ParseCORSOrigins(" https://a.example , *, https://a.example,,https://b.example")
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, got)
+}
+
+func TestLoadFromEnv_ContainerRuntimeDefaultsToRunsc(t *testing.T) {
+	t.Setenv("AH_CONTAINER_RUNTIME", "")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, RuntimeRunsc, cfg.ContainerRuntime)
+	assert.Equal(t, RuntimeRunsc, Default().ContainerRuntime)
+}
+
+func TestLoadFromEnv_ContainerRuntimeRunc(t *testing.T) {
+	t.Setenv("AH_CONTAINER_RUNTIME", " runc ")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, RuntimeRunc, cfg.ContainerRuntime)
+}
+
+func TestLoadFromEnv_ContainerRuntimeRejectsUnknown(t *testing.T) {
+	for _, v := range []string{"kata", "RUNSC", "io.containerd.runc.v2"} {
+		t.Setenv("AH_CONTAINER_RUNTIME", v)
+		cfg, err := LoadFromEnv()
+		require.Error(t, err, v)
+		assert.Contains(t, err.Error(), "AH_CONTAINER_RUNTIME")
+		// An invalid value never weakens isolation: it falls back to runsc.
+		assert.Equal(t, RuntimeRunsc, cfg.ContainerRuntime, v)
+	}
+}
+
+func TestLoadFromEnv_WarmPoolAndPruneToggles(t *testing.T) {
+	t.Setenv("AH_WARM_POOL_ENABLED", "")
+	t.Setenv("AH_GC_PRUNE_DOCKER", "")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.True(t, cfg.WarmPoolEnabled)
+	assert.True(t, cfg.GCPruneDocker)
+
+	t.Setenv("AH_WARM_POOL_ENABLED", "false")
+	t.Setenv("AH_GC_PRUNE_DOCKER", "0")
+	cfg, err = LoadFromEnv()
+	require.NoError(t, err)
+	assert.False(t, cfg.WarmPoolEnabled)
+	assert.False(t, cfg.GCPruneDocker)
+
+	t.Setenv("AH_WARM_POOL_ENABLED", "nope")
+	cfg, err = LoadFromEnv()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AH_WARM_POOL_ENABLED")
+	assert.True(t, cfg.WarmPoolEnabled)
 }

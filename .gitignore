@@ -22,3 +22,6 @@ code-reviews/
 # Built binaries
 /ah
 /ahc
+
+# Local dev sandbox state (make sandbox)
+/.sandbox/

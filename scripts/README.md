@@ -20,6 +20,10 @@ export AH_URL="http://localhost:8080"
 |--------|-------------|
 | `register.sh` | Register a new tenant and save credentials |
 | `health-check.sh` | Cron-friendly health check with webhook alerting |
+| `setup-linux.sh` | One-command Linux setup: fresh install via `bootstrap-stack.sh` plus `ahc`, or idempotent upgrade/repair ([runbook](../docs/runbooks/setup-linux.md)) |
+| `setup-macos.sh` | macOS dev prerequisites via Homebrew, Docker engine, `bin/ah` + `bin/ahc` ([runbook](../docs/runbooks/setup-macos.md)) |
+| `sandbox.sh` | `up` / `down` / `status` for the throwaway local instance behind `make sandbox` ([runbook](../docs/runbooks/local-sandbox.md)) |
+| `test-setup-scripts.sh` | `--help` / `--dry-run` checks for the three scripts above (`make test-scripts`) |
 
 ## Usage
 

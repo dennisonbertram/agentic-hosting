@@ -104,16 +104,39 @@ var _ Client = (*DockerClient)(nil)
 
 // DockerClient wraps the Docker Engine API client with ah-specific defaults.
 type DockerClient struct {
-	cli *client.Client
+	cli     *client.Client
+	runtime string // OCI runtime for workload containers; DefaultRuntime unless overridden
 }
 
-// NewClient creates a Docker API client using the default socket.
+// DefaultRuntime is the gVisor runtime used for every workload container.
+const DefaultRuntime = "runsc"
+
+// NewClient creates a Docker API client using the default socket and the
+// gVisor (runsc) runtime.
 func NewClient() (*DockerClient, error) {
+	return NewClientWithRuntime(DefaultRuntime)
+}
+
+// NewClientWithRuntime is NewClient with an explicit OCI runtime for tenant,
+// database, environment and wipe containers. Callers outside a dev sandbox
+// must pass DefaultRuntime; cmd/ah only allows anything else with --dev.
+func NewClientWithRuntime(runtime string) (*DockerClient, error) {
+	if strings.TrimSpace(runtime) == "" {
+		return nil, fmt.Errorf("docker client: container runtime must not be empty")
+	}
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &DockerClient{cli: cli}, nil
+	return &DockerClient{cli: cli, runtime: runtime}, nil
+}
+
+// Runtime returns the OCI runtime this client starts workload containers with.
+func (c *DockerClient) Runtime() string {
+	if c.runtime == "" {
+		return DefaultRuntime
+	}
+	return c.runtime
 }
 
 // Close releases the Docker client resources.
@@ -407,7 +430,7 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	hostCfg := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: c.Runtime(),
 		Resources: container.Resources{
 			Memory:     memoryBytes,
 			NanoCPUs:   nanoCPUs,
@@ -745,7 +768,7 @@ func (c *DockerClient) VerifyGVisorRuntime(ctx context.Context) error {
 		return fmt.Errorf("docker info: %w", err)
 	}
 	for name := range info.Runtimes {
-		if name == "runsc" {
+		if name == DefaultRuntime {
 			return nil
 		}
 	}
@@ -801,7 +824,7 @@ const wipeScript = `find /data -type f -exec sh -c 'head -c "$(wc -c < "$1")" /d
 
 // wipeConfigs builds the container configs for WipeVolume. Root needs
 // DAC_OVERRIDE/FOWNER because volume files may belong to other UIDs.
-func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
+func wipeConfigs(volume, runtime string) (*container.Config, *container.HostConfig) {
 	return &container.Config{
 			Image:  wipeImage,
 			Cmd:    []string{"sh", "-c", wipeScript},
@@ -809,7 +832,7 @@ func wipeConfigs(volume string) (*container.Config, *container.HostConfig) {
 		}, &container.HostConfig{
 			// AutoRemove releases the volume even if this process dies mid-wipe.
 			AutoRemove:  true,
-			Runtime:     "runsc",
+			Runtime:     runtime,
 			NetworkMode: "none",
 			CapDrop:     []string{"ALL"},
 			CapAdd:      []string{"DAC_OVERRIDE", "FOWNER"},
@@ -832,7 +855,7 @@ func (c *DockerClient) WipeVolume(ctx context.Context, name string) error {
 			return fmt.Errorf("wipe volume %s: %w", name, err)
 		}
 	}
-	containerCfg, hostCfg := wipeConfigs(name)
+	containerCfg, hostCfg := wipeConfigs(name, c.Runtime())
 
 	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")
 	if err != nil {
@@ -880,9 +903,9 @@ var databaseCaps = []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER
 // Host publish stays on 127.0.0.1 for control-plane health probes. Never bind
 // 0.0.0.0. When NetworkName is set, that internal network is primary so the
 // container is not left on Docker's default bridge.
-func databaseHostConfig(cfg RunDatabaseConfig, portStr string) *container.HostConfig {
+func databaseHostConfig(cfg RunDatabaseConfig, portStr, runtime string) *container.HostConfig {
 	h := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: runtime,
 		PortBindings: nat.PortMap{
 			nat.Port(portStr): []nat.PortBinding{
 				{HostIP: "127.0.0.1", HostPort: fmt.Sprintf("%d", cfg.HostPort)},
@@ -942,7 +965,7 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 
 	portStr := fmt.Sprintf("%d/tcp", cfg.ContainerPort)
 
-	hostCfg := databaseHostConfig(cfg, portStr)
+	hostCfg := databaseHostConfig(cfg, portStr, c.Runtime())
 
 	labels := map[string]string{
 		"ah.managed": "true",
@@ -1151,7 +1174,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 
 	initTrue := true
 	hostCfg := &container.HostConfig{
-		Runtime: "runsc",
+		Runtime: c.Runtime(),
 		Init:    &initTrue,
 		Resources: container.Resources{
 			Memory:     memoryBytes,

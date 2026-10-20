@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **One-command setup and a local sandbox.** `scripts/setup-linux.sh` wraps `bootstrap-stack.sh` for fresh Ubuntu 24.04 hosts, installs `ahc`, and does idempotent upgrade/repair on existing installs without touching keys or the bootstrap token. `scripts/setup-macos.sh` installs the Homebrew prerequisites and a Docker engine. `make sandbox` / `make sandbox-down` run a throwaway local instance with a demo tenant and the `examples/openrouter-agent` service. All three accept `--dry-run`, and `make test-scripts` (also run in CI) checks them. Runbooks are in `docs/runbooks/`.
+- **`AH_CONTAINER_RUNTIME`** (`runsc` default, or `runc`). `runc` is a dev-only fallback for macOS sandboxes: `ah` exits at startup if it is set without `--dev`, and logs a warning banner when it is set with `--dev`. Detailed health reports `container_runtime`.
+- **`AH_WARM_POOL_ENABLED`** (default `true`) and **`AH_GC_PRUNE_DOCKER`** (default `true`). The sandbox sets both to `false` so it does not pull every environment template image, and so GC does not prune dangling images or anonymous volumes that belong to other work on a shared Docker daemon.
 - **API CORS allowlist** so the Pages dashboard can call `https://api.agentic.hosting`. Defaults: `https://agentic.hosting`, `https://www.agentic.hosting`, `https://dennisonbertram.github.io` (`AH_CORS_ORIGINS` / `--cors-origins`). OPTIONS preflight is handled before auth. `Authorization`, `Content-Type`, and `Idempotency-Key` are allowed. `Vary: Origin` is set. `*` and credentialed wildcards are rejected.
 
 ### Changed

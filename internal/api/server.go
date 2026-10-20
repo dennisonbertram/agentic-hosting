@@ -46,6 +46,7 @@ type ServerConfig struct {
 	DataDir               string // data dir for health disk checks (default /var/lib/ah)
 	ExternalTLSTerminated bool
 	CORSOrigins           []string // nil = middleware defaults; empty = disable CORS
+	ContainerRuntime      string   // workload OCI runtime reported by detailed health ("" = not reported)
 	// ServiceManager, when set, is used for all service lifecycle calls. Pass
 	// the same instance whose DeployImage the build manager uses so build
 	// deploys and API deploy/restart/reset share per-service locks and the
@@ -83,6 +84,7 @@ type Server struct {
 	openRegistration  bool
 	baseDomain        string
 	dataDir           string
+	containerRuntime  string
 	router            chi.Router
 	authMW            func(http.Handler) http.Handler
 	authInvalidator   *middleware.AuthCacheInvalidator
@@ -153,6 +155,7 @@ func NewServer(cfg ServerConfig) *Server {
 		openRegistration:  cfg.OpenRegistration,
 		baseDomain:        cfg.BaseDomain,
 		dataDir:           cfg.DataDir,
+		containerRuntime:  cfg.ContainerRuntime,
 		authInvalidator:   authInvalidator,
 		authMW:            authMW,
 		svcManager:        svcMgr,

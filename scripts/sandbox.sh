@@ -114,10 +114,19 @@ for s in json.load(open(sys.argv[1])):
 }
 rand_hex() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 
-ah_running() {
+# ah_running: the PID file names a live process that is this sandbox's ah
+# binary. Checking the command line guards against a stale PID file whose PID
+# was reused by an unrelated process (down would otherwise signal it).
+ah_pid_alive() {
   [[ -f $pid_file ]] || return 1
   local pid; pid=$(cat "$pid_file")
   [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+ah_running() {
+  ah_pid_alive || return 1
+  local cmd
+  cmd=$(ps -p "$(cat "$pid_file")" -o command= 2>/dev/null) || return 1
+  [[ $cmd == *"$ah_bin"* ]]
 }
 api_healthy() { curl -fsS -m 3 "$api_url/v1/system/health" >/dev/null 2>&1; }
 
@@ -209,17 +218,20 @@ EOF
 }
 
 start_traefik() {
+  local img
   if docker container inspect "$traefik_name" >/dev/null 2>&1; then
     if [[ $(docker container inspect --format '{{.State.Running}}' "$traefik_name") != true ]]; then
       docker start "$traefik_name" >/dev/null
     fi
     return
   fi
+  # Resolve first: a die inside an argument's $(...) would not stop docker run.
+  img=$(traefik_image) || exit 1
   docker run -d --name "$traefik_name" --label ah.sandbox=true \
     -p "127.0.0.1:$http_port:80" \
     -v "$sandbox_dir/traefik/traefik.yml:/etc/traefik/traefik.yml:ro" \
     -v "$sandbox_dir/traefik/dynamic:/etc/traefik/dynamic:ro" \
-    "$(traefik_image)" --configFile=/etc/traefik/traefik.yml >/dev/null
+    "$img" --configFile=/etc/traefik/traefik.yml >/dev/null
 }
 
 start_ah() {
@@ -243,7 +255,9 @@ start_ah() {
   local i
   for i in $(seq 1 40); do
     api_healthy && return 0
-    ah_running || { tail -n 40 "$log_file" >&2; die "ah exited during startup (log: $log_file)"; }
+    # Liveness only: until the subshell execs ah, its command line is still
+    # this script's, so the command-line check in ah_running would misfire.
+    ah_pid_alive || { tail -n 40 "$log_file" >&2; die "ah exited during startup (log: $log_file)"; }
     sleep 0.5
   done
   tail -n 40 "$log_file" >&2
@@ -301,8 +315,7 @@ print(json.dumps({"name":sys.argv[1],"image":sys.argv[2],"port":3000,
   for i in $(seq 1 90); do
     code=$(api GET "/v1/services/$id" "$out")
     status=$(json_get "$out" status 2>/dev/null || :)
-    [[ $status == running ]] && break
-    [[ $status == failed ]] && break
+    case "$status" in running|failed|error|crashed) break ;; esac
     sleep 2
   done
   [[ $status == running ]] || { cat "$out" >&2; die "service did not reach running (status: ${status:-unknown}); see $log_file"; }
@@ -420,20 +433,25 @@ cmd_down() {
     log "stopping ah (pid $pid)"
     kill "$pid" 2>/dev/null || :
     for i in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill -9 "$pid" 2>/dev/null || :
+    if ah_running; then kill -9 "$pid" 2>/dev/null || :; fi
+  elif ah_pid_alive; then
+    warn "pid file $pid_file names a process that is not the sandbox ah; not signalling it"
   fi
   rm -f "$pid_file"
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    # Remove Traefik before the networks: when ah could not clean up through
+    # the API, Traefik is still attached to the ah-ingress-* networks and
+    # docker network rm would fail with active endpoints.
+    if docker container inspect "$traefik_name" >/dev/null 2>&1 &&
+      [[ $(docker container inspect --format '{{index .Config.Labels "ah.sandbox"}}' "$traefik_name") == true ]]; then
+      log "removing sandbox $traefik_name"
+      docker rm -f "$traefik_name" >/dev/null
+    fi
     if [[ -n $tid ]]; then
       for id in $(docker ps -aq --filter "label=ah.tenant=$tid"); do docker rm -f "$id" >/dev/null || :; done
       for id in $(docker network ls --format '{{.Name}}' | grep -E "^ah-(tenant|ingress)-$tid(-|$)" || :); do
         docker network rm "$id" >/dev/null 2>&1 || warn "could not remove network $id"
       done
-    fi
-    if docker container inspect "$traefik_name" >/dev/null 2>&1 &&
-      [[ $(docker container inspect --format '{{index .Config.Labels "ah.sandbox"}}' "$traefik_name") == true ]]; then
-      log "removing sandbox $traefik_name"
-      docker rm -f "$traefik_name" >/dev/null
     fi
   fi
   if ((keep_data)); then

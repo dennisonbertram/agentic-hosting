@@ -154,6 +154,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 		if _, err := drainer.drain(logCb); err != nil {
 			cleanBuildDir = false
 			stopBuildWorker(req.BuildID)
+			drainer.flush(logCb)
 			return fmt.Errorf("read build log: %w", err)
 		}
 		if ctx.Err() != nil {
@@ -187,6 +188,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				n, drainErr := drainer.drain(logCb)
 				if drainErr != nil {
 					cleanBuildDir = false
+					drainer.flush(logCb)
 					return fmt.Errorf("read completed build log: %w", drainErr)
 				}
 				if n == 0 {
@@ -296,13 +298,18 @@ type buildLogDrainer struct {
 	reader  *bufio.Reader
 	pending []byte
 	discard bool
+	// afterCR is set when the previous byte was a '\r', so the '\n' of a
+	// CRLF pair does not emit a second, empty line.
+	afterCR bool
 }
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
 // line. This keeps log streaming from starving cancellation and unit polling.
 // A line still being written by the worker (no newline yet at EOF) is held
 // until a later drain completes it, or until flush once the worker is done;
-// emitting it at EOF would split one log line in two.
+// emitting it at EOF would split one log line in two. A bare '\r' (progress
+// output that redraws one line) also ends a line, so such output keeps
+// streaming instead of piling up until the 16 KiB cap; CRLF counts once.
 func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 	const maxPass, maxLine = 64 * 1024, 16 * 1024
 	read := 0
@@ -315,8 +322,18 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 			return read, err
 		}
 		read++
-		if b == '\n' {
-			d.emit(logCb)
+		afterCR := d.afterCR
+		d.afterCR = b == '\r'
+		switch {
+		case b == '\r':
+			if len(d.pending) > 0 {
+				d.emit(logCb)
+			}
+			continue
+		case b == '\n':
+			if !afterCR {
+				d.emit(logCb)
+			}
 			continue
 		}
 		if !d.discard {

@@ -38,7 +38,10 @@ Commands below run as root (`sudo -i`) unless shown with `sudo -u ah`.
    - appends a generated `AH_ADMIN_TOKEN` if `/etc/default/ah` has none (the bootstrap token is never touched);
    - rebuilds `ah` and `ahc` and replaces `/usr/local/bin` copies only when they differ;
    - reinstalls changed unit files from `deploy/` and runs `systemctl daemon-reload`;
+   - restarts `ah-build-broker` when the `ah` binary or its unit changed (it runs the same binary), and `ah-api-proxy` when its unit changed;
    - restarts `ah` only if the binary, units or env file changed, then checks `GET /v1/system/health`.
+
+   **Behaviour change when the admin token is added:** once `AH_ADMIN_TOKEN` is set, bootstrap tokens no longer authorize recover, reactivate or quota update (they get 401/403). Use `AH_ADMIN_TOKEN` from `/etc/default/ah` for those operations. The script prints a warning when it appends the token.
 
    Database migrations run automatically when `ah` starts.
 4. Verify:

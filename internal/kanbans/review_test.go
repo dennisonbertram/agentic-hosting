@@ -60,7 +60,9 @@ func serveVikunja(t *testing.T, port int, onProjects func(), buckets *[]string, 
 
 // newIsolatedManager returns a test manager whose port range is a single
 // OS-assigned free port, so a fake Vikunja for this test cannot collide with
-// another test's server.
+// another test's server. The probe listener has to be closed again because
+// Manager.findFreePort checks the port by binding it; another process could
+// take the port in that short window, which is accepted for tests.
 func newIsolatedManager(t *testing.T, stateDB *sql.DB, mock *testutil.MockDockerClient) *Manager {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

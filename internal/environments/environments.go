@@ -117,6 +117,12 @@ type Manager struct {
 	externalTLSTerminated bool
 	traefikConfigDir      string
 	mu                    sync.Mutex // for state transitions
+
+	// Sandbox settings (see sandbox.go).
+	maxSandboxesTotal int // host-wide cap on non-failed sandboxes; 0 = none
+	snapshotSource    SnapshotSource
+	serviceSource     ServiceSource
+	diskCheck         func() error
 }
 
 // SetExternalTLSTerminated configures preview routes for deployments where a
@@ -172,42 +178,146 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, apierr.Validation("lease_duration_seconds must be between 300 and 86400")
 	}
 
+	c, err := m.create(ctx, tenantID, createSpec{
+		kind:        KindEnvironment,
+		name:        req.Name,
+		templateID:  req.TemplateID,
+		poolTmplID:  tmpl.ID,
+		image:       tmpl.BaseImage,
+		memoryMB:    tmpl.MemoryMB,
+		cpuMillis:   tmpl.CPUMillis,
+		egressAllow: tmpl.EgressPolicy == "allow",
+		leaseSec:    leaseDuration,
+		sourceType:  "template",
+		sourceRef:   tmpl.ID,
+		runMode:     "idle",
+		egress:      "none",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Environment{
+		ID:                   c.id,
+		TenantID:             tenantID,
+		Name:                 req.Name,
+		TemplateID:           req.TemplateID,
+		Status:               "running",
+		ContainerID:          c.containerID,
+		VolumeName:           c.volumeName,
+		LeaseExpiresAt:       &c.leaseExpiresAt,
+		LeaseDurationSeconds: leaseDuration,
+		LastActivityAt:       &c.now,
+		CreatedAt:            c.now,
+		UpdatedAt:            c.now,
+	}, nil
+}
+
+// Kinds of rows in the environments table.
+const (
+	KindEnvironment = "environment"
+	KindSandbox     = "sandbox"
+)
+
+// createSpec describes one environment or sandbox to provision. Environments
+// and sandboxes share the INSERT-with-quota, warm pool, volume, container and
+// commit steps; they differ only in these fields.
+type createSpec struct {
+	kind        string
+	name        string
+	templateID  string // stored in template_id
+	poolTmplID  string // warm-pool template to try; "" skips the pool
+	image       string
+	memoryMB    int
+	cpuMillis   int
+	egressAllow bool
+	env         []string
+	useImageCmd bool
+	localImage  bool
+	leaseSec    int
+	// maxExpiresAt is the absolute lifetime cap (sandboxes only, 0 = none).
+	maxExpiresAt int64
+	sourceType   string
+	sourceRef    string
+	runMode      string
+	egress       string
+}
+
+// created is what create returns to the kind-specific wrappers.
+type created struct {
+	id             string
+	containerID    string
+	volumeName     string
+	leaseExpiresAt int64
+	now            int64
+}
+
+// kindLabel is the word used in user-facing errors for a row kind.
+func kindLabel(kind string) string {
+	if kind == KindSandbox {
+		return "sandbox"
+	}
+	return "environment"
+}
+
+// create provisions a row of the given kind: quota-checked INSERT, warm pool
+// or cold start, then the commit to 'running'.
+func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) (*created, error) {
+	label := kindLabel(spec.kind)
+
 	// Generate ID
 	id, err := generateID()
 	if err != nil {
 		return nil, err
 	}
 
-	var maxEnvironments int
+	quotaColumn := "max_environments"
+	globalCap := 0
+	if spec.kind == KindSandbox {
+		quotaColumn = "max_sandboxes"
+		globalCap = m.maxSandboxesTotal
+	}
+	var maxPerTenant int
 	if err := m.db.QueryRowContext(ctx,
-		`SELECT max_environments FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
-	).Scan(&maxEnvironments); err != nil {
+		`SELECT `+quotaColumn+` FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxPerTenant); err != nil {
 		return nil, fmt.Errorf("check quota: %w", err)
 	}
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
+	var maxExpires any
+	if spec.maxExpiresAt > 0 {
+		maxExpires = spec.maxExpiresAt
+	}
 
 	// Insert DB row with status=creating
 	// The quota count is part of the INSERT so concurrent creates cannot both
 	// pass the check. Nothing is claimed from the warm pool until this succeeds.
+	// Environments and sandboxes are counted separately; sandboxes are also
+	// bounded host-wide by globalCap (0 = no host cap).
 	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
-		 lease_duration_seconds, created_at, updated_at)
-		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?
-		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND status NOT IN ('failed')) < ?`,
-		id, tenantID, req.Name, req.TemplateID, volumeName, leaseDuration, now, now, tenantID, maxEnvironments,
+		 lease_duration_seconds, created_at, updated_at, kind, source_type, source_ref,
+		 image_ref, run_mode, memory_mb, cpu_millicores, egress, max_expires_at)
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = ? AND status NOT IN ('failed')) < ?
+		 AND (? <= 0 OR (SELECT COUNT(*) FROM environments WHERE kind = ? AND status NOT IN ('failed')) < ?)`,
+		id, tenantID, spec.name, spec.templateID, volumeName, spec.leaseSec, now, now,
+		spec.kind, spec.sourceType, spec.sourceRef, spec.image, spec.runMode, spec.memoryMB, spec.cpuMillis, spec.egress, maxExpires,
+		tenantID, spec.kind, maxPerTenant,
+		globalCap, spec.kind, globalCap,
 	)
 	if err == nil {
 		if n, _ := res.RowsAffected(); n == 0 {
-			return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxEnvironments))
+			return nil, m.quotaError(ctx, tenantID, spec.kind, maxPerTenant, globalCap)
 		}
 	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return nil, apierr.Conflict(fmt.Sprintf("environment with name %q already exists", req.Name))
+			return nil, apierr.Conflict(fmt.Sprintf("%s with name %q already exists", label, spec.name))
 		}
-		return nil, fmt.Errorf("insert environment: %w", err)
+		return nil, fmt.Errorf("insert %s: %w", label, err)
 	}
 
 	// Ensure tenant network (needed for both warm and cold paths).
@@ -221,8 +331,8 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	// get a pre-warmed container.
 	var containerID string
 	usedPool := false
-	if m.pool != nil {
-		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, tmpl.ID, tenantID, id)
+	if m.pool != nil && spec.poolTmplID != "" {
+		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, spec.poolTmplID, tenantID, id)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
 			transferErr := m.docker.NetworkDisconnect(ctx, "ah-pool", poolContainerID)
@@ -263,32 +373,36 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 			return nil, fmt.Errorf("create volume: %w", err)
 		}
 
-		// Determine egress policy from template
-		egressAllow := tmpl.EgressPolicy == "allow"
-
 		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
 			TenantID:    tenantID,
 			EnvID:       id,
-			Image:       tmpl.BaseImage,
-			MemoryMB:    int64(tmpl.MemoryMB),
-			CPUMillis:   int64(tmpl.CPUMillis),
+			Image:       spec.image,
+			MemoryMB:    int64(spec.memoryMB),
+			CPUMillis:   int64(spec.cpuMillis),
 			VolumeName:  volumeName,
 			NetworkName: tenantNet,
 			Labels:      map[string]string{},
-			EgressAllow: egressAllow,
+			EgressAllow: spec.egressAllow,
+			Env:         spec.env,
+			UseImageCmd: spec.useImageCmd,
+			LocalImage:  spec.localImage,
 		})
 		if err != nil {
 			m.updateStatus(ctx, id, "failed")
 			_ = m.docker.RemoveVolume(ctx, volumeName)
-			return nil, fmt.Errorf("run environment: %w", err)
+			return nil, fmt.Errorf("run %s: %w", label, err)
 		}
 	}
 
 	// Update DB with container_id, status=running, lease. The update only
 	// applies while the row is still 'creating' and the tenant is active, so a
 	// suspension that raced with this Create (StopAllForTenant skips rows with
-	// no container yet) cannot leave a running container behind.
-	leaseExpiresAt := now + int64(leaseDuration)
+	// no container yet) cannot leave a running container behind. The same
+	// guard makes a sandbox DELETE (status 'deleting') during create win.
+	leaseExpiresAt := now + int64(spec.leaseSec)
+	if spec.maxExpiresAt > 0 && leaseExpiresAt > spec.maxExpiresAt {
+		leaseExpiresAt = spec.maxExpiresAt
+	}
 	var updateResult sql.Result
 	updateResult, err = m.db.ExecContext(ctx,
 		`UPDATE environments SET container_id = ?, status = 'running',
@@ -321,24 +435,37 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		if deleteErr != nil {
 			log.Printf("environments: remove interrupted creation %s: %v", id, deleteErr)
 		}
+		if spec.kind == KindSandbox {
+			// A concurrent DELETE claimed the row ('deleting') and finishes
+			// removing it; only a row still 'creating' is marked failed.
+			m.updateStatusIf(ctx, id, "creating", "failed")
+			return nil, apierr.Conflict("sandbox creation was interrupted: it was deleted or the tenant is not active")
+		}
 		m.updateStatus(ctx, id, "failed")
 		return nil, apierr.Validation("environment creation was interrupted: tenant is not active")
 	}
 
-	return &Environment{
-		ID:                   id,
-		TenantID:             tenantID,
-		Name:                 req.Name,
-		TemplateID:           req.TemplateID,
-		Status:               "running",
-		ContainerID:          containerID,
-		VolumeName:           volumeName,
-		LeaseExpiresAt:       &leaseExpiresAt,
-		LeaseDurationSeconds: leaseDuration,
-		LastActivityAt:       &now,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+	return &created{
+		id:             id,
+		containerID:    containerID,
+		volumeName:     volumeName,
+		leaseExpiresAt: leaseExpiresAt,
+		now:            now,
 	}, nil
+}
+
+// quotaError explains why a quota-checked INSERT inserted nothing.
+func (m *Manager) quotaError(ctx context.Context, tenantID, kind string, maxPerTenant, globalCap int) error {
+	if kind != KindSandbox {
+		return apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d environments reached", maxPerTenant))
+	}
+	var tenantCount int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = ? AND status NOT IN ('failed')`,
+		tenantID, kind).Scan(&tenantCount); err == nil && tenantCount < maxPerTenant && globalCap > 0 {
+		return apierr.QuotaExceeded("host sandbox capacity reached; try again later")
+	}
+	return apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d sandboxes reached", maxPerTenant))
 }
 
 // environmentColumns is the column list scanned by scanEnvironment.
@@ -353,16 +480,22 @@ func scanEnvironment(row interface{ Scan(...any) error }) (*Environment, error) 
 	return e, err
 }
 
-// Get returns an environment by ID, scoped to tenant.
+// Get returns an environment by ID, scoped to tenant. Sandbox rows are not
+// environments and return not found.
 func (m *Manager) Get(ctx context.Context, tenantID, envID string) (*Environment, error) {
+	return m.get(ctx, tenantID, envID, KindEnvironment)
+}
+
+// get returns a row of the given kind by ID, scoped to tenant.
+func (m *Manager) get(ctx context.Context, tenantID, id, kind string) (*Environment, error) {
 	e, err := scanEnvironment(m.db.QueryRowContext(ctx,
-		`SELECT `+environmentColumns+` FROM environments WHERE id = ? AND tenant_id = ?`,
-		envID, tenantID))
+		`SELECT `+environmentColumns+` FROM environments WHERE id = ? AND tenant_id = ? AND kind = ?`,
+		id, tenantID, kind))
 	if err == sql.ErrNoRows {
-		return nil, apierr.NotFound("environment not found")
+		return nil, apierr.NotFound(kindLabel(kind) + " not found")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get environment: %w", err)
+		return nil, fmt.Errorf("get %s: %w", kindLabel(kind), err)
 	}
 	return e, nil
 }
@@ -376,7 +509,7 @@ func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) 
 		offset = 0
 	}
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT `+environmentColumns+` FROM environments WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT `+environmentColumns+` FROM environments WHERE tenant_id = ? AND kind = 'environment' ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		tenantID, limit, offset,
 	)
 	if err != nil {
@@ -404,6 +537,16 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 	if err != nil {
 		return err
 	}
+	return m.teardown(ctx, e, false)
+}
+
+// teardown removes an environment's or sandbox's previews, container, ingress
+// network, warm_pool row, volume and DB row. Not-found errors are ignored.
+// With strict set (sandboxes), a container or volume that cannot be removed
+// keeps the row so the sandbox reaper retries; otherwise failures are logged
+// and the row is deleted, leaving any leftovers to GC.
+func (m *Manager) teardown(ctx context.Context, e *Environment, strict bool) error {
+	tenantID, envID := e.TenantID, e.ID
 
 	// Clean up preview Traefik route files before DB cascade deletes the rows
 	m.cleanupPreviews(ctx, envID)
@@ -418,6 +561,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 		if err := m.docker.RemoveContainer(ctx, e.ContainerID); err != nil {
 			if !isNotFoundError(err) {
 				log.Printf("environments: remove container %s: %v", e.ContainerID, err)
+				if strict {
+					return fmt.Errorf("remove container: %w", err)
+				}
 			}
 		}
 	}
@@ -435,13 +581,15 @@ func (m *Manager) Delete(ctx context.Context, tenantID, envID string) error {
 		if err := m.docker.RemoveVolume(ctx, e.VolumeName); err != nil {
 			if !isNotFoundError(err) {
 				log.Printf("environments: remove volume %s: %v", e.VolumeName, err)
+				if strict {
+					return fmt.Errorf("remove volume: %w", err)
+				}
 			}
 		}
 	}
 
 	// Delete record
-	_, err = m.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ? AND tenant_id = ?`, envID, tenantID)
-	if err != nil {
+	if _, err := m.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ? AND tenant_id = ?`, envID, tenantID); err != nil {
 		return fmt.Errorf("delete environment record: %w", err)
 	}
 	return nil
@@ -611,8 +759,14 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 	if err != nil {
 		return nil, err
 	}
+	return m.execIn(ctx, e, KindEnvironment, req)
+}
+
+// execIn runs req inside e's container. Shared by environment and sandbox
+// exec; both bump last_activity_at.
+func (m *Manager) execIn(ctx context.Context, e *Environment, kind string, req ExecRequest) (*ExecResponse, error) {
 	if e.Status != "running" {
-		return nil, apierr.Validation(fmt.Sprintf("environment must be running to exec (current: %s)", e.Status))
+		return nil, apierr.Validation(fmt.Sprintf("%s must be running to exec (current: %s)", kindLabel(kind), e.Status))
 	}
 
 	// Validate command
@@ -657,8 +811,8 @@ func (m *Manager) Exec(ctx context.Context, tenantID, envID string, req ExecRequ
 	// Update last_activity_at
 	now := time.Now().Unix()
 	_, _ = m.db.ExecContext(ctx,
-		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ?`,
-		now, now, envID,
+		`UPDATE environments SET last_activity_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+		now, now, e.ID, e.TenantID,
 	)
 
 	// Check truncation
@@ -694,7 +848,7 @@ func (m *Manager) ExtendLease(ctx context.Context, tenantID, envID string, durat
 	// already-stopped environment will not get.
 	res, err := m.db.ExecContext(ctx,
 		`UPDATE environments SET lease_expires_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND status = 'running'`,
+		 WHERE id = ? AND tenant_id = ? AND kind = 'environment' AND status = 'running'`,
 		leaseExpiresAt, now, envID, tenantID,
 	)
 	if err != nil {
@@ -766,6 +920,19 @@ func validateName(name string) error {
 		return apierr.Validation("environment name must start with a letter and contain only alphanumeric characters, hyphens, and underscores")
 	}
 	return nil
+}
+
+// updateStatusIf moves a row from one status to another, detached from the
+// request context.
+func (m *Manager) updateStatusIf(ctx context.Context, id, from, to string) {
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := m.db.ExecContext(freshCtx,
+		`UPDATE environments SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		to, time.Now().Unix(), id, from,
+	); err != nil {
+		log.Printf("environments: failed to update status for %s: %v", id, err)
+	}
 }
 
 func (m *Manager) updateStatus(ctx context.Context, id, status string) {

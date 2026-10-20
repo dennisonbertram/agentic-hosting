@@ -65,6 +65,38 @@ go run ./cmd/ahc service list
 
 The demo's `/api/chat` endpoint needs a real OpenRouter key. Set `OPENROUTER_API_KEY` before the first `make sandbox` to pass it through. Without it, the service uses a placeholder key and only `/health` is useful. The demo also requires a `DEMO_AUTH_TOKEN`; the sandbox generates a random one.
 
+## Sandboxes
+
+Disposable sandboxes (`/v1/sandboxes`, `ahc sandbox`) work against the local instance. Do not confuse them with this "local dev sandbox": an `ahc sandbox` is a throwaway container that `ah` deletes when its TTL expires. They run under the same runtime as everything else here (`runc` on macOS, so no syscall sandbox), with no network egress.
+
+```sh
+export AH_URL=http://127.0.0.1:18480 AH_KEY=<key from the summary>
+
+# One shot: create, run, delete. The exit code of the command is ahc's exit code.
+go run ./cmd/ahc sandbox run --image alpine:3.20 -- sh -c 'uname -a; id'
+
+# Keep one around (default TTL 30m; the server deletes it when it expires)
+go run ./cmd/ahc sandbox create scratch --image python:3.12-slim --ttl 15m
+go run ./cmd/ahc sandbox exec scratch -- python3 -c 'print(2+2)'
+go run ./cmd/ahc sandbox list
+go run ./cmd/ahc sandbox extend scratch --ttl 30m
+go run ./cmd/ahc sandbox delete scratch
+
+# Inspect a copy of the demo service: runs its app with its env vars (values never shown)
+go run ./cmd/ahc sandbox create demo-copy --service <demo-service-id> --include-env --ttl 10m
+go run ./cmd/ahc sandbox logs demo-copy --tail 50
+go run ./cmd/ahc sandbox exec demo-copy -- ps aux
+go run ./cmd/ahc sandbox delete demo-copy
+```
+
+Notes for the local instance:
+
+- The warm pool is off here (`AH_WARM_POOL_ENABLED=false`), so the first `--template` sandbox pulls the template image. `--image alpine:3.20` is the quickest start.
+- `--service` and `--snapshot` use local images (`127.0.0.1:5000/...` or the image the service was deployed from); a failed pull falls back to the local copy.
+- Exec needs the `timeout` binary inside the image; `alpine`, `debian`, `ubuntu` and `python` images have it, distroless images do not (exit code 127).
+- `--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL` (default 20) caps sandboxes host-wide; the tenant default is 5 (`max_sandboxes`).
+- `make sandbox-down` removes sandbox containers with the tenant's other labelled containers. Their `ah-env-*` workspace volumes are left behind if `ah` was stopped before deleting them; remove them with `docker volume ls -q --filter name=ah-env- | xargs docker volume rm`.
+
 Settings (environment variables read by `scripts/sandbox.sh`):
 
 | Variable | Default | Meaning |
@@ -91,7 +123,7 @@ The `ah-sandbox/openrouter-agent:dev` image and the pulled Traefik image are kep
 - No git builds: Nixpacks builds need the Linux systemd build broker. Deploy from images, or use a full Linux install or the Lima VM ([macmini.md](../ops/macmini.md)).
 - No TLS and no public domain.
 - The sandbox shares the Docker engine with anything else you run. Use a separate Colima profile or Docker context if that matters (see [setup-macos.md](setup-macos.md#docker-engine-notes)).
-- Postgres/Redis provisioning, environments and kanban boards have not been exercised in the sandbox.
+- Postgres/Redis provisioning, environments, disposable sandboxes and kanban boards have not been exercised in the sandbox.
 
 ## Troubleshooting
 

@@ -61,6 +61,7 @@ Getting Started:
 
 	root.AddCommand(newSnapshotCmd(state))
 	root.AddCommand(newEnvCmd(state))
+	root.AddCommand(newSandboxCmd(state))
 
 	return root
 }

@@ -117,6 +117,53 @@ type ExecResult struct {
 	DurationMs int64  `json:"duration_ms"`
 }
 
+// ---- Sandbox types ----
+
+// SandboxSource selects what a sandbox runs; set Type and the matching field.
+type SandboxSource struct {
+	Type       string `json:"type"` // template, image, snapshot or service
+	Template   string `json:"template,omitempty"`
+	Image      string `json:"image,omitempty"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	ServiceID  string `json:"service_id,omitempty"`
+}
+
+// CreateSandboxRequest holds parameters for creating a disposable sandbox.
+type CreateSandboxRequest struct {
+	Name          string        `json:"name,omitempty"`
+	Source        SandboxSource `json:"source"`
+	TTLSeconds    *int          `json:"ttl_seconds,omitempty"`
+	Run           string        `json:"run,omitempty"` // idle or app
+	IncludeEnv    bool          `json:"include_env,omitempty"`
+	MemoryMB      *int          `json:"memory_mb,omitempty"`
+	CPUMillicores *int          `json:"cpu_millicores,omitempty"`
+	Egress        string        `json:"egress,omitempty"`
+}
+
+// SandboxSourceRef is the source recorded on a sandbox.
+type SandboxSourceRef struct {
+	Type string `json:"type"`
+	Ref  string `json:"ref"`
+}
+
+// Sandbox is a disposable, TTL-bound sandbox container.
+type Sandbox struct {
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	Status         string           `json:"status"`
+	Source         SandboxSourceRef `json:"source"`
+	Image          string           `json:"image"`
+	Run            string           `json:"run"`
+	Egress         string           `json:"egress"`
+	MemoryMB       int              `json:"memory_mb"`
+	CPUMillicores  int              `json:"cpu_millicores"`
+	TTLSeconds     int              `json:"ttl_seconds"`
+	CreatedAt      int64            `json:"created_at"`
+	ExpiresAt      int64            `json:"expires_at"`
+	MaxExpiresAt   int64            `json:"max_expires_at"`
+	LastActivityAt int64            `json:"last_activity_at"`
+}
+
 // Preview represents a preview route exposing an environment port via Traefik.
 type Preview struct {
 	ID            string `json:"id"`
@@ -261,6 +308,7 @@ type TenantUsage struct {
 	Services  UsageBucket `json:"services"`
 	Databases UsageBucket `json:"databases"`
 	APIKeys   UsageBucket `json:"api_keys"`
+	Sandboxes UsageBucket `json:"sandboxes"`
 	MemoryMB  int         `json:"memory_mb"`
 	CPUCores  float64     `json:"cpu_cores"`
 	DiskGB    int         `json:"disk_gb"`

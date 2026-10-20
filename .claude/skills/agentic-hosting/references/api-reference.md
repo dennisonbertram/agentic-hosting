@@ -282,6 +282,48 @@ DELETE /v1/snapshots/:snapshotID
 
 ---
 
+## Sandboxes (disposable)
+
+A sandbox is a throwaway container that the server deletes when its TTL expires (no stop/start). Same isolation as environments (gVisor in production, caps dropped, PID/memory/CPU limits). Network egress is `none`: no internet, no other tenant containers, no other tenants. Separate quota from environments: `max_sandboxes` (default 5) plus a host-wide cap (default 20). Creates are rate limited to ~20/min per tenant.
+
+```bash
+# Create (long route; Idempotency-Key honoured). source.type: template|image|snapshot|service
+POST /v1/sandboxes
+Body: {"source":{"type":"image","image":"python:3.12-slim"},"ttl_seconds":1800}
+#   {"source":{"type":"template","template":"python"}}
+#   {"source":{"type":"snapshot","snapshot_id":"..."},"include_env":true}   # runs the app (run=app)
+#   {"source":{"type":"service","service_id":"..."},"run":"idle"}            # service's current image
+#   optional: name, run (idle|app), include_env, memory_mb (128..2048), cpu_millicores (100..2000), egress ("none" only; "internet" → 403)
+# → 201 {"id":"...","name":"sbx-1a2b3c4d","status":"running","source":{"type":"image","ref":"python:3.12-slim"},
+#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,
+#        "ttl_seconds":1800,"created_at":unix,"expires_at":unix,"max_expires_at":unix,"last_activity_at":unix}
+# ttl_seconds: default 1800, 60..max_sandbox_ttl_seconds (default 14400)
+# Images: Docker Hub, or your own 127.0.0.1:5000 build/snapshot images. Other tenants' resources → 404.
+
+GET /v1/sandboxes?status=running          # list (limit/offset)
+GET /v1/sandboxes/:sandboxID
+DELETE /v1/sandboxes/:sandboxID           # → 204
+
+# Exec: same body/response as environment exec; not idempotent
+POST /v1/sandboxes/:sandboxID/exec
+Body: {"command":["python3","-c","print(2+2)"],"work_dir":"/workspace","timeout":60}
+# → {"exit_code":0,"stdout":"4\n","stderr":"","truncated":false,"timed_out":false,"duration_ms":120}
+
+# Main process logs (useful for run=app sandboxes)
+GET /v1/sandboxes/:sandboxID/logs?tail=100&follow=false
+
+# Push expiry to now + ttl (not past max_expires_at = created_at + 24h by default)
+POST /v1/sandboxes/:sandboxID/extend
+Body: {"ttl_seconds":3600}
+# 400 past max lifetime; 409 when not running / already expired
+```
+
+Notes: a sandbox forked with `include_env` gets values like `DATABASE_URL` but is not attached to database networks, so those connections fail. Exec needs the `timeout` binary in the image (distroless → exit 127). Expired sandboxes are deleted within ~30s; stopped/failed ones after 10 minutes. Environment routes return 404 for sandbox IDs and vice versa.
+
+CLI: `ahc sandbox run --image python:3.12-slim -- python3 -V` (create, exec, delete; exit code propagated), plus `ahc sandbox create|list|get|exec|logs|extend|delete` (alias `ahc sbx`).
+
+---
+
 ## Kanban (Vikunja)
 
 Provisions a per-tenant Vikunja kanban board in a dedicated container. Provisioning is async -- the `POST` returns immediately and the kanban URL becomes available once the container is ready. Poll `GET /v1/kanban` until the `url` field is populated.
@@ -348,4 +390,4 @@ Add to **POST and PUT** requests (not DELETE/PATCH; no PUT routes exist today):
 Idempotency-Key: <any-stable-uuid>
 ```
 Same key + same tenant + same method + same path + same body hash = replayed 2xx. TTL is 10 minutes.
-`POST /v1/auth/keys` and `POST /v1/environments/{id}/exec` are excluded.
+`POST /v1/auth/keys`, `POST /v1/environments/{id}/exec` and `POST /v1/sandboxes/{id}/exec` are excluded.

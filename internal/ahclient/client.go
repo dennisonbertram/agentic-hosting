@@ -694,6 +694,86 @@ func (c *Client) ExtendEnvironmentLease(envID string, durationSeconds int) (*Env
 	return &resp, nil
 }
 
+// ---- Sandbox endpoints ----
+
+// CreateSandbox creates a disposable sandbox. It may pull an image, so it
+// uses the long request timeout.
+func (c *Client) CreateSandbox(req CreateSandboxRequest) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSONLong(longRequestTimeout, http.MethodPost, "/v1/sandboxes", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ListSandboxes returns the tenant's sandboxes. status filters when non-empty.
+func (c *Client) ListSandboxes(status string) ([]Sandbox, error) {
+	path := "/v1/sandboxes"
+	if status != "" {
+		path += "?" + url.Values{"status": {status}}.Encode()
+	}
+	var resp []Sandbox
+	if err := c.doJSON(http.MethodGet, path, nil, &resp, nil); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// GetSandbox returns a sandbox by ID.
+func (c *Client) GetSandbox(id string) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSON(http.MethodGet, "/v1/sandboxes/"+esc(id), nil, &resp, nil); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DeleteSandbox deletes a sandbox (container, workspace and record).
+func (c *Client) DeleteSandbox(id string) error {
+	return c.doJSONLong(longRequestTimeout, http.MethodDelete, "/v1/sandboxes/"+esc(id), nil, nil)
+}
+
+// SandboxExec runs a command (argv, no shell) in a sandbox.
+func (c *Client) SandboxExec(id string, command []string, workDir string, timeoutSeconds int) (*ExecResult, error) {
+	body := map[string]any{"command": command}
+	if workDir != "" {
+		body["work_dir"] = workDir
+	}
+	if timeoutSeconds > 0 {
+		body["timeout"] = timeoutSeconds
+	}
+	var resp ExecResult
+	if err := c.doJSONLong(ExecRequestTimeout(timeoutSeconds), http.MethodPost, "/v1/sandboxes/"+esc(id)+"/exec", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetSandboxLogs streams the logs of the sandbox's main process.
+func (c *Client) GetSandboxLogs(id string, follow bool, tail int) (io.ReadCloser, error) {
+	params := url.Values{}
+	if tail > 0 {
+		params.Set("tail", strconv.Itoa(tail))
+	}
+	if follow {
+		params.Set("follow", "true")
+	}
+	path := "/v1/sandboxes/" + esc(id) + "/logs"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	return c.doStream(http.MethodGet, path, nil)
+}
+
+// ExtendSandbox sets the sandbox to expire ttlSeconds from now.
+func (c *Client) ExtendSandbox(id string, ttlSeconds int) (*Sandbox, error) {
+	var resp Sandbox
+	if err := c.doJSON(http.MethodPost, "/v1/sandboxes/"+esc(id)+"/extend", map[string]int{"ttl_seconds": ttlSeconds}, &resp, nil); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ListEnvironmentTemplates returns all available environment templates.
 func (c *Client) ListEnvironmentTemplates() ([]EnvironmentTemplate, error) {
 	var resp []EnvironmentTemplate

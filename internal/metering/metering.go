@@ -47,19 +47,36 @@ var ValidPeriods = map[string]bool{
 //   - since, until: time range (inclusive)
 //   - serviceID: optional, filters to a single service when non-empty
 func (s *Store) QueryTenantMetrics(tenantID, period string, since, until time.Time, serviceID string) ([]Metric, error) {
-	return s.queryMetrics(tenantID, period, since, until, serviceID, serviceID != "")
+	return s.queryMetrics(tenantID, ResourceKindService, period, since, until, serviceID, serviceID != "")
+}
+
+// QueryTenantMetricsKind is QueryTenantMetrics for one resource kind
+// (ResourceKindService or ResourceKindSandbox). resourceID optionally filters
+// to one service or sandbox ID.
+func (s *Store) QueryTenantMetricsKind(tenantID, kind, period string, since, until time.Time, resourceID string) ([]Metric, error) {
+	if !ValidResourceKinds[kind] {
+		return nil, fmt.Errorf("invalid resource kind %q: must be service or sandbox", kind)
+	}
+	return s.queryMetrics(tenantID, kind, period, since, until, resourceID, resourceID != "")
+}
+
+// ValidResourceKinds are the resource kinds metrics can be queried by.
+var ValidResourceKinds = map[string]bool{
+	ResourceKindService: true,
+	ResourceKindSandbox: true,
 }
 
 // QueryServiceMetrics returns aggregated usage metrics for a specific service
 // owned by the given tenant. This is a convenience wrapper that enforces tenant
 // isolation at the query level.
 func (s *Store) QueryServiceMetrics(tenantID, serviceID, period string, since, until time.Time) ([]Metric, error) {
-	return s.queryMetrics(tenantID, period, since, until, serviceID, true)
+	return s.queryMetrics(tenantID, ResourceKindService, period, since, until, serviceID, true)
 }
 
-// queryMetrics aggregates a tenant's usage_events into period buckets, one row
-// per bucket and service. With filterService set, only serviceID's rows count.
-func (s *Store) queryMetrics(tenantID, period string, since, until time.Time, serviceID string, filterService bool) ([]Metric, error) {
+// queryMetrics aggregates a tenant's usage_events of one resource kind into
+// period buckets, one row per bucket and resource. With filterService set,
+// only serviceID's rows count.
+func (s *Store) queryMetrics(tenantID, kind, period string, since, until time.Time, serviceID string, filterService bool) ([]Metric, error) {
 	if !ValidPeriods[period] {
 		return nil, fmt.Errorf("invalid period %q: must be hourly or daily", period)
 	}
@@ -74,10 +91,11 @@ func (s *Store) queryMetrics(tenantID, period string, since, until time.Time, se
 			COALESCE(SUM(network_egress_bytes), 0)
 		FROM usage_events
 		WHERE tenant_id = ?
+		  AND resource_kind = ?
 		  AND recorded_at >= ?
 		  AND recorded_at <= ?
 	`, timeBucketExpr(period), SampleSeconds)
-	args := []any{tenantID, since.Unix(), until.Unix()}
+	args := []any{tenantID, kind, since.Unix(), until.Unix()}
 
 	if filterService {
 		query += " AND service_id = ?"

@@ -51,6 +51,7 @@ type TenantUsageResponse struct {
 	Services  TenantUsageBucket `json:"services"`
 	Databases TenantUsageBucket `json:"databases"`
 	APIKeys   TenantUsageBucket `json:"api_keys"`
+	Sandboxes TenantUsageBucket `json:"sandboxes"`
 	MemoryMB  int               `json:"memory_mb"`
 	CPUCores  float64           `json:"cpu_cores"`
 	DiskGB    int               `json:"disk_gb"`
@@ -344,15 +345,16 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 
 	var resp TenantUsageResponse
 	err := s.store.StateDB.QueryRow(
-		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit,
+		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit, q.max_sandboxes,
 		    (SELECT COUNT(*) FROM services WHERE tenant_id = ?),
 		    (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'),
-		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL)
+		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL),
+		    (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = 'sandbox' AND status != 'failed')
 		 FROM tenant_quotas q
 		 WHERE q.tenant_id = ?`,
-		tenantID, tenantID, tenantID, tenantID,
-	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit,
-		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used)
+		tenantID, tenantID, tenantID, tenantID, tenantID,
+	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit, &resp.Sandboxes.Max,
+		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used, &resp.Sandboxes.Used)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "tenant quota not found")
 		return
@@ -612,6 +614,13 @@ type QuotaUpdateRequest struct {
 	MaxDatabases         *int `json:"max_databases,omitempty"`
 	MaxBuildsConcurrent  *int `json:"max_builds_concurrent,omitempty"`
 	MaxEnvVarsPerService *int `json:"max_env_vars_per_service,omitempty"`
+	// Sandbox quotas. max_sandboxes may be 0 to disable sandboxes for a
+	// tenant; sandbox_egress_allowed is 0 or 1 (egress is phase 2 and is
+	// still refused by the server while this is 1).
+	MaxSandboxes              *int `json:"max_sandboxes,omitempty"`
+	MaxSandboxTTLSeconds      *int `json:"max_sandbox_ttl_seconds,omitempty"`
+	MaxSandboxLifetimeSeconds *int `json:"max_sandbox_lifetime_seconds,omitempty"`
+	SandboxEgressAllowed      *int `json:"sandbox_egress_allowed,omitempty"`
 }
 
 // QuotaUpdateResponse is the response body for PATCH /v1/tenants/{tenantID}/quotas.
@@ -625,6 +634,11 @@ type QuotaUpdateResponse struct {
 	MaxCPUCores          float64 `json:"max_cpu_cores"`
 	MaxDiskGB            int     `json:"max_disk_gb"`
 	APIRateLimit         int     `json:"api_rate_limit"`
+
+	MaxSandboxes              int `json:"max_sandboxes"`
+	MaxSandboxTTLSeconds      int `json:"max_sandbox_ttl_seconds"`
+	MaxSandboxLifetimeSeconds int `json:"max_sandbox_lifetime_seconds"`
+	SandboxEgressAllowed      int `json:"sandbox_egress_allowed"`
 }
 
 // Quota caps — hard upper bounds for operator-set quotas.
@@ -633,6 +647,11 @@ const (
 	quotaCapMaxDatabases         = 50
 	quotaCapMaxBuildsConcurrent  = 10
 	quotaCapMaxEnvVarsPerService = 500
+
+	quotaCapMaxSandboxes              = 50
+	quotaCapMaxSandboxTTLSeconds      = 86400
+	quotaCapMaxSandboxLifetimeSeconds = 7 * 86400
+	quotaCapSandboxEgressAllowed      = 1
 )
 
 // handleQuotaUpdate handles PATCH /v1/tenants/{tenantID}/quotas.
@@ -685,15 +704,20 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 	fields := []struct {
 		column string
 		value  *int
+		min    int
 		cap    int
 	}{
-		{"max_services", req.MaxServices, quotaCapMaxServices},
-		{"max_databases", req.MaxDatabases, quotaCapMaxDatabases},
-		{"max_builds_concurrent", req.MaxBuildsConcurrent, quotaCapMaxBuildsConcurrent},
-		{"max_env_vars_per_service", req.MaxEnvVarsPerService, quotaCapMaxEnvVarsPerService},
+		{"max_services", req.MaxServices, 1, quotaCapMaxServices},
+		{"max_databases", req.MaxDatabases, 1, quotaCapMaxDatabases},
+		{"max_builds_concurrent", req.MaxBuildsConcurrent, 1, quotaCapMaxBuildsConcurrent},
+		{"max_env_vars_per_service", req.MaxEnvVarsPerService, 1, quotaCapMaxEnvVarsPerService},
+		{"max_sandboxes", req.MaxSandboxes, 0, quotaCapMaxSandboxes},
+		{"max_sandbox_ttl_seconds", req.MaxSandboxTTLSeconds, 60, quotaCapMaxSandboxTTLSeconds},
+		{"max_sandbox_lifetime_seconds", req.MaxSandboxLifetimeSeconds, 60, quotaCapMaxSandboxLifetimeSeconds},
+		{"sandbox_egress_allowed", req.SandboxEgressAllowed, 0, quotaCapSandboxEgressAllowed},
 	}
 
-	// Validate: all provided values must be positive and within caps.
+	// Validate: all provided values must be within [min, cap].
 	// Build the partial UPDATE from the fields that are present.
 	var setClauses []string
 	var args []any
@@ -701,8 +725,8 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		if f.value == nil {
 			continue
 		}
-		if *f.value < 1 {
-			writeError(w, http.StatusBadRequest, f.column+" must be at least 1")
+		if *f.value < f.min {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at least %d", f.column, f.min))
 			return
 		}
 		if *f.value > f.cap {
@@ -729,18 +753,21 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return strconv.Itoa(*p)
 	}
-	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s",
-		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService))
+	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s max_sandboxes=%s max_sandbox_ttl_seconds=%s max_sandbox_lifetime_seconds=%s sandbox_egress_allowed=%s",
+		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService),
+		ptrIntStr(req.MaxSandboxes), ptrIntStr(req.MaxSandboxTTLSeconds), ptrIntStr(req.MaxSandboxLifetimeSeconds), ptrIntStr(req.SandboxEgressAllowed))
 
 	// Read back the updated quotas and return them.
 	var resp QuotaUpdateResponse
 	resp.TenantID = tenantID
 	err = s.store.StateDB.QueryRow(
 		`SELECT max_services, max_databases, max_builds_concurrent, max_env_vars_per_service,
-		        max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit
+		        max_memory_mb, max_cpu_cores, max_disk_gb, api_rate_limit,
+		        max_sandboxes, max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds, sandbox_egress_allowed
 		 FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
 	).Scan(&resp.MaxServices, &resp.MaxDatabases, &resp.MaxBuildsConcurrent, &resp.MaxEnvVarsPerService,
-		&resp.MaxMemoryMB, &resp.MaxCPUCores, &resp.MaxDiskGB, &resp.APIRateLimit)
+		&resp.MaxMemoryMB, &resp.MaxCPUCores, &resp.MaxDiskGB, &resp.APIRateLimit,
+		&resp.MaxSandboxes, &resp.MaxSandboxTTLSeconds, &resp.MaxSandboxLifetimeSeconds, &resp.SandboxEgressAllowed)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return

@@ -72,7 +72,11 @@ func main() {
 	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist (\"none\" disables CORS)")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
+	maxSandboxesTotal := flag.Int("max-sandboxes-total", cfg.MaxSandboxesTotal, "Host-wide cap on disposable sandboxes across all tenants (0 = no host cap; env AH_MAX_SANDBOXES_TOTAL)")
 	flag.Parse()
+	if *maxSandboxesTotal < 0 {
+		log.Fatalf("--max-sandboxes-total must be >= 0, got %d", *maxSandboxesTotal)
+	}
 
 	// Validate --base-domain if provided.
 	if *baseDomain != "" {
@@ -244,6 +248,17 @@ func main() {
 	envMgr.SetPool(envPool)
 	go envPool.Run(context.Background())
 
+	// Disposable sandboxes: sources, host cap and the TTL reaper. The
+	// snapshot manager is stateless, so the one used for GC retention below
+	// is shared.
+	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])
+	envMgr.SetSandboxSources(snapshotSandboxSource{mgr: snapMgr}, serviceSandboxSource{mgr: svcMgr})
+	envMgr.SetMaxSandboxesTotal(*maxSandboxesTotal)
+	log.Printf("sandboxes: host cap %d (0 = none)", *maxSandboxesTotal)
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	go envMgr.RunSandboxReaper(reaperCtx, 30*time.Second)
+
 	// Usage metering collector (60s samples of running services)
 	meterCtx, meterCancel := context.WithCancel(context.Background())
 	defer meterCancel()
@@ -331,7 +346,6 @@ func main() {
 	}
 
 	// Wire snapshot retention into GC
-	snapMgr := snapshots.NewManager(store.StateDB, dockerClient, masterKey[:32])
 	garbageCollector.SetSnapshotCleaner(snapMgr, cfg.SnapshotMaxPerService, cfg.SnapshotMaxAge)
 
 	go garbageCollector.Run(gcCtx)
@@ -341,6 +355,7 @@ func main() {
 	reconcilerCancel()
 	gcCancel()
 	meterCancel()
+	reaperCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

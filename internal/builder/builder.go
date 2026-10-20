@@ -165,6 +165,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				return fmt.Errorf("build cancelled: %w (worker stop failed)", ctx.Err())
 			}
 			_, _ = drainer.drain(logCb)
+			drainer.flush(logCb)
 			return ctx.Err()
 		}
 		status, err := brokerStatus(ctx, req.BuildID)
@@ -192,6 +193,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 					break
 				}
 			}
+			drainer.flush(logCb)
 			if stopErr := stopBuildWorker(req.BuildID); stopErr != nil {
 				cleanBuildDir = false
 				return fmt.Errorf("stop completed build worker: %w", stopErr)
@@ -298,6 +300,9 @@ type buildLogDrainer struct {
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
 // line. This keeps log streaming from starving cancellation and unit polling.
+// A line still being written by the worker (no newline yet at EOF) is held
+// until a later drain completes it, or until flush once the worker is done;
+// emitting it at EOF would split one log line in two.
 func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 	const maxPass, maxLine = 64 * 1024, 16 * 1024
 	read := 0
@@ -305,22 +310,13 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 		b, err := d.reader.ReadByte()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(d.pending) > 0 && logCb != nil {
-					logCb(sanitizeLogLine(string(d.pending)))
-					d.pending = d.pending[:0]
-				}
 				return read, nil
 			}
 			return read, err
 		}
 		read++
 		if b == '\n' {
-			line := strings.TrimSuffix(string(d.pending), "\r")
-			if logCb != nil {
-				logCb(sanitizeLogLine(line))
-			}
-			d.pending = d.pending[:0]
-			d.discard = false
+			d.emit(logCb)
 			continue
 		}
 		if !d.discard {
@@ -332,6 +328,22 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 		}
 	}
 	return read, nil
+}
+
+// flush emits a trailing unterminated line, if any. Call it only once the
+// worker can no longer write.
+func (d *buildLogDrainer) flush(logCb func(string)) {
+	if len(d.pending) > 0 {
+		d.emit(logCb)
+	}
+}
+
+func (d *buildLogDrainer) emit(logCb func(string)) {
+	if logCb != nil {
+		logCb(sanitizeLogLine(strings.TrimSuffix(string(d.pending), "\r")))
+	}
+	d.pending = d.pending[:0]
+	d.discard = false
 }
 
 // RunWorker executes one manifest. It is only called by ah-build@.service,

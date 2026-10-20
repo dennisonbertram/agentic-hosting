@@ -201,124 +201,75 @@ func (s *Store) Cancel(ctx context.Context, tenantID, deploymentID string) (*Dep
 	return d, nil
 }
 
-// Get retrieves a single deployment by ID, scoped to tenant.
-func (s *Store) Get(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
+// deploymentColumns is the column list scanDeployment expects, in order.
+const deploymentColumns = `id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at`
+
+// scanDeployment scans one deploymentColumns row from a *sql.Row or *sql.Rows.
+func scanDeployment(row interface{ Scan(...any) error }) (*Deployment, error) {
 	d := &Deployment{}
 	var buildID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
-		 FROM deployments WHERE id = ? AND tenant_id = ?`,
+	if err := row.Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
+		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt); err != nil {
+		return nil, err
+	}
+	d.BuildID = buildID.String
+	return d, nil
+}
+
+// Get retrieves a single deployment by ID, scoped to tenant.
+func (s *Store) Get(ctx context.Context, tenantID, deploymentID string) (*Deployment, error) {
+	d, err := scanDeployment(s.db.QueryRowContext(ctx,
+		`SELECT `+deploymentColumns+` FROM deployments WHERE id = ? AND tenant_id = ?`,
 		deploymentID, tenantID,
-	).Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt)
+	))
 	if err == sql.ErrNoRows {
 		return nil, apierr.NotFound("deployment not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get deployment: %w", err)
 	}
-	if buildID.Valid {
-		d.BuildID = buildID.String
-	}
 	return d, nil
 }
 
 // ListByService returns paginated deployments for a service, newest first.
 func (s *Store) ListByService(ctx context.Context, tenantID, serviceID string, limit, offset int) ([]*Deployment, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
-		 FROM deployments
-		 WHERE tenant_id = ? AND service_id = ?
-		 ORDER BY created_at DESC
-		 LIMIT ? OFFSET ?`,
-		tenantID, serviceID, limit, offset,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list deployments by service: %w", err)
-	}
-	defer rows.Close()
-
-	return scanDeployments(rows)
+	return s.list(ctx, `tenant_id = ? AND service_id = ?`, []any{tenantID, serviceID}, limit, offset)
 }
 
 // ListByTenant returns paginated deployments across all services for a tenant, newest first.
 func (s *Store) ListByTenant(ctx context.Context, tenantID string, limit, offset int) ([]*Deployment, error) {
+	return s.list(ctx, `tenant_id = ?`, []any{tenantID}, limit, offset)
+}
+
+// list returns deployments matching the where clause, newest first. limit
+// defaults to 50 (max 200) and a negative offset is treated as 0.
+func (s *Store) list(ctx context.Context, where string, args []any, limit, offset int) ([]*Deployment, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
-		 FROM deployments
-		 WHERE tenant_id = ?
-		 ORDER BY created_at DESC
-		 LIMIT ? OFFSET ?`,
-		tenantID, limit, offset,
+		`SELECT `+deploymentColumns+` FROM deployments WHERE `+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list deployments by tenant: %w", err)
+		return nil, fmt.Errorf("list deployments: %w", err)
 	}
 	defer rows.Close()
 
-	return scanDeployments(rows)
-}
-
-// LatestForService returns the most recent deployment for a service.
-func (s *Store) LatestForService(ctx context.Context, serviceID string) (*Deployment, error) {
-	d := &Deployment{}
-	var buildID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, service_id, tenant_id, build_id, image, status, trigger, container_id, error_message, started_at, completed_at, cancelled_at, created_at
-		 FROM deployments
-		 WHERE service_id = ?
-		 ORDER BY created_at DESC
-		 LIMIT 1`,
-		serviceID,
-	).Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-		&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, apierr.NotFound("no deployments found for service")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("latest deployment for service: %w", err)
-	}
-	if buildID.Valid {
-		d.BuildID = buildID.String
-	}
-	return d, nil
-}
-
-// scanDeployments scans rows into a slice of Deployment pointers.
-func scanDeployments(rows *sql.Rows) ([]*Deployment, error) {
-	var result []*Deployment
+	// Return an empty slice instead of nil for JSON serialization.
+	result := []*Deployment{}
 	for rows.Next() {
-		d := &Deployment{}
-		var buildID sql.NullString
-		if err := rows.Scan(&d.ID, &d.ServiceID, &d.TenantID, &buildID, &d.Image, &d.Status, &d.Trigger,
-			&d.ContainerID, &d.ErrorMessage, &d.StartedAt, &d.CompletedAt, &d.CancelledAt, &d.CreatedAt); err != nil {
+		d, err := scanDeployment(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan deployment: %w", err)
-		}
-		if buildID.Valid {
-			d.BuildID = buildID.String
 		}
 		result = append(result, d)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate deployments: %w", err)
-	}
-	// Return empty slice instead of nil for JSON serialization.
-	if result == nil {
-		result = []*Deployment{}
 	}
 	return result, nil
 }

@@ -83,7 +83,7 @@ func runBuildList(c *ahclient.Client, nameOrID string, allFlag bool, w io.Writer
 		if builds == nil {
 			builds = []ahclient.Build{}
 		}
-		return writeJSON(w, builds)
+		return printJSON(w, builds)
 	}
 
 	if len(builds) == 0 {
@@ -100,17 +100,11 @@ func writeBuildTable(w io.Writer, builds []ahclient.Build) {
 	headers := []string{"ID", "STATUS", "GIT_URL", "BRANCH", "CREATED"}
 	rows := make([][]string, 0, len(builds))
 	for _, b := range builds {
-		shortID := b.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		gitURL := b.SourceURL
-		if len(gitURL) > 40 {
-			gitURL = gitURL[:37] + "..."
-		}
+		id := shortID(b.ID)
+		gitURL := shortStr(b.SourceURL, 40)
 		status := coloredBuildStatus(b.Status)
 		rows = append(rows, []string{
-			shortID,
+			id,
 			status,
 			gitURL,
 			b.SourceRef,

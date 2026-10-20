@@ -196,3 +196,19 @@ func TestLoadFromEnv_RejectsInvertedKanbanRange(t *testing.T) {
 	_, err := LoadFromEnv()
 	require.Error(t, err)
 }
+
+func TestFromEnv_SnapshotRetention(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_PER_SERVICE", "3")
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "48h")
+	cfg := FromEnv()
+	assert.Equal(t, 3, cfg.SnapshotMaxPerService)
+	assert.Equal(t, 48*time.Hour, cfg.SnapshotMaxAge)
+
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "two days")
+	assert.Equal(t, DefaultSnapshotMaxAge, FromEnv().SnapshotMaxAge, "invalid duration falls back to default")
+}
+
+func TestParseCORSOrigins_DedupesAndDropsWildcard(t *testing.T) {
+	got := ParseCORSOrigins(" https://a.example , *, https://a.example,,https://b.example")
+	assert.Equal(t, []string{"https://a.example", "https://b.example"}, got)
+}

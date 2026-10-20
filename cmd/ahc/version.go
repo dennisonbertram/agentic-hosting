@@ -16,19 +16,23 @@ var (
 	Date    = ""
 )
 
+// versionInfo returns the build-time version fields with defaults applied.
+func versionInfo() (version, commit, date string) {
+	version, commit, date = Version, Commit, Date
+	if version == "" {
+		version = "dev"
+	}
+	if commit == "" {
+		commit = "unknown"
+	}
+	if date == "" {
+		date = "unknown"
+	}
+	return version, commit, date
+}
+
 func versionString() string {
-	v := Version
-	if v == "" {
-		v = "dev"
-	}
-	c := Commit
-	if c == "" {
-		c = "unknown"
-	}
-	d := Date
-	if d == "" {
-		d = "unknown"
-	}
+	v, c, d := versionInfo()
 	return fmt.Sprintf("ahc version %s (commit %s, built %s)", v, c, d)
 }
 
@@ -40,18 +44,7 @@ func newVersionCmd(root *rootState) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if root.jsonOutput {
-				v := Version
-				if v == "" {
-					v = "dev"
-				}
-				c := Commit
-				if c == "" {
-					c = "unknown"
-				}
-				d := Date
-				if d == "" {
-					d = "unknown"
-				}
+				v, c, d := versionInfo()
 				return printJSON(cmd.OutOrStdout(), map[string]string{
 					"version": v,
 					"commit":  c,

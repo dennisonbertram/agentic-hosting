@@ -26,7 +26,7 @@ func TestEnvironmentExecUsesTimeoutBeyondDefaultHTTPTimeout(t *testing.T) {
 }
 
 func TestEnvironmentExecClientTimeoutUsesDefaultAndServerMaximum(t *testing.T) {
-	require.Equal(t, 65*time.Second, environmentExecClientTimeout(0))
-	require.Equal(t, 65*time.Second, environmentExecClientTimeout(60))
-	require.Equal(t, 305*time.Second, environmentExecClientTimeout(900))
+	require.Equal(t, 65*time.Second, ExecRequestTimeout(0))
+	require.Equal(t, 65*time.Second, ExecRequestTimeout(60))
+	require.Equal(t, 305*time.Second, ExecRequestTimeout(900))
 }

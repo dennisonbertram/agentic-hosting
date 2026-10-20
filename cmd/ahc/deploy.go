@@ -66,17 +66,28 @@ func runDeployImage(c *ahclient.Client, w io.Writer, image, name string, port in
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	fmt.Fprintf(w, "Service %q created (id: %s)\n", svc.Name, svc.ID[:8])
+	fmt.Fprintf(w, "Service %q created (id: %s)\n", svc.Name, shortID(svc.ID))
 	fmt.Fprint(w, "Waiting for service to start")
 
 	return pollUntilRunning(c, w, svc.ID, 0)
 }
 
-// streamBuildLogs reads from the build log stream and prints each line with a "[build]" prefix.
+// maxBuildLogLine bounds a single build log line. bufio.Scanner's 64 KiB
+// default stops the stream at the first longer line (minified bundles,
+// progress bars), silently hiding the rest of the build output.
+const maxBuildLogLine = 1 << 20
+
+// streamBuildLogs reads from the build log stream and prints each line with a
+// "[build]" prefix. A read failure is reported but does not abort the deploy:
+// the build's outcome is confirmed separately by polling.
 func streamBuildLogs(r io.Reader, w io.Writer) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxBuildLogLine)
 	for scanner.Scan() {
 		fmt.Fprintf(w, "[build] %s\n", scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(w, "[build] (log stream interrupted: %v)\n", err)
 	}
 }
 
@@ -108,9 +119,9 @@ func runDeployGit(c *ahclient.Client, w io.Writer, gitURL, name string, port int
 			return fmt.Errorf("create service: %w", err)
 		}
 		svc = found
-		fmt.Fprintf(w, "Using existing service %q (id: %s)\n", svc.Name, svc.ID[:8])
+		fmt.Fprintf(w, "Using existing service %q (id: %s)\n", svc.Name, shortID(svc.ID))
 	} else {
-		fmt.Fprintf(w, "Service %q created (id: %s)\n", svc.Name, svc.ID[:8])
+		fmt.Fprintf(w, "Service %q created (id: %s)\n", svc.Name, shortID(svc.ID))
 	}
 
 	// Start a build.
@@ -159,7 +170,7 @@ func pollBuildUntilComplete(c *ahclient.Client, serviceID, buildID string) (*ahc
 			return nil, fmt.Errorf("polling build status: %w", err)
 		}
 		switch build.Status {
-		case "succeeded", "failed", "cancelled":
+		case status.BuildSucceeded, status.BuildFailed, status.BuildCancelled:
 			return build, nil
 		}
 	}

@@ -13,10 +13,7 @@ const maxMessageLen = 60
 
 // truncateMessage truncates a message to maxMessageLen and appends "..." if needed.
 func truncateMessage(msg string) string {
-	if len(msg) <= maxMessageLen {
-		return msg
-	}
-	return msg[:maxMessageLen-3] + "..."
+	return shortStr(msg, maxMessageLen)
 }
 
 // formatActivityTime formats a unix timestamp as a short local time string.

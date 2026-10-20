@@ -214,7 +214,7 @@ func TestReconciler_StaleDeployment(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Unix()
 	elevenMinAgo := now - 11*60 // past the 10-minute threshold
-	fiveMinAgo := now - 5*60   // within the threshold — should be left alone
+	fiveMinAgo := now - 5*60    // within the threshold — should be left alone
 
 	_, err := db.ExecContext(ctx,
 		`INSERT INTO tenants (id, name, email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,

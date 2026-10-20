@@ -47,47 +47,22 @@ var ValidPeriods = map[string]bool{
 //   - since, until: time range (inclusive)
 //   - serviceID: optional, filters to a single service when non-empty
 func (s *Store) QueryTenantMetrics(tenantID, period string, since, until time.Time, serviceID string) ([]Metric, error) {
-	if !ValidPeriods[period] {
-		return nil, fmt.Errorf("invalid period %q: must be hourly or daily", period)
-	}
-
-	timeBucket := timeBucketExpr(period)
-
-	query := fmt.Sprintf(`
-		SELECT
-			%s AS bucket,
-			COALESCE(service_id, '') AS svc_id,
-			COALESCE(SUM(cpu_seconds), 0),
-			COALESCE(SUM(memory_mb_seconds) / (COUNT(*) * %d.0), 0),
-			COALESCE(SUM(network_ingress_bytes), 0),
-			COALESCE(SUM(network_egress_bytes), 0)
-		FROM usage_events
-		WHERE tenant_id = ?
-		  AND recorded_at >= ?
-		  AND recorded_at <= ?
-	`, timeBucket, SampleSeconds)
-
-	args := []any{tenantID, since.Unix(), until.Unix()}
-
-	if serviceID != "" {
-		query += " AND service_id = ?"
-		args = append(args, serviceID)
-	}
-
-	query += fmt.Sprintf(" GROUP BY bucket, svc_id ORDER BY bucket ASC")
-
-	return s.execMetricsQuery(query, args)
+	return s.queryMetrics(tenantID, period, since, until, serviceID, serviceID != "")
 }
 
 // QueryServiceMetrics returns aggregated usage metrics for a specific service
 // owned by the given tenant. This is a convenience wrapper that enforces tenant
 // isolation at the query level.
 func (s *Store) QueryServiceMetrics(tenantID, serviceID, period string, since, until time.Time) ([]Metric, error) {
+	return s.queryMetrics(tenantID, period, since, until, serviceID, true)
+}
+
+// queryMetrics aggregates a tenant's usage_events into period buckets, one row
+// per bucket and service. With filterService set, only serviceID's rows count.
+func (s *Store) queryMetrics(tenantID, period string, since, until time.Time, serviceID string, filterService bool) ([]Metric, error) {
 	if !ValidPeriods[period] {
 		return nil, fmt.Errorf("invalid period %q: must be hourly or daily", period)
 	}
-
-	timeBucket := timeBucketExpr(period)
 
 	query := fmt.Sprintf(`
 		SELECT
@@ -99,14 +74,16 @@ func (s *Store) QueryServiceMetrics(tenantID, serviceID, period string, since, u
 			COALESCE(SUM(network_egress_bytes), 0)
 		FROM usage_events
 		WHERE tenant_id = ?
-		  AND service_id = ?
 		  AND recorded_at >= ?
 		  AND recorded_at <= ?
-		GROUP BY bucket
-		ORDER BY bucket ASC
-	`, timeBucket, SampleSeconds)
+	`, timeBucketExpr(period), SampleSeconds)
+	args := []any{tenantID, since.Unix(), until.Unix()}
 
-	args := []any{tenantID, serviceID, since.Unix(), until.Unix()}
+	if filterService {
+		query += " AND service_id = ?"
+		args = append(args, serviceID)
+	}
+	query += " GROUP BY bucket, svc_id ORDER BY bucket ASC"
 
 	return s.execMetricsQuery(query, args)
 }

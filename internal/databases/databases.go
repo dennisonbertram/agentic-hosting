@@ -249,6 +249,24 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("insert database after %d retries: %w", maxPortRetries, err)
 	}
 
+	// Docker cleanup on failure must survive a cancelled request context (the
+	// client may disconnect during the health wait), or the container leaks.
+	cleanupCtx := context.WithoutCancel(ctx)
+	// cleanup removes Docker resources after a failed or interrupted provision.
+	// When the row is already gone (a concurrent Delete ran first), that Delete
+	// may have missed the per-database network created afterwards; remove it.
+	cleanup := func(containerID string, rowGone bool) {
+		cctx, cancel := context.WithTimeout(cleanupCtx, containerCleanupTimeout)
+		defer cancel()
+		if containerID != "" {
+			m.removeContainer(cctx, containerID)
+		}
+		_ = m.docker.RemoveVolume(cctx, volumeName)
+		if rowGone {
+			m.removeDatabaseNetwork(cctx, tenantID, id)
+		}
+	}
+
 	// Create Docker volume
 	if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
 		m.updateStatus(ctx, id, "failed")
@@ -256,11 +274,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	// Run container
-	var containerID string
-	containerID, err = m.runContainer(ctx, req.Type, tenantID, id, containerName, volumeName, port, dbName, username, password)
+	containerID, err := m.runContainer(ctx, req.Type, tenantID, id, containerName, volumeName, port, dbName, username, password)
 	if err != nil {
-		m.updateStatus(ctx, id, "failed")
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		cleanup("", m.markFailed(ctx, id))
 		return nil, fmt.Errorf("run container: %w", err)
 	}
 
@@ -269,42 +285,22 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		`UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
 		containerID, time.Now().Unix(), id,
 	)
-	if updateErr != nil || result == nil {
-		log.Printf("databases: failed to update container_id for %s, cleaning up", id)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("database record deleted during provisioning")
+	if updateErr != nil {
+		// The row still exists: mark it failed so it stops counting toward quota.
+		log.Printf("databases: failed to update container_id for %s, cleaning up: %v", id, updateErr)
+		cleanup(containerID, m.markFailed(ctx, id))
+		return nil, fmt.Errorf("record database container: %w", updateErr)
 	}
 	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
 		log.Printf("databases: record %s was deleted during provisioning, cleaning up", id)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		cleanup(containerID, true)
 		return nil, fmt.Errorf("database record deleted during provisioning")
 	}
 
 	// Wait for health check
-	healthy := false
-	switch req.Type {
-	case "postgres":
-		healthy = m.waitForPostgres(port, password, 30*time.Second)
-	case "redis":
-		healthy = m.waitForRedis(port, password, 30*time.Second)
-	}
-
-	if !healthy {
-		if m.updateStatus(ctx, id, "failed") {
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
-			_ = m.docker.RemoveVolume(ctx, volumeName)
-		} else {
-			// Row was deleted concurrently — still clean up Docker resources
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
-			_ = m.docker.RemoveVolume(ctx, volumeName)
-		}
-		return nil, fmt.Errorf("database health check failed after 30s")
+	if !m.waitHealthy(req.Type, port, password) {
+		cleanup(containerID, m.markFailed(ctx, id))
+		return nil, fmt.Errorf("database health check failed after %s", m.readyTimeout())
 	}
 
 	// CAS provisioning -> ready: a tenant suspension that landed after the
@@ -318,9 +314,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, apierr.Conflict("database was stopped during provisioning (tenant suspended)")
 	default:
 		// Row was deleted during provisioning — clean up
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		cleanup(containerID, true)
 		return nil, fmt.Errorf("database record deleted during provisioning")
 	}
 
@@ -589,6 +583,24 @@ func (m *Manager) casStatus(ctx context.Context, id, from, to string) casResult 
 	return casGone
 }
 
+// markFailed sets a row to 'failed' on a detached context and reports whether
+// the row is confirmed gone (the update matched no row). A database error is
+// not treated as "gone": the row may still exist in 'provisioning' and own its
+// per-database network, so callers must not tear that network down.
+func (m *Manager) markFailed(ctx context.Context, id string) (rowGone bool) {
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	res, err := m.db.ExecContext(freshCtx,
+		`UPDATE databases SET status = 'failed', updated_at = ? WHERE id = ?`,
+		time.Now().Unix(), id)
+	if err != nil {
+		log.Printf("databases: failed to mark %s failed: %v", id, err)
+		return false
+	}
+	n, err := res.RowsAffected()
+	return err == nil && n == 0
+}
+
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {
 	// Use a fresh context to ensure status updates succeed even if the
 	// request context is cancelled or timed out.
@@ -632,8 +644,13 @@ func (m *Manager) findFreePort(dbType string) (int, error) {
 	usedPorts := make(map[int]bool)
 	for rows.Next() {
 		var p int
-		rows.Scan(&p)
+		if err := rows.Scan(&p); err != nil {
+			return 0, fmt.Errorf("scan port: %w", err)
+		}
 		usedPorts[p] = true
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate ports: %w", err)
 	}
 
 	// Find first free port
@@ -719,17 +736,7 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 		}
 		_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
 			containerID, time.Now().Unix(), d.id)
-		timeout := m.healthTimeout
-		if timeout == 0 {
-			timeout = 30 * time.Second
-		}
-		healthy := false
-		if d.typ == "redis" {
-			healthy = m.waitForRedis(d.port, password, timeout)
-		} else {
-			healthy = m.waitForPostgres(d.port, password, timeout)
-		}
-		if !healthy {
+		if !m.waitHealthy(d.typ, d.port, password) {
 			log.Printf("databases: StartAllForTenant health check failed for %s (left stopped; volume kept)", d.id)
 			m.removeContainer(ctx, containerID) // volume kept: it holds the data
 			_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = '', updated_at = ? WHERE id = ? AND container_id = ?`,
@@ -744,6 +751,23 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 		}
 		m.updateStatus(ctx, d.id, "ready")
 	}
+}
+
+// readyTimeout bounds readiness waits after a container (re)start.
+func (m *Manager) readyTimeout() time.Duration {
+	if m.healthTimeout > 0 {
+		return m.healthTimeout
+	}
+	return 30 * time.Second
+}
+
+// waitHealthy probes the engine on its host-loopback port until it is ready
+// or readyTimeout elapses.
+func (m *Manager) waitHealthy(dbType string, port int, password string) bool {
+	if dbType == "redis" {
+		return m.waitForRedis(port, password, m.readyTimeout())
+	}
+	return m.waitForPostgres(port, password, m.readyTimeout())
 }
 
 // tenantActive reports whether the tenant is currently 'active'.
@@ -761,7 +785,7 @@ func (m *Manager) removeContainer(ctx context.Context, containerID string) {
 func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int, dbName, user, password, networkName, networkAlias string) (string, error) {
 	return m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
 		Name:          name,
-		Image:         "postgres:16-alpine",
+		Image:         databaseImage("postgres"),
 		HostPort:      port,
 		ContainerPort: 5432,
 		Env: map[string]string{
@@ -779,7 +803,7 @@ func (m *Manager) runPostgres(ctx context.Context, name, volume string, port int
 func (m *Manager) runRedis(ctx context.Context, name, volume string, port int, password, networkName, networkAlias string) (string, error) {
 	return m.docker.RunDatabase(ctx, docker.RunDatabaseConfig{
 		Name:          name,
-		Image:         "redis:7-alpine",
+		Image:         databaseImage("redis"),
 		HostPort:      port,
 		ContainerPort: 6379,
 		Env:           map[string]string{},

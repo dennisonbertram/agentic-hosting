@@ -416,7 +416,9 @@ func TestSyncWorkspace_Success(t *testing.T) {
 		assert.Equal(t, "timeout", cmd[0])
 		assert.Equal(t, "sh", cmd[4])
 		assert.Equal(t, "-c", cmd[5])
-		assert.Contains(t, cmd[6], "https://github.com/test/repo.git")
+		// URL and ref travel as positional args, not inside the script.
+		assert.NotContains(t, cmd[6], "https://github.com/test/repo.git")
+		assert.Equal(t, []string{"sh", "https://github.com/test/repo.git", "HEAD"}, cmd[7:])
 		return "exec-sync", nil
 	}
 	mock.ExecRunFn = func(ctx context.Context, execID string, timeout time.Duration) ([]byte, []byte, int, error) {

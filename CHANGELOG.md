@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **Managed databases are reachable from tenant services (#164).** Each database gets `ah-dbnet-<tenant>-<db>` (`Internal=true`, `ICC=true`) with DNS alias `ah-db-<id>`. Connection strings use that alias and the container port (`5432` / `6379`). Deploy and restart attach services whose env contains the alias. Host-loopback publish is kept for health probes and never binds `0.0.0.0`. GC knows `ah-dbnet-*`. Existing encrypted URLs and matching `service_env` copies are rewritten on startup; running containers still need a restart.
+- **Resource managers no longer leak containers or wedge rows on failure.** Database and kanban create cleanup runs on a detached context (a client disconnect no longer leaks the container and volume), a failed `container_id` write marks the row `failed`, and a concurrent database delete no longer leaves the per-database network behind. Loopback URL migration ignores failed rows and no longer matches `127.0.0.1:5432` inside `127.0.0.1:54321`. Suspension keeps a `failed` kanban `failed`. Environment sync passes the git URL/ref as arguments (quotes and spaces work, and a requested ref is honored on a fresh clone) and rejects a `git_ref` starting with `-`. Stopping an environment whose container is already gone succeeds. Snapshot name filters treat `_` and `%` literally.
+- **`POST /v1/environments/{id}/lease` returns 409** (instead of a misleading 200) when the environment is stopped concurrently between the status check and the update.
 
 ### Added
 

@@ -63,6 +63,9 @@ type Manager struct {
 	baseURL            string // default "http://127.0.0.1"
 	portStart          int    // inclusive lower bound (default DefaultPortStart)
 	portEnd            int    // inclusive upper bound (default DefaultPortEnd)
+	// background tracks provisioning goroutines so their completion is
+	// observable (tests wait on it instead of sleeping).
+	background sync.WaitGroup
 }
 
 // NewManager creates a kanban manager with the default port range.
@@ -92,6 +95,12 @@ func NewManagerWithPortRange(db *sql.DB, dockerClient docker.Client, masterKey [
 	}
 	mgr.ReconcileStale()
 	return mgr
+}
+
+// waitBackground blocks until every background provisioning goroutine started
+// by Create (fresh provision or in-place restart) has finished.
+func (m *Manager) waitBackground() {
+	m.background.Wait()
 }
 
 // SetHealthCheckTimeout overrides the default health check timeout (for testing).
@@ -219,15 +228,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	}
 
 	volumeName := fmt.Sprintf("ah-kanban-%s", id)
-	tenantPrefix := tenantID
-	if len(tenantPrefix) > 8 {
-		tenantPrefix = tenantPrefix[:8]
-	}
-	idPrefix := id
-	if len(idPrefix) > 16 {
-		idPrefix = idPrefix[:16]
-	}
-	containerName := fmt.Sprintf("ah-kanban-%s-%s", tenantPrefix, idPrefix)
+	containerName := containerNameFor(tenantID, id)
 	publicURL := fmt.Sprintf("%s.kanban.agentic.hosting", tenantID)
 
 	// Find free port and insert atomically — retry only on port UNIQUE violation
@@ -263,6 +264,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		return nil, fmt.Errorf("insert kanban after %d retries: %w", maxPortRetries, err)
 	}
 
+	// Cleanup must survive a cancelled request context, or a client that
+	// disconnects mid-create leaks the container and volume.
+	cleanup := func(containerID string) {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if containerID != "" {
+			m.removeContainer(cctx, containerID)
+		}
+		_ = m.docker.RemoveVolume(cctx, volumeName)
+	}
+
 	// Create Docker volume
 	if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
 		m.updateStatus(ctx, id, "failed")
@@ -273,7 +285,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerName, volumeName, publicURL, jwtSecret, port))
 	if err != nil {
 		m.updateStatus(ctx, id, "failed")
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		cleanup("")
 		return nil, fmt.Errorf("run container: %w", err)
 	}
 
@@ -282,18 +294,16 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		`UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`,
 		containerID, time.Now().Unix(), id,
 	)
-	if updateErr != nil || result == nil {
-		log.Printf("kanbans: failed to update container_id for %s, cleaning up", id)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
-		return nil, fmt.Errorf("kanban record deleted during provisioning")
+	if updateErr != nil {
+		// The row still exists: mark it failed so a re-create can replace it.
+		log.Printf("kanbans: failed to update container_id for %s, cleaning up: %v", id, updateErr)
+		m.updateStatus(ctx, id, "failed")
+		cleanup(containerID)
+		return nil, fmt.Errorf("record kanban container: %w", updateErr)
 	}
 	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
 		log.Printf("kanbans: record %s was deleted during provisioning, cleaning up", id)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		_ = m.docker.RemoveVolume(ctx, volumeName)
+		cleanup(containerID)
 		return nil, fmt.Errorf("kanban record deleted during provisioning")
 	}
 
@@ -301,7 +311,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 	// storage, and final status transition. The API returns immediately with
 	// status "provisioning" so the caller is never blocked on a 60-second
 	// health check.
-	go m.provision(id, tenantID, containerID, volumeName, publicURL, port, adminPassword)
+	m.background.Add(1)
+	go func() {
+		defer m.background.Done()
+		m.provision(id, tenantID, containerID, volumeName, publicURL, port, adminPassword)
+	}()
 
 	return &Kanban{
 		ID:         id,
@@ -356,25 +370,23 @@ func (m *Manager) restartFailedInPlace(ctx context.Context, tenantID, id, volume
 		m.updateStatus(ctx, id, "failed")
 		return nil, err
 	}
-	tenantPrefix, idPrefix := tenantID, id
-	if len(tenantPrefix) > 8 {
-		tenantPrefix = tenantPrefix[:8]
-	}
-	if len(idPrefix) > 16 {
-		idPrefix = idPrefix[:16]
-	}
-	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(fmt.Sprintf("ah-kanban-%s-%s", tenantPrefix, idPrefix), volume, publicURL, jwtSecret, port))
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerNameFor(tenantID, id), volume, publicURL, jwtSecret, port))
 	if err != nil {
 		m.updateStatus(ctx, id, "failed") // volume kept: it holds the board data
 		return nil, fmt.Errorf("run container: %w", err)
 	}
 	if _, err := m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`, containerID, time.Now().Unix(), id); err != nil {
-		m.removeContainer(ctx, containerID)
+		// Detached: a cancelled request must not leave the container running.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		m.removeContainer(cctx, containerID)
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("store container id: %w", err)
 	}
 
+	m.background.Add(1)
 	go func() {
+		defer m.background.Done()
 		bg, cancel := context.WithTimeout(context.Background(), m.healthCheckTimeout+30*time.Second)
 		defer cancel()
 		if !m.waitForHTTP(bg, port, m.healthCheckTimeout) {
@@ -477,12 +489,7 @@ func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
 		log.Printf("kanbans: StartForTenant: %v", err)
 		return
 	}
-	prefix := tenantID
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
-	}
-	name := fmt.Sprintf("ah-kanban-%s-%s", prefix, id[:16])
-	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(name, volume, publicURL, jwtSecret, port))
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(containerNameFor(tenantID, id), volume, publicURL, jwtSecret, port))
 	if err != nil {
 		log.Printf("kanbans: StartForTenant run container for %s: %v", id, err)
 		m.updateStatus(ctx, id, "failed")
@@ -503,6 +510,17 @@ func (m *Manager) StartForTenant(ctx context.Context, tenantID string) {
 		return
 	}
 	m.updateStatus(ctx, id, "ready")
+}
+
+// containerNameFor returns the Docker container name of a tenant's board.
+func containerNameFor(tenantID, id string) string {
+	if len(tenantID) > 8 {
+		tenantID = tenantID[:8]
+	}
+	if len(id) > 16 {
+		id = id[:16]
+	}
+	return fmt.Sprintf("ah-kanban-%s-%s", tenantID, id)
 }
 
 // tenantActive reports whether the tenant is currently 'active'.
@@ -543,9 +561,7 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 	}
 
 	// Setup Vikunja (create admin user, project, buckets)
-	setupToken, setupErr := m.setupVikunja(port, tenantID, adminPassword)
-	_ = setupToken
-	if setupErr != nil {
+	if _, setupErr := m.setupVikunja(port, tenantID, adminPassword); setupErr != nil {
 		// Without the admin user the stored credentials are useless, so don't report ready.
 		log.Printf("kanbans: setup failed for %s, cleaning up: %v", id, setupErr)
 		m.updateStatus(ctx, id, "failed")
@@ -694,6 +710,12 @@ func (m *Manager) StopForTenant(ctx context.Context, tenantID string) {
 		}
 	}
 
+	if k.Status == "failed" {
+		// A failed board must not become restartable (its volume may be gone);
+		// just drop the stale container reference.
+		_, _ = m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = NULL WHERE id = ?`, k.ID)
+		return
+	}
 	m.updateStatus(ctx, k.ID, "stopped")
 	log.Printf("kanbans: StopForTenant stopped kanban board for tenant %s", tenantID)
 }

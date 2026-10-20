@@ -5,14 +5,16 @@ go 1.25.0
 require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/mattn/go-sqlite3 v1.14.34
-	golang.org/x/crypto v0.48.0
+	github.com/spf13/cobra v1.10.2
 	golang.org/x/time v0.15.0
 )
 
 require (
+	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 )
 
 require (
@@ -45,6 +47,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.41.0
 	gotest.tools/v3 v3.5.2 // indirect
 )

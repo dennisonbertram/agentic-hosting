@@ -154,6 +154,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 		if _, err := drainer.drain(logCb); err != nil {
 			cleanBuildDir = false
 			stopBuildWorker(req.BuildID)
+			drainer.flush(logCb)
 			return fmt.Errorf("read build log: %w", err)
 		}
 		if ctx.Err() != nil {
@@ -187,6 +188,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest, logCb func(string
 				n, drainErr := drainer.drain(logCb)
 				if drainErr != nil {
 					cleanBuildDir = false
+					drainer.flush(logCb)
 					return fmt.Errorf("read completed build log: %w", drainErr)
 				}
 				if n == 0 {
@@ -296,13 +298,20 @@ type buildLogDrainer struct {
 	reader  *bufio.Reader
 	pending []byte
 	discard bool
+	// crEmitted is set when the previous byte was a '\r' that ended a
+	// non-empty line, so the '\n' of that CRLF pair does not emit a second,
+	// empty line. A CRLF with nothing pending (a blank CRLF line) still emits
+	// an empty line on its '\n', matching LF output.
+	crEmitted bool
 }
 
 // drain reads at most 64 KiB per call and retains at most 16 KiB of any one
 // line. This keeps log streaming from starving cancellation and unit polling.
 // A line still being written by the worker (no newline yet at EOF) is held
 // until a later drain completes it, or until flush once the worker is done;
-// emitting it at EOF would split one log line in two.
+// emitting it at EOF would split one log line in two. A bare '\r' (progress
+// output that redraws one line) also ends a line, so such output keeps
+// streaming instead of piling up until the 16 KiB cap; CRLF counts once.
 func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 	const maxPass, maxLine = 64 * 1024, 16 * 1024
 	read := 0
@@ -315,8 +324,19 @@ func (d *buildLogDrainer) drain(logCb func(string)) (int, error) {
 			return read, err
 		}
 		read++
-		if b == '\n' {
-			d.emit(logCb)
+		crEmitted := d.crEmitted
+		d.crEmitted = false
+		switch {
+		case b == '\r':
+			if len(d.pending) > 0 {
+				d.emit(logCb)
+				d.crEmitted = true
+			}
+			continue
+		case b == '\n':
+			if !crEmitted {
+				d.emit(logCb)
+			}
 			continue
 		}
 		if !d.discard {

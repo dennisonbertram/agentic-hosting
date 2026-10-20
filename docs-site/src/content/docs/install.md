@@ -101,6 +101,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ah
 ```
 
+Optional runtime settings for `/etc/default/ah`:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AH_CONTAINER_RUNTIME` | `runsc` | OCI runtime for every tenant workload, database, environment and wipe container. `runc` is a dev-only fallback for hosts without gVisor (macOS): it has no syscall sandbox, and `ah` refuses it unless started with `--dev`. |
+| `AH_WARM_POOL_ENABLED` | `true` | `false` disables the pre-started environment containers. The local sandbox turns it off so it does not pull every template image. |
+| `AH_GC_PRUNE_DOCKER` | `true` | `false` stops GC from running daemon-wide dangling-image and unused anonymous-volume prunes. Set it when the Docker daemon is shared with unrelated work. |
+
+`GET /v1/system/health/detailed` reports the active runtime as `container_runtime`.
+
 The unit runs `ah serve --port 8080 --db-path /var/lib/ah/ah.db --master-key-path /var/lib/ah/master.key` as user `ah` with Docker socket access. Create that system user before enabling the unit.
 
 Health check from the host (HTTPS middleware only trusts loopback + `X-Forwarded-Proto`):

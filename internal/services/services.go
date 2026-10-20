@@ -861,7 +861,9 @@ func (m *Manager) activateContainer(ctx context.Context, tenantID string, svc *S
 		m.updateDeploymentStatus(context.WithoutCancel(ctx), deployID, deployments.StatusFailed, deployments.WithError(errDeployInterrupted), deployments.WithCompletedAt(time.Now().Unix()))
 		return errInterrupted
 	}
-	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
+	// Detached like the failure paths: the service row already says running,
+	// so a deadline that expires now must not leave the deployment 'deploying'.
+	m.updateDeploymentStatus(context.WithoutCancel(ctx), deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
 	return nil
 }
 

@@ -68,9 +68,12 @@ Auth. Cached 30s. `?fresh=true` bypasses and refreshes the cache.
     "build_cache_size_bytes": 0,
     "total_size_gb": 0
   },
-  "traefik_networks": 0
+  "traefik_networks": 0,
+  "container_runtime": "runsc"
 }
 ```
+
+`container_runtime` is the OCI runtime tenant workloads use (`AH_CONTAINER_RUNTIME`): `runsc` (gVisor) in production, `runc` only in a `--dev` sandbox. Omitted when unknown.
 
 `status` becomes `degraded` if SQLite ping fails, either disk path is >90%, or `ah-tenant-*` networks > 200.
 

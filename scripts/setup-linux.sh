@@ -7,7 +7,8 @@
 # Existing host:  idempotent upgrade/repair: rebuilds and reinstalls ah + ahc,
 #                 refreshes changed systemd units, fixes key/config
 #                 permissions, adds a missing AH_ADMIN_TOKEN, restarts only
-#                 what changed, and runs the health check. Never regenerates
+#                 what changed (ah, ah-build-broker, ah-api-proxy), and runs
+#                 the health check. Never regenerates
 #                 the master key or bootstrap token.
 #
 # See docs/runbooks/setup-linux.md. Kept bash 3.2 compatible so --dry-run and
@@ -36,8 +37,10 @@ the systemd units and checks API health. This script then installs ahc.
 
 Existing install (state in /var/lib/ah and /etc/default/ah): rebuilds and
 reinstalls ah and ahc, refreshes changed systemd units, repairs key and
-config permissions, adds AH_ADMIN_TOKEN if missing, restarts ah when
-something changed, and checks health. Keys and tokens are never replaced.
+config permissions, adds AH_ADMIN_TOKEN if missing, restarts ah,
+ah-build-broker and ah-api-proxy when their binary or unit changed, and
+checks health. Keys and tokens are never replaced. Once AH_ADMIN_TOKEN is
+set, the bootstrap token no longer authorizes recover, reactivate or quota.
 
 Options:
   --domain DOMAIN             Parent domain (fresh installs; API at api.DOMAIN,
@@ -154,10 +157,12 @@ case "$mode" in
   existing)
     echo '  1. verify Docker is active and has the runsc runtime; start stopped paas-traefik'
     echo '  2. repair permissions: /var/lib/ah 0750 ah:ah, master.key 0600 ah:ah, /etc/default/ah 0600 root'
-    echo '  3. add AH_ADMIN_TOKEN to /etc/default/ah if it is missing (bootstrap token untouched)'
+    echo '  3. add AH_ADMIN_TOKEN to /etc/default/ah if it is missing (bootstrap token untouched;'
+    echo '     once it is set, bootstrap tokens no longer authorize recover, reactivate or quota)'
     echo '  4. rebuild ah and ahc; install to /usr/local/bin only if they changed'
     echo '  5. reinstall changed systemd units from deploy/; daemon-reload'
-    echo '  6. enable ah-api-proxy, ah-build-broker, ah; restart ah only if something changed'
+    echo '  6. enable ah-api-proxy, ah-build-broker, ah; restart ah only if something changed,'
+    echo '     ah-build-broker if the ah binary or its unit changed, ah-api-proxy if its unit changed'
     echo '  7. health check: GET http://127.0.0.1:8080/v1/system/health'
     ;;
   partial)
@@ -167,7 +172,11 @@ case "$mode" in
 esac
 
 if ((dry_run)); then
-  if [[ $mode == fresh && $problems == 0 ]]; then
+  if [[ $mode == fresh && $problems == 0 && -n $root ]]; then
+    # Test hook: a fake host root must not run the real installer preflight
+    # against this machine (it checks Docker, daemon.json and ports).
+    log 'skipping the installer preflight (AH_SETUP_ROOT test hook)'
+  elif [[ $mode == fresh && $problems == 0 ]]; then
     log 'running the installer preflight (bootstrap-stack.sh --dry-run)'
     args=(--domain "$domain" --dry-run)
     if ((external_tls)); then args+=(--external-tls-terminated); else args+=(--acme-email "$email"); fi
@@ -196,11 +205,14 @@ build_cli() {
   log 'building ahc'
   (cd "$repo_root" && "$(go_bin)" build -trimpath -ldflags='-s -w' -o "$tmpdir/ahc" ./cmd/ahc)
 }
-# install_if_changed SRC DEST MODE: prints "changed" when DEST was replaced.
+# install_if_changed SRC DEST MODE: returns 0 when DEST was replaced and 1
+# when it was already identical. Exits the script if install fails. Call it
+# directly (e.g. in an if), never inside $(...): errexit does not apply in a
+# command substitution, so a failed install could be mistaken for success.
 install_if_changed() {
-  if [[ -f $2 ]] && cmp -s "$1" "$2"; then return 0; fi
-  install -o root -g root -m "$3" "$1" "$2"
-  echo changed
+  if [[ -f $2 ]] && cmp -s "$1" "$2"; then return 1; fi
+  install -o root -g root -m "$3" "$1" "$2" || die "failed to install $2"
+  return 0
 }
 health_check() {
   local _
@@ -222,7 +234,7 @@ if [[ $mode == fresh ]]; then
   ((skip_website)) && args+=(--skip-website)
   "$bootstrap" "${args[@]}"
   build_cli
-  install_if_changed "$tmpdir/ahc" /usr/local/bin/ahc 0755 >/dev/null
+  install_if_changed "$tmpdir/ahc" /usr/local/bin/ahc 0755 || :
   health_check
 else
   systemctl is-active --quiet docker || systemctl start docker
@@ -241,30 +253,50 @@ else
   chown root:root /etc/default/ah
   chmod 0600 /etc/default/ah
 
-  changed=0
+  changed=0 admin_token_added=0
   if ! grep -q '^AH_ADMIN_TOKEN=.\{32,\}' /etc/default/ah; then
     log 'adding a generated AH_ADMIN_TOKEN to /etc/default/ah'
     sed -i '/^AH_ADMIN_TOKEN=/d' /etc/default/ah
     printf 'AH_ADMIN_TOKEN=%s\n' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" >> /etc/default/ah
-    changed=1
+    changed=1 admin_token_added=1
+    warn 'behaviour change: bootstrap tokens no longer authorize recover, reactivate or quota update'
+    warn 'use AH_ADMIN_TOKEN from /etc/default/ah for those operations (ahc recover, reactivation, quota)'
   fi
 
   log 'building ah'
   (cd "$repo_root" && CGO_ENABLED=1 "$(go_bin)" build -trimpath -ldflags='-s -w' -o "$tmpdir/ah" ./cmd/ah)
   build_cli
-  [[ -n $(install_if_changed "$tmpdir/ah" /usr/local/bin/ah 0755) ]] && changed=1
-  install_if_changed "$tmpdir/ahc" /usr/local/bin/ahc 0755 >/dev/null
+  # ah-build-broker runs the same /usr/local/bin/ah binary, so a new binary
+  # means restarting it too, or it keeps running the old (deleted) one next to
+  # a new ah serve and new per-build ah build-worker processes.
+  ah_bin_changed=0
+  if install_if_changed "$tmpdir/ah" /usr/local/bin/ah 0755; then ah_bin_changed=1 changed=1; fi
+  install_if_changed "$tmpdir/ahc" /usr/local/bin/ahc 0755 || :
 
-  units_changed=0
+  units_changed=0 broker_restart=$ah_bin_changed proxy_restart=0
   for unit in ah.service ah-api-proxy.service ah-build-broker.service ah-build@.service; do
-    if [[ -n $(install_if_changed "$repo_root/deploy/$unit" "/etc/systemd/system/$unit" 0644) ]]; then
+    if install_if_changed "$repo_root/deploy/$unit" "/etc/systemd/system/$unit" 0644; then
       log "updated unit $unit"
       units_changed=1
+      case "$unit" in
+        ah-build-broker.service) broker_restart=1 ;;
+        ah-api-proxy.service) proxy_restart=1 ;;
+      esac
     fi
   done
   if ((units_changed)); then systemctl daemon-reload; changed=1; fi
+  # enable --now does not restart a unit that is already running, so changed
+  # binaries and unit settings (including hardening) need an explicit restart.
   systemctl enable --now ah-api-proxy.service ah-build-broker.service >/dev/null
   systemctl enable ah.service >/dev/null
+  if ((proxy_restart)); then
+    log 'restarting ah-api-proxy (unit changed)'
+    systemctl restart ah-api-proxy.service
+  fi
+  if ((broker_restart)); then
+    log 'restarting ah-build-broker (ah binary or unit changed)'
+    systemctl restart ah-build-broker.service
+  fi
   if ((changed)) || ! systemctl is-active --quiet ah; then
     log 'restarting ah'
     systemctl restart ah.service
@@ -272,6 +304,10 @@ else
     log 'ah unchanged; not restarting'
   fi
   health_check
+  if ((admin_token_added)); then
+    warn 'AH_ADMIN_TOKEN was added: the bootstrap token no longer authorizes recover, reactivate or'
+    warn 'quota update. Use AH_ADMIN_TOKEN from /etc/default/ah for those operations.'
+  fi
 fi
 
 cat <<EOF

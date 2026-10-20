@@ -77,6 +77,63 @@ func TestBuildLogDrainer_TruncatesOverlongLineAndStripsControls(t *testing.T) {
 	assert.Equal(t, "ok[31m\tx", got[1], "control characters except tab are removed")
 }
 
+func TestBuildLogDrainer_BareCRStreamsProgressAndCRLFCountsOnce(t *testing.T) {
+	// Progress output that only redraws with '\r' must stream per update, and
+	// a CRLF split across reads must not produce an extra empty line.
+	r := &chunkReader{chunks: []string{"10%\r20%\r30%", "", "\r", "", "\ndone\n\nlast\r"}}
+	d := &buildLogDrainer{reader: bufio.NewReader(r)}
+	var got []string
+	cb := func(l string) { got = append(got, l) }
+	for i := 0; i < 3; i++ {
+		_, err := d.drain(cb)
+		require.NoError(t, err)
+	}
+	d.flush(cb)
+	assert.Equal(t, []string{"10%", "20%", "30%", "done", "", "last"}, got)
+
+	// Blank lines in CRLF output must survive just as they do in LF output,
+	// including when the CRLF pair is split across reads.
+	for _, chunks := range [][]string{
+		{"a\r\n\r\nb\n"},
+		{"a\r", "", "\n\r", "", "\nb\n"},
+		{"a\n\nb\n"},
+	} {
+		d := &buildLogDrainer{reader: bufio.NewReader(&chunkReader{chunks: chunks})}
+		var lines []string
+		cb := func(l string) { lines = append(lines, l) }
+		for i := 0; i < len(chunks)+1; i++ {
+			_, err := d.drain(cb)
+			require.NoError(t, err)
+		}
+		d.flush(cb)
+		assert.Equal(t, []string{"a", "", "b"}, lines, "chunks %q", chunks)
+	}
+}
+
+// errAfterReader returns data, then a non-EOF error.
+type errAfterReader struct {
+	data string
+	done bool
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.done = true
+	return copy(p, r.data), nil
+}
+
+func TestBuildLogDrainer_FlushAfterReadErrorKeepsPartialLine(t *testing.T) {
+	d := &buildLogDrainer{reader: bufio.NewReader(&errAfterReader{data: "ok\npartial"})}
+	var got []string
+	cb := func(l string) { got = append(got, l) }
+	_, err := d.drain(cb)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	d.flush(cb)
+	assert.Equal(t, []string{"ok", "partial"}, got)
+}
+
 func TestBuildLogDrainer_NilCallback(t *testing.T) {
 	d := &buildLogDrainer{reader: bufio.NewReader(strings.NewReader("a\nb"))}
 	n, err := d.drain(nil)

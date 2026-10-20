@@ -24,6 +24,15 @@ If tenant ID is missing on an authenticated route, the limiter **fails closed** 
 
 LRU cap 10_000 tenant buckets; idle entries dropped after 1 hour (cleanup every 5 minutes).
 
+## Sandbox creates
+
+`POST /v1/sandboxes` also passes a per-tenant create limiter: **20 per minute**, burst **10**, independent of `api_rate_limit`. It reports itself in its own headers, so `X-RateLimit-*` keep describing the per-tenant limit above:
+
+- `X-Sandbox-Create-RateLimit-Limit` (requests/second, `0.333`)
+- `X-Sandbox-Create-RateLimit-Remaining`
+
+On exceed: **429** plus `Retry-After`.
+
 ## Global
 
 `middleware.NewGlobalRateLimiter(500, 1000)` — **500 rps**, burst **1000**, process-wide.

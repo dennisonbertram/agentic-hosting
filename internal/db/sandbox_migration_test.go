@@ -68,6 +68,14 @@ func TestSandboxMigration_DefaultsExistingRows(t *testing.T) {
 	assert.Equal(t, 14400, ttl)
 	assert.Equal(t, 86400, lifetime)
 	assert.Zero(t, egressAllowed)
+
+	// 022: existing rows keep the volume workspace (disk_mb 0) and get the
+	// default tenant workspace cap.
+	var diskMB, maxDisk int
+	require.NoError(t, sqlDB.QueryRow(`SELECT disk_mb FROM environments WHERE id='e1'`).Scan(&diskMB))
+	require.NoError(t, sqlDB.QueryRow(`SELECT max_sandbox_disk_mb FROM tenant_quotas WHERE tenant_id='t1'`).Scan(&maxDisk))
+	assert.Zero(t, diskMB)
+	assert.Equal(t, 1024, maxDisk)
 }
 
 func TestMeteringMigration_ResourceKind(t *testing.T) {

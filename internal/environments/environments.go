@@ -123,6 +123,10 @@ type Manager struct {
 	snapshotSource    SnapshotSource
 	serviceSource     ServiceSource
 	diskCheck         func() error
+	// Phase 2 hardening (see sandbox_hardening.go); all off by default.
+	sandboxEgressNetwork  string // egress bridge name; "" = egress "internet" refused
+	sandboxRuntime        string // OCI runtime for sandboxes; "" = the client's runtime
+	sandboxWorkspaceTmpfs bool   // /workspace is a tmpfs of disk_mb, no volume
 }
 
 // SetExternalTLSTerminated configures preview routes for deployments where a
@@ -241,6 +245,10 @@ type createSpec struct {
 	sourceRef    string
 	runMode      string
 	egress       string
+	// Sandbox hardening (zero values keep the environment behaviour).
+	runtime          string // OCI runtime override
+	workspaceTmpfsMB int    // >0: tmpfs /workspace of this size, no volume
+	egressNetwork    string // attach only to this egress bridge, not the tenant network
 }
 
 // created is what create returns to the kind-specific wrappers.
@@ -286,6 +294,10 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 
 	now := time.Now().Unix()
 	volumeName := fmt.Sprintf("ah-env-%s", id)
+	if spec.workspaceTmpfsMB > 0 {
+		// The workspace is a tmpfs: no volume is created, stored or removed.
+		volumeName = ""
+	}
 	var maxExpires any
 	if spec.maxExpiresAt > 0 {
 		maxExpires = spec.maxExpiresAt
@@ -299,12 +311,12 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO environments (id, tenant_id, name, template_id, status, volume_name,
 		 lease_duration_seconds, created_at, updated_at, kind, source_type, source_ref,
-		 image_ref, run_mode, memory_mb, cpu_millicores, egress, max_expires_at)
-		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 image_ref, run_mode, memory_mb, cpu_millicores, egress, max_expires_at, disk_mb)
+		 SELECT ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		 WHERE (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = ? AND status NOT IN ('failed')) < ?
 		 AND (? <= 0 OR (SELECT COUNT(*) FROM environments WHERE kind = ? AND status NOT IN ('failed')) < ?)`,
 		id, tenantID, spec.name, spec.templateID, volumeName, spec.leaseSec, now, now,
-		spec.kind, spec.sourceType, spec.sourceRef, spec.image, spec.runMode, spec.memoryMB, spec.cpuMillis, spec.egress, maxExpires,
+		spec.kind, spec.sourceType, spec.sourceRef, spec.image, spec.runMode, spec.memoryMB, spec.cpuMillis, spec.egress, maxExpires, spec.workspaceTmpfsMB,
 		tenantID, spec.kind, maxPerTenant,
 		globalCap, spec.kind, globalCap,
 	)
@@ -320,9 +332,12 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 		return nil, fmt.Errorf("insert %s: %w", label, err)
 	}
 
-	// Ensure tenant network (needed for both warm and cold paths).
+	// Ensure tenant network (needed for both warm and cold paths). An egress
+	// sandbox is attached only to the egress bridge, never the tenant network.
 	tenantNet := docker.TenantNetworkName(tenantID)
-	if _, err := m.docker.EnsureNetwork(ctx, tenantNet); err != nil {
+	if spec.egressNetwork != "" {
+		tenantNet = spec.egressNetwork
+	} else if _, err := m.docker.EnsureNetwork(ctx, tenantNet); err != nil {
 		m.updateStatus(ctx, id, "failed")
 		return nil, fmt.Errorf("ensure network: %w", err)
 	}
@@ -331,7 +346,10 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 	// get a pre-warmed container.
 	var containerID string
 	usedPool := false
-	if m.pool != nil && spec.poolTmplID != "" {
+	// Pool containers use the default runtime, a workspace volume and the
+	// tenant network, so hardened sandboxes never take one.
+	poolOK := spec.runtime == "" && spec.workspaceTmpfsMB == 0 && spec.egressNetwork == ""
+	if m.pool != nil && spec.poolTmplID != "" && poolOK {
 		poolContainerID, poolVolumeName, poolErr := m.pool.AcquireForEnvironment(ctx, spec.poolTmplID, tenantID, id)
 		if poolErr == nil {
 			log.Printf("environments: using warm container %s for env %s", poolContainerID[:min(12, len(poolContainerID))], id)
@@ -368,9 +386,11 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 
 	if !usedPool {
 		// Cold-start path: create a new volume and run a fresh container.
-		if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
-			m.updateStatus(ctx, id, "failed")
-			return nil, fmt.Errorf("create volume: %w", err)
+		if volumeName != "" {
+			if err := m.docker.CreateVolume(ctx, volumeName); err != nil {
+				m.updateStatus(ctx, id, "failed")
+				return nil, fmt.Errorf("create volume: %w", err)
+			}
 		}
 
 		containerID, err = m.docker.RunEnvironment(ctx, docker.RunEnvironmentConfig{
@@ -386,10 +406,16 @@ func (m *Manager) create(ctx context.Context, tenantID string, spec createSpec) 
 			Env:         spec.env,
 			UseImageCmd: spec.useImageCmd,
 			LocalImage:  spec.localImage,
+
+			Runtime:          spec.runtime,
+			WorkspaceTmpfsMB: spec.workspaceTmpfsMB,
+			EgressNetwork:    spec.egressNetwork != "",
 		})
 		if err != nil {
 			m.updateStatus(ctx, id, "failed")
-			_ = m.docker.RemoveVolume(ctx, volumeName)
+			if volumeName != "" {
+				_ = m.docker.RemoveVolume(ctx, volumeName)
+			}
 			return nil, fmt.Errorf("run %s: %w", label, err)
 		}
 	}

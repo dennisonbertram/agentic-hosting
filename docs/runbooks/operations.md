@@ -142,6 +142,8 @@ Generate a token with `od -An -N32 -tx1 /dev/urandom | tr -d ' \n'`.
 |---|---|
 | `FATAL: gVisor runtime (runsc) not found in Docker daemon` | `/etc/docker/daemon.json` lost its `runtimes.runsc` entry, or `runsc` was removed. Restore `{"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}, …}`, run `systemctl restart docker`, and check `docker info \| grep -i runtimes` |
 | `FATAL: AH_CONTAINER_RUNTIME=runc is a dev-only fallback and requires --dev` | Someone set the sandbox runtime on a server. Remove `AH_CONTAINER_RUNTIME` from `/etc/default/ah`. Production must use `runsc` |
+| `FATAL: AH_SANDBOX_RUNTIME=… is not registered with Docker` / `… is not gVisor` / `AH_SANDBOX_RUNTIME=runc … requires --dev` | The disposable-sandbox runtime is set but Docker does not have it (or it is not runsc). Run `scripts/setup-linux.sh --sandbox-hardening`, or remove `AH_SANDBOX_RUNTIME` from `/etc/default/ah`. See [sandboxes-hardening.md](sandboxes-hardening.md) |
+| `WARNING: sandbox egress is DISABLED: …` | `AH_SANDBOX_EGRESS_NETWORK` is set but the egress bridge or its host firewall rules could not be verified, so `egress: "internet"` keeps returning 403. Fix the reason in the log and restart ah. See [sandboxes-hardening.md](sandboxes-hardening.md) |
 | `FATAL: invalid configuration: …` | An `AH_*` value does not parse (for example `AH_SNAPSHOT_MAX_AGE`, `AH_KANBAN_PORT_*`, `AH_WARM_POOL_ENABLED`). Fix the named variable |
 | `AH_BOOTSTRAP_TOKEN must be set` / `must be at least 32 characters` | `/etc/default/ah` is missing or has a short token |
 | `master key file … contains N characters (expected 64)` | The key file is not 64 hex characters. Restore it from your secret store. Never generate a new one in place: that makes existing data unreadable |

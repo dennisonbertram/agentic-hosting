@@ -108,6 +108,12 @@ Optional runtime settings for `/etc/default/ah`:
 | `AH_CONTAINER_RUNTIME` | `runsc` | OCI runtime for every tenant workload, database, environment and wipe container. `runc` is a dev-only fallback for hosts without gVisor (macOS): it has no syscall sandbox, and `ah` refuses it unless started with `--dev`. |
 | `AH_WARM_POOL_ENABLED` | `true` | `false` disables the pre-started environment containers. The local sandbox turns it off so it does not pull every template image. |
 | `AH_GC_PRUNE_DOCKER` | `true` | `false` stops GC from running daemon-wide dangling-image and unused anonymous-volume prunes. Set it when the Docker daemon is shared with unrelated work. |
+| `AH_MAX_SANDBOXES_TOTAL` | `20` | Host-wide cap on disposable sandboxes (`--max-sandboxes-total`; 0 = no cap). |
+| `AH_SANDBOX_EGRESS_NETWORK` | empty | Bridge for sandboxes with `egress: "internet"` (`--sandbox-egress-network`). Empty disables egress. Needs the host firewall rules; see `docs/runbooks/sandboxes-hardening.md`. Unverified on the production host. |
+| `AH_SANDBOX_EGRESS_SUBNET` | `10.250.0.0/24` | IPv4 subnet of that bridge. |
+| `AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK` | `false` | Enables egress without verifying the firewall rules. Only for hosts that filter the bridge some other way. |
+| `AH_SANDBOX_RUNTIME` | empty | OCI runtime for disposable sandboxes, e.g. `runsc-sbx` (`runsc --overlay2=root:memory`). Must be registered with Docker and be gVisor outside `--dev`, or `ah` refuses to start. Empty uses `AH_CONTAINER_RUNTIME`. |
+| `AH_SANDBOX_WORKSPACE_TMPFS` | `false` | `true` makes each sandbox's `/workspace` a tmpfs of its `disk_mb` (hard size limit, counted against memory) instead of a volume. Unverified on the production host. |
 
 `GET /v1/system/health/detailed` reports the active runtime as `container_runtime`.
 

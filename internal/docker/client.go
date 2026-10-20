@@ -1137,6 +1137,18 @@ type RunEnvironmentConfig struct {
 	// LocalImage tolerates a failed pull when the image is already in the
 	// local store (snapshot and service build tags never exist upstream).
 	LocalImage bool
+	// Runtime overrides the client's OCI runtime for this container (the
+	// sandbox runtime, e.g. runsc-sbx). Empty uses the client's runtime.
+	Runtime string
+	// WorkspaceTmpfsMB > 0 mounts /workspace as a tmpfs of that size instead
+	// of the VolumeName volume (VolumeName is then ignored). Under gVisor the
+	// tmpfs lives in sandbox memory, so the memory cgroup bounds it.
+	WorkspaceTmpfsMB int
+	// EgressNetwork marks NetworkName as the sandbox egress bridge. That
+	// network is created once at startup by EnsureSandboxEgressNetwork (not
+	// internal, ICC off); RunEnvironment must not create it here as an
+	// internal tenant network, so it only attaches the container to it.
+	EgressNetwork bool
 }
 
 // RunEnvironment creates and starts an environment container with gVisor runtime.
@@ -1149,13 +1161,21 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 		return "", fmt.Errorf("pull image %s: %w", cfg.Image, err)
 	}
 
-	containerCfg, hostCfg := environmentContainerConfigs(cfg, c.Runtime())
+	runtime := c.Runtime()
+	if cfg.Runtime != "" {
+		runtime = cfg.Runtime
+	}
+	containerCfg, hostCfg := environmentContainerConfigs(cfg, runtime)
 
 	netCfg := &network.NetworkingConfig{}
 
-	// Ensure the tenant network exists before creating the container.
-	if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
-		return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+	// Ensure the tenant network exists before creating the container. The
+	// sandbox egress bridge is never created here: it must already exist
+	// with its egress settings, or ContainerCreate fails.
+	if !cfg.EgressNetwork {
+		if _, err := c.EnsureNetwork(ctx, cfg.NetworkName); err != nil {
+			return "", fmt.Errorf("ensure network %s: %w", cfg.NetworkName, err)
+		}
 	}
 
 	resp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, netCfg, nil, name)
@@ -1211,13 +1231,7 @@ func environmentContainerConfigs(cfg RunEnvironmentConfig, runtime string) (*con
 		},
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges"},
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeVolume,
-				Source: cfg.VolumeName,
-				Target: "/workspace",
-			},
-		},
+		Mounts:      []mount.Mount{workspaceMount(cfg)},
 		Tmpfs: map[string]string{
 			"/tmp":     "rw,noexec,nosuid,size=64m",
 			"/var/run": "rw,noexec,nosuid,size=16m",
@@ -1228,6 +1242,26 @@ func environmentContainerConfigs(cfg RunEnvironmentConfig, runtime string) (*con
 		NetworkMode:   container.NetworkMode(cfg.NetworkName),
 	}
 	return containerCfg, hostCfg
+}
+
+// workspaceMount is the /workspace mount: the named volume, or with
+// WorkspaceTmpfsMB a size-limited tmpfs (exec allowed, like the volume).
+func workspaceMount(cfg RunEnvironmentConfig) mount.Mount {
+	if cfg.WorkspaceTmpfsMB > 0 {
+		return mount.Mount{
+			Type:   mount.TypeTmpfs,
+			Target: "/workspace",
+			TmpfsOptions: &mount.TmpfsOptions{
+				SizeBytes: int64(cfg.WorkspaceTmpfsMB) * 1024 * 1024,
+				Mode:      01777,
+			},
+		}
+	}
+	return mount.Mount{
+		Type:   mount.TypeVolume,
+		Source: cfg.VolumeName,
+		Target: "/workspace",
+	}
 }
 
 // environmentContainerLabels builds container labels; the ah.* keys are set

@@ -73,6 +73,7 @@ func main() {
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	maxSandboxesTotal := flag.Int("max-sandboxes-total", cfg.MaxSandboxesTotal, "Host-wide cap on disposable sandboxes across all tenants (0 = no host cap; env AH_MAX_SANDBOXES_TOTAL)")
+	sandboxEgressNetwork := flag.String("sandbox-egress-network", cfg.SandboxEgressNetwork, "Bridge network for sandboxes with egress \"internet\" (empty = egress disabled; env AH_SANDBOX_EGRESS_NETWORK). Requires the host firewall rules from docs/ops/sandbox-egress-firewall.sh")
 	flag.Parse()
 	if *maxSandboxesTotal < 0 {
 		log.Fatalf("--max-sandboxes-total must be >= 0, got %d", *maxSandboxesTotal)
@@ -255,6 +256,13 @@ func main() {
 	envMgr.SetSandboxSources(snapshotSandboxSource{mgr: snapMgr}, serviceSandboxSource{mgr: svcMgr})
 	envMgr.SetMaxSandboxesTotal(*maxSandboxesTotal)
 	log.Printf("sandboxes: host cap %d (0 = none)", *maxSandboxesTotal)
+	// Phase 2 hardening, all opt-in: a missing sandbox runtime is fatal; an
+	// egress network without verified firewall rules stays disabled (403).
+	if err := configureSandboxHardening(context.Background(), cfg, strings.TrimSpace(*sandboxEgressNetwork), *devMode,
+		dockerClient, envMgr, sandboxEgressOptions{}, log.Printf); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	envMgr.LogSandboxHardening()
 	reaperCtx, reaperCancel := context.WithCancel(context.Background())
 	defer reaperCancel()
 	go envMgr.RunSandboxReaper(reaperCtx, 30*time.Second)

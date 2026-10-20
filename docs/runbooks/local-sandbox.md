@@ -108,6 +108,8 @@ Settings (environment variables read by `scripts/sandbox.sh`):
 | `AH_SANDBOX_SKIP_EXAMPLE` | `0` | `1` registers the tenant but deploys nothing |
 | `OPENROUTER_API_KEY` | unset | Passed to the demo service |
 
+`AH_SANDBOX_RUNTIME` here chooses the local instance's `AH_CONTAINER_RUNTIME`. `ah` itself reads a variable with the same name as the runtime for disposable sandboxes ([sandboxes-hardening.md](sandboxes-hardening.md)), so `scripts/sandbox.sh` unsets it before starting `ah`.
+
 ## What `down` does
 
 1. Deletes every service of the sandbox tenant through the API, so `ah` removes the containers, networks and routes it created.

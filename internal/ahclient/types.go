@@ -137,7 +137,10 @@ type CreateSandboxRequest struct {
 	IncludeEnv    bool          `json:"include_env,omitempty"`
 	MemoryMB      *int          `json:"memory_mb,omitempty"`
 	CPUMillicores *int          `json:"cpu_millicores,omitempty"`
-	Egress        string        `json:"egress,omitempty"`
+	Egress        string        `json:"egress,omitempty"` // none or internet
+	// DiskMB sizes the tmpfs /workspace; only accepted when the server runs
+	// sandboxes with AH_SANDBOX_WORKSPACE_TMPFS.
+	DiskMB *int `json:"disk_mb,omitempty"`
 }
 
 // SandboxSourceRef is the source recorded on a sandbox.
@@ -157,6 +160,7 @@ type Sandbox struct {
 	Egress         string           `json:"egress"`
 	MemoryMB       int              `json:"memory_mb"`
 	CPUMillicores  int              `json:"cpu_millicores"`
+	DiskMB         int              `json:"disk_mb"` // 0 = workspace volume, no hard size limit
 	TTLSeconds     int              `json:"ttl_seconds"`
 	CreatedAt      int64            `json:"created_at"`
 	ExpiresAt      int64            `json:"expires_at"`

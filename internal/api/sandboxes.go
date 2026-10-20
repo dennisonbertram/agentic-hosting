@@ -18,6 +18,9 @@ import (
 const (
 	sandboxCreateRPS   = 20.0 / 60.0
 	sandboxCreateBurst = 10
+	// sandboxCreateHeaderPrefix names the create limiter's headers. They are
+	// separate from X-RateLimit-*, which keep describing the general limit.
+	sandboxCreateHeaderPrefix = "X-Sandbox-Create-RateLimit"
 )
 
 // sandboxCreateRateLimit applies the per-tenant create limiter. The tenant's

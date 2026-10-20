@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +45,7 @@ Quick start:
 
 Full command reference:
   ahc sandbox create [name] [source] [--ttl 30m] [--run idle|app] [--include-env] [--memory MB] [--cpu MILLI]
+                      [--disk MB] [--egress none|internet]
   ahc sandbox list [--status S]
   ahc sandbox get <name-or-id>
   ahc sandbox exec <name-or-id> [--workdir D] [--timeout S] -- <cmd...>
@@ -76,6 +79,8 @@ type sandboxCreateOpts struct {
 	includeEnv bool
 	memoryMB   int
 	cpuMilli   int
+	diskMB     int
+	egress     string
 }
 
 func addSandboxSourceFlags(cmd *cobra.Command, o *sandboxCreateOpts, defaultTTL string) {
@@ -89,6 +94,8 @@ func addSandboxSourceFlags(cmd *cobra.Command, o *sandboxCreateOpts, defaultTTL 
 	f.BoolVar(&o.includeEnv, "include-env", false, "Copy the snapshot's or service's env vars into the sandbox (values never shown)")
 	f.IntVar(&o.memoryMB, "memory", 0, "Memory limit in MB (default: template value or 512)")
 	f.IntVar(&o.cpuMilli, "cpu", 0, "CPU limit in millicores (default: template value or 1000)")
+	f.IntVar(&o.diskMB, "disk", 0, "Workspace size in MB, at most --memory (only on servers with tmpfs workspaces)")
+	f.StringVar(&o.egress, "egress", "", "none (default) or internet (only if the operator and your quota allow it)")
 }
 
 // parseTTL accepts a Go duration ("30m", "2h") or whole seconds ("1800").
@@ -115,7 +122,7 @@ func parseTTL(s string) (int, error) {
 
 // buildSandboxRequest maps flags to an API request.
 func buildSandboxRequest(o sandboxCreateOpts) (ahclient.CreateSandboxRequest, error) {
-	req := ahclient.CreateSandboxRequest{Name: o.name, Run: o.run, IncludeEnv: o.includeEnv}
+	req := ahclient.CreateSandboxRequest{Name: o.name, Run: o.run, IncludeEnv: o.includeEnv, Egress: o.egress}
 	n := 0
 	if o.template != "" {
 		n++
@@ -153,6 +160,10 @@ func buildSandboxRequest(o sandboxCreateOpts) (ahclient.CreateSandboxRequest, er
 	if o.cpuMilli > 0 {
 		c := o.cpuMilli
 		req.CPUMillicores = &c
+	}
+	if o.diskMB > 0 {
+		d := o.diskMB
+		req.DiskMB = &d
 	}
 	return req, nil
 }
@@ -271,6 +282,9 @@ func newSandboxGetCmd(root *rootState) *cobra.Command {
 			fmt.Fprintf(w, "Run:       %s\n", s.Run)
 			fmt.Fprintf(w, "Egress:    %s\n", s.Egress)
 			fmt.Fprintf(w, "Resources: %d MB, %d millicores\n", s.MemoryMB, s.CPUMillicores)
+			if s.DiskMB > 0 {
+				fmt.Fprintf(w, "Workspace: %d MB (tmpfs, counts toward memory)\n", s.DiskMB)
+			}
 			fmt.Fprintf(w, "Expires:   %s (max %s)\n", formatUnix(s.ExpiresAt), formatUnix(s.MaxExpiresAt))
 			fmt.Fprintf(w, "Created:   %s\n", formatUnix(s.CreatedAt))
 			return nil
@@ -479,7 +493,7 @@ func runSandboxRun(c *ahclient.Client, w, errW io.Writer, req ahclient.CreateSan
 		return fmt.Errorf("create sandbox: %w", err)
 	}
 	defer func() {
-		if derr := c.DeleteSandbox(s.ID); derr != nil {
+		if derr := c.DeleteSandbox(s.ID); derr != nil && !isAPINotFound(derr) {
 			fmt.Fprintf(errW, "ahc: warning: could not delete sandbox %s (the server deletes it at %s): %v\n", s.ID, formatUnix(s.ExpiresAt), derr)
 			if err == nil {
 				err = fmt.Errorf("delete sandbox: %w", derr)
@@ -487,6 +501,14 @@ func runSandboxRun(c *ahclient.Client, w, errW io.Writer, req ahclient.CreateSan
 		}
 	}()
 	return runSandboxExec(c, w, errW, s.ID, command, workdir, timeout)
+}
+
+// isAPINotFound reports whether err is an API 404. For the final delete of
+// "sandbox run" that means the sandbox is already gone (expired and reaped,
+// or deleted by someone else), which is the outcome the delete wanted.
+func isAPINotFound(err error) bool {
+	var apiErr *ahclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // resolveSandboxID converts a name-or-ID argument into a sandbox ID: a

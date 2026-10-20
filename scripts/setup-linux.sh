@@ -21,7 +21,7 @@ root=${AH_SETUP_ROOT:-}          # test hook: prefix for host paths; only honour
 os_release=${AH_SETUP_OS_RELEASE:-$root/etc/os-release}
 api_port=8080
 
-domain='' email='' external_tls=0 skip_website=0 dry_run=0 assume_yes=0
+domain='' email='' external_tls=0 skip_website=0 dry_run=0 assume_yes=0 sandbox_hardening=0
 
 usage() {
   cat <<'EOF'
@@ -50,6 +50,13 @@ Options:
   --external-tls-terminated   Port 80 is reachable only through a trusted TLS
                               tunnel (see bootstrap-stack.sh --help)
   --skip-website              Do not install the website container
+  --sandbox-hardening         Opt in to hard sandbox disk limits: register the
+                              Docker runtime runsc-sbx (runsc --overlay2=root:memory)
+                              in /etc/docker/daemon.json, reload Docker, and set
+                              AH_SANDBOX_RUNTIME=runsc-sbx and
+                              AH_SANDBOX_WORKSPACE_TMPFS=true in /etc/default/ah.
+                              Does not enable sandbox egress (see
+                              docs/runbooks/sandboxes-hardening.md)
   --dry-run                   Check prerequisites and print the plan only
   --yes, -y                   Do not prompt for confirmation
   -h, --help                  Show this help
@@ -71,6 +78,7 @@ while (($#)); do
     --acme-email) (($# >= 2)) || die '--acme-email requires a value'; email=$2; shift 2 ;;
     --external-tls-terminated) external_tls=1; shift ;;
     --skip-website) skip_website=1; shift ;;
+    --sandbox-hardening) sandbox_hardening=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --yes|-y) assume_yes=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -98,6 +106,19 @@ if ((present == 0)); then mode=fresh
 elif ((present == total)) && [[ -e $root/var/lib/ah/master.key ]]; then mode=existing
 else mode=partial
 fi
+
+# Sandbox hardening (--sandbox-hardening): a second gVisor runtime whose
+# root filesystem overlay lives in sandbox memory, so rootfs writes count
+# against the sandbox's memory limit, plus a tmpfs /workspace of disk_mb.
+sbx_runtime=runsc-sbx
+sbx_runtime_args='["--overlay2=root:memory"]'
+print_sandbox_hardening_plan() {
+  echo "  $1. sandbox hardening: add runtime $sbx_runtime (runsc --overlay2=root:memory) to"
+  echo '     /etc/docker/daemon.json (merge; backup kept; other keys untouched), reload Docker'
+  echo '     (SIGHUP: running containers keep running), check docker info lists it, set'
+  echo "     AH_SANDBOX_RUNTIME=$sbx_runtime and AH_SANDBOX_WORKSPACE_TMPFS=true in /etc/default/ah,"
+  echo '     restart ah. Sandbox egress stays off (docs/runbooks/sandboxes-hardening.md)'
+}
 
 problems=0
 check() { # check LABEL OK(0/1) [HINT]
@@ -132,6 +153,7 @@ case "$mode" in
     go_ok=0; { [[ -x $root/usr/local/go/bin/go ]] || command -v go >/dev/null 2>&1; } && go_ok=1
     check 'Go toolchain (/usr/local/go/bin/go or PATH)' "$go_ok"
     check 'curl' "$(have curl)"
+    ((sandbox_hardening)) && check 'python3 (daemon.json merge for --sandbox-hardening)' "$(have python3)" 'apt-get install python3'
     [[ -z $domain ]] || warn '--domain is ignored for an existing install (edit /etc/default/ah and Traefik config instead)'
     ;;
   partial)
@@ -153,6 +175,7 @@ case "$mode" in
     echo '      checksummed Go and Nixpacks, ah build/install, 0600 keys, systemd units, health check)'
     echo '  2. build cmd/ahc with /usr/local/go/bin/go and install /usr/local/bin/ahc'
     echo '  3. health check: GET http://127.0.0.1:8080/v1/system/health'
+    ((sandbox_hardening)) && print_sandbox_hardening_plan 4
     ;;
   existing)
     echo '  1. verify Docker is active and has the runsc runtime; start stopped paas-traefik'
@@ -164,6 +187,7 @@ case "$mode" in
     echo '  6. enable ah-api-proxy, ah-build-broker, ah; restart ah only if something changed,'
     echo '     ah-build-broker if the ah binary or its unit changed, ah-api-proxy if its unit changed'
     echo '  7. health check: GET http://127.0.0.1:8080/v1/system/health'
+    ((sandbox_hardening)) && print_sandbox_hardening_plan 8
     ;;
   partial)
     echo '  none: refusing to touch a partially installed host.'
@@ -227,6 +251,62 @@ health_check() {
   die 'API health check failed (see journalctl -u ah)'
 }
 
+# set_default_env KEY VALUE: set KEY=VALUE in /etc/default/ah; returns 0 when
+# the file changed.
+set_default_env() {
+  if grep -qx "$1=$2" /etc/default/ah; then return 1; fi
+  sed -i "/^$1=/d" /etc/default/ah || die 'could not edit /etc/default/ah'
+  printf '%s=%s\n' "$1" "$2" >> /etc/default/ah || die 'could not edit /etc/default/ah'
+  log "set $1=$2 in /etc/default/ah"
+  return 0
+}
+
+# apply_sandbox_hardening: register runsc-sbx with Docker and point ah at
+# it. Returns 0 when /etc/default/ah changed (ah needs a restart). It runs as
+# an if condition, where errexit is off, so each step that can fail ends in
+# || die.
+apply_sandbox_hardening() {
+  local daemon=/etc/docker/daemon.json merged env_changed=1
+  merged=$tmpdir/daemon.json
+  python3 - "$daemon" "$merged" "$sbx_runtime" "$sbx_runtime_args" <<'PY' || die "could not merge $daemon"
+import json, os, sys
+src, dst, name, args = sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
+cfg = {}
+if os.path.exists(src):
+    with open(src) as f:
+        cfg = json.load(f)
+runtimes = cfg.setdefault("runtimes", {})
+path = runtimes.get("runsc", {}).get("path", "/usr/bin/runsc")
+runtimes[name] = {"path": path, "runtimeArgs": args}
+with open(dst, "w") as f:
+    json.dump(cfg, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+  if [[ -f $daemon ]] && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])) else 1)' "$daemon" "$merged"; then
+    log "daemon.json already registers $sbx_runtime"
+  else
+    if [[ -f $daemon ]]; then
+      cp -p "$daemon" "$daemon.bak-$(date +%Y%m%d%H%M%S)" || die "could not back up $daemon"
+      log "backed up $daemon"
+    fi
+    if command -v dockerd >/dev/null 2>&1; then
+      dockerd --validate --config-file "$merged" >/dev/null || die "merged daemon.json failed dockerd --validate; $daemon unchanged"
+    fi
+    install -o root -g root -m 0644 "$merged" "$daemon" || die "failed to install $daemon"
+    log "registered runtime $sbx_runtime in $daemon; reloading Docker (SIGHUP)"
+    systemctl reload docker || die 'systemctl reload docker failed (see journalctl -u docker)'
+  fi
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    docker info --format '{{json .Runtimes}}' | grep -q "\"$sbx_runtime\"" && break
+    [[ $i == 10 ]] && die "Docker does not list runtime $sbx_runtime after reload (check journalctl -u docker)"
+    sleep 1
+  done
+  if set_default_env AH_SANDBOX_RUNTIME "$sbx_runtime"; then env_changed=0; fi
+  if set_default_env AH_SANDBOX_WORKSPACE_TMPFS true; then env_changed=0; fi
+  return "$env_changed"
+}
+
 # ----------------------------------------------------------------- execute
 if [[ $mode == fresh ]]; then
   args=(--domain "$domain")
@@ -235,6 +315,10 @@ if [[ $mode == fresh ]]; then
   "$bootstrap" "${args[@]}"
   build_cli
   install_if_changed "$tmpdir/ahc" /usr/local/bin/ahc 0755 || :
+  if ((sandbox_hardening)) && apply_sandbox_hardening; then
+    log 'restarting ah (sandbox hardening settings changed)'
+    systemctl restart ah.service
+  fi
   health_check
 else
   systemctl is-active --quiet docker || systemctl start docker
@@ -254,6 +338,7 @@ else
   chmod 0600 /etc/default/ah
 
   changed=0 admin_token_added=0
+  if ((sandbox_hardening)) && apply_sandbox_hardening; then changed=1; fi
   if ! grep -q '^AH_ADMIN_TOKEN=.\{32,\}' /etc/default/ah; then
     log 'adding a generated AH_ADMIN_TOKEN to /etc/default/ah'
     sed -i '/^AH_ADMIN_TOKEN=/d' /etc/default/ah

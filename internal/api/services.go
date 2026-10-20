@@ -87,7 +87,9 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 // 201 with status "deploying" without waiting for it. The deploy gets a
 // bounded context (10 min) so a stuck deploy cannot leak its goroutine.
 func (s *Server) respondDeploying(w http.ResponseWriter, tenantID string, svc *services.Service, what string) {
+	s.backgroundDeploys.Add(1)
 	go func(tid, sid string) {
+		defer s.backgroundDeploys.Done()
 		deployCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := s.svcManager.Deploy(deployCtx, tid, sid); err != nil {
@@ -97,6 +99,12 @@ func (s *Server) respondDeploying(w http.ResponseWriter, tenantID string, svc *s
 
 	svc.Status = "deploying"
 	writeJSON(w, http.StatusCreated, svc)
+}
+
+// waitBackgroundDeploys blocks until every deploy started by
+// respondDeploying has returned.
+func (s *Server) waitBackgroundDeploys() {
+	s.backgroundDeploys.Wait()
 }
 
 // handleServiceCreateFromSnapshot creates a new service from an existing snapshot.

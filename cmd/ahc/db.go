@@ -322,7 +322,7 @@ func runDbDelete(c *ahclient.Client, nameOrID string, confirm bool) error {
 
 // resolveDbID converts a name-or-ID argument into a database ID.
 // If arg is exactly 32 lowercase hex characters, it is used directly.
-// Otherwise, ListDatabases is called and the result is filtered by name.
+// Otherwise, ListDatabases is called and filtered by name, then by unique ID prefix.
 func resolveDbID(c *ahclient.Client, arg string) (string, error) {
 	if isHexID(arg) {
 		return arg, nil
@@ -342,7 +342,11 @@ func resolveDbID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("database %q not found", arg)
+		ids := make([]string, len(dbs))
+		for i := range dbs {
+			ids[i] = dbs[i].ID
+		}
+		return resolveIDPrefix("database", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:

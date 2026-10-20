@@ -36,7 +36,7 @@ func TestStartAllForTenant_HealthFailureRemovesContainer(t *testing.T) {
 
 	var status string
 	require.NoError(t, stateDB.QueryRow(`SELECT status FROM databases WHERE id='dbs0123456789abcdef'`).Scan(&status))
-	assert.Equal(t, "failed", status)
+	assert.Equal(t, "stopped", status, "a health timeout must leave the row recoverable, not terminally failed")
 	assert.Contains(t, mock.RemoveContainerCalls, "c-new")
 	assert.Empty(t, mock.RemoveVolumeCalls)
 }

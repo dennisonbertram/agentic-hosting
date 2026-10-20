@@ -49,10 +49,10 @@ func (s *Server) handleBootstrapTokenValidate(w http.ResponseWriter, r *http.Req
 	}
 
 	provided := strings.TrimSpace(req.Token)
+	// Validation creates nothing, so it does not charge the global
+	// registration budget (that would let a token holder block registration
+	// and, previously, admin routes). The per-IP limit above still applies.
 	valid := len(s.bootstrapTokens) > 0 && validateBootstrapToken(provided, s.bootstrapTokens, s.masterKey)
-	if valid {
-		regLimiter.chargeGlobal()
-	}
 
 	writeJSON(w, http.StatusOK, BootstrapTokenValidateResponse{Valid: valid})
 }

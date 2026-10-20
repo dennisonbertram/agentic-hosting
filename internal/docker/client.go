@@ -445,12 +445,12 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 	}
 
 	if err := c.ConnectNetworkAlias(ctx, ingressID, resp.ID, ServiceIngressAlias(tenantID, serviceID)); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("connect service to ingress network: %w", err)
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("start container: %w", err)
 	}
 
@@ -458,6 +458,22 @@ func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, im
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// rollbackTimeout bounds the removal of a half-created container.
+const rollbackTimeout = 15 * time.Second
+
+// rollbackRemove force-removes a container created by a Run* call that then
+// failed. It uses a fresh bounded context: the failure is often the caller's
+// ctx being cancelled or past its deadline, and reusing that ctx would make
+// the removal fail at once and leave an untracked container holding the
+// deterministic name.
+func (c *DockerClient) rollbackRemove(ctx context.Context, id string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	if err := c.cli.ContainerRemove(rctx, id, container.RemoveOptions{Force: true}); err != nil {
+		log.Printf("docker: rollback remove of container %.12s failed: %v (GC will retry)", id, err)
+	}
+}
 
 func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string) *container.Config {
 	env := make([]string, 0, len(envVars))
@@ -965,7 +981,7 @@ func (c *DockerClient) RunDatabase(ctx context.Context, cfg RunDatabaseConfig) (
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("start database container: %w", err)
 	}
 
@@ -1175,7 +1191,7 @@ func (c *DockerClient) RunEnvironment(ctx context.Context, cfg RunEnvironmentCon
 	}
 
 	if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = c.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		c.rollbackRemove(ctx, resp.ID)
 		return "", fmt.Errorf("start environment container: %w", err)
 	}
 

@@ -158,7 +158,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 
 	// Check disk space before provisioning
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
-		return nil, fmt.Errorf("disk check: %w", err)
+		return nil, apierr.Unavailable("insufficient disk space; try again later", err)
 	}
 
 	// Check if tenant already has a kanban
@@ -190,11 +190,14 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 			_ = m.docker.StopContainer(ctx, failedContainer)
 			_ = m.docker.RemoveContainer(ctx, failedContainer)
 		}
-		if !hadSetup {
-			_ = m.docker.RemoveVolume(ctx, failedVolume)
-		} else {
-			log.Printf("kanbans: keeping volume %s of failed kanban %s (it was previously set up)", failedVolume, failedID)
+		if hadSetup {
+			// The volume holds the tenant's boards and the admin user whose
+			// credentials are stored on this row. Deleting the row would let GC
+			// remove the "orphaned" volume, so restart the board in place.
+			log.Printf("kanbans: restarting failed kanban %s in place on its volume %s (it was previously set up)", failedID, failedVolume)
+			return m.restartFailedInPlace(ctx, tenantID, failedID, failedVolume)
 		}
+		_ = m.docker.RemoveVolume(ctx, failedVolume)
 		if _, err := m.db.ExecContext(ctx, `DELETE FROM kanbans WHERE id = ?`, failedID); err != nil {
 			return nil, fmt.Errorf("remove failed kanban: %w", err)
 		}
@@ -311,6 +314,110 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (*Kanban, error) 
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}, nil
+}
+
+// restartFailedInPlace recreates the container of a failed board that had
+// completed setup, reusing its row, volume and stored admin credentials. Its
+// old port is kept when still free; otherwise a new one is reserved. Health
+// waiting runs in the background like a fresh Create; on failure the row goes
+// back to "failed" with the volume kept.
+func (m *Manager) restartFailedInPlace(ctx context.Context, tenantID, id, volume string) (*Kanban, error) {
+	var publicURL string
+	var port int
+	var createdAt int64
+	if err := m.db.QueryRowContext(ctx, `SELECT COALESCE(url, ''), port, created_at FROM kanbans WHERE id = ?`, id).Scan(&publicURL, &port, &createdAt); err != nil {
+		return nil, fmt.Errorf("load failed kanban: %w", err)
+	}
+
+	// Reserve a port: moving the row out of 'failed' re-enters the partial
+	// UNIQUE port index, so a port taken meanwhile fails and we pick another.
+	const maxPortRetries = 5
+	var err error
+	for attempt := 0; attempt < maxPortRetries; attempt++ {
+		_, err = m.db.ExecContext(ctx,
+			`UPDATE kanbans SET status = 'provisioning', container_id = '', port = ?, updated_at = ? WHERE id = ? AND status = 'failed'`,
+			port, time.Now().Unix(), id)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, fmt.Errorf("reserve kanban: %w", err)
+		}
+		if port, err = m.findFreePort(ctx); err != nil {
+			return nil, fmt.Errorf("find free port: %w", err)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reserve kanban port after %d retries: %w", maxPortRetries, err)
+	}
+
+	jwtSecret, err := randomHex(32)
+	if err != nil {
+		m.updateStatus(ctx, id, "failed")
+		return nil, err
+	}
+	tenantPrefix, idPrefix := tenantID, id
+	if len(tenantPrefix) > 8 {
+		tenantPrefix = tenantPrefix[:8]
+	}
+	if len(idPrefix) > 16 {
+		idPrefix = idPrefix[:16]
+	}
+	containerID, err := m.docker.RunDatabase(ctx, vikunjaConfig(fmt.Sprintf("ah-kanban-%s-%s", tenantPrefix, idPrefix), volume, publicURL, jwtSecret, port))
+	if err != nil {
+		m.updateStatus(ctx, id, "failed") // volume kept: it holds the board data
+		return nil, fmt.Errorf("run container: %w", err)
+	}
+	if _, err := m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = ?, updated_at = ? WHERE id = ?`, containerID, time.Now().Unix(), id); err != nil {
+		m.removeContainer(ctx, containerID)
+		m.updateStatus(ctx, id, "failed")
+		return nil, fmt.Errorf("store container id: %w", err)
+	}
+
+	go func() {
+		bg, cancel := context.WithTimeout(context.Background(), m.healthCheckTimeout+30*time.Second)
+		defer cancel()
+		if !m.waitForHTTP(bg, port, m.healthCheckTimeout) {
+			log.Printf("kanbans: in-place restart of %s failed health check (volume kept)", id)
+			m.removeContainer(bg, containerID)
+			m.updateStatus(bg, id, "failed")
+			return
+		}
+		if !m.casReady(bg, id) {
+			log.Printf("kanbans: %s changed state during in-place restart; not marking ready", id)
+		}
+	}()
+
+	now := time.Now().Unix()
+	return &Kanban{
+		ID:         id,
+		TenantID:   tenantID,
+		Status:     "provisioning",
+		Host:       "127.0.0.1",
+		Port:       port,
+		URL:        publicURL,
+		VolumeName: volume,
+		CreatedAt:  createdAt,
+		UpdatedAt:  now,
+	}, nil
+}
+
+// casReady moves a board from 'provisioning' to 'ready' only if it is still
+// provisioning. A tenant suspension that landed meanwhile has already set
+// 'stopped' and removed the container; overwriting that with 'ready' would
+// leave a dead board that reactivation (which restarts only 'stopped') skips.
+func (m *Manager) casReady(ctx context.Context, id string) bool {
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	res, err := m.db.ExecContext(freshCtx,
+		`UPDATE kanbans SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'provisioning'`,
+		time.Now().Unix(), id)
+	if err != nil {
+		log.Printf("kanbans: failed to mark %s ready: %v", id, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // vikunjaConfig builds the container config for a tenant's Vikunja instance.
@@ -464,8 +571,16 @@ func (m *Manager) provision(id, tenantID, containerID, volumeName, publicURL str
 		return
 	}
 
-	if !m.updateStatus(ctx, id, "ready") {
-		cleanup()
+	if !m.casReady(ctx, id) {
+		// Deleted: clean up everything. Changed (e.g. suspended -> 'stopped'):
+		// StopForTenant already removed the container; keep the set-up volume
+		// so reactivation can start the board.
+		var one int
+		if err := m.db.QueryRowContext(ctx, `SELECT 1 FROM kanbans WHERE id = ?`, id).Scan(&one); err != nil {
+			cleanup()
+		} else {
+			log.Printf("kanbans: %s changed state during provisioning (tenant suspended?); leaving it for reactivation", id)
+		}
 		return
 	}
 

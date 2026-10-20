@@ -568,6 +568,15 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 			if ierr != nil || (info.Status != "running" && info.Status != "restarting") {
 				continue
 			}
+			// Re-check the row after the inspect: environments.Start extends the
+			// lease before starting the container, so a row that no longer has an
+			// expired lease (or is no longer 'stopped') is being started by a user.
+			var still int
+			if err := r.db.QueryRowContext(ctx,
+				`SELECT 1 FROM environments WHERE container_id = ? AND status = 'stopped' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+				cid, time.Now().Unix()).Scan(&still); err != nil {
+				continue
+			}
 			if stopErr := r.docker.StopContainer(ctx, cid); stopErr != nil {
 				log.Printf("reconciler: failed to stop expired environment container %s: %v", shortID(cid), stopErr)
 			}

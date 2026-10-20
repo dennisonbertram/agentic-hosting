@@ -15,7 +15,11 @@ var (
 	ErrValidation    = errors.New("validation error")
 	ErrQuotaExceeded = errors.New("quota exceeded")
 	ErrForbidden     = errors.New("forbidden")
+	ErrUnavailable   = errors.New("temporarily unavailable")
 )
+
+// RetryAfterSeconds is the Retry-After value sent with 503 Unavailable errors.
+const RetryAfterSeconds = "10"
 
 // APIError is a typed error that carries an HTTP status code and user-facing message.
 type APIError struct {
@@ -61,6 +65,17 @@ func Forbidden(msg string) *APIError {
 	return &APIError{Code: http.StatusForbidden, Message: msg, Err: ErrForbidden}
 }
 
+// Unavailable returns a 503 error for transient, retryable backpressure
+// (deploy queue full, low disk). WriteAPIError adds a Retry-After header.
+// cause, if non-nil, is wrapped for errors.Is and logging but not shown.
+func Unavailable(msg string, cause error) *APIError {
+	err := ErrUnavailable
+	if cause != nil {
+		err = fmt.Errorf("%w: %w", ErrUnavailable, cause)
+	}
+	return &APIError{Code: http.StatusServiceUnavailable, Message: msg, Err: err}
+}
+
 // DeployFailed returns a 502 error: the platform worked but the container runtime
 // could not start, stop or remove the service's container. The cause is shown to the client.
 func DeployFailed(cause error) *APIError {
@@ -72,6 +87,9 @@ func DeployFailed(cause error) *APIError {
 func WriteAPIError(w http.ResponseWriter, err error) {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
+		if apiErr.Code == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", RetryAfterSeconds)
+		}
 		writeJSON(w, apiErr.Code, apiErr.Message)
 		return
 	}

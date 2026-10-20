@@ -171,7 +171,8 @@ func ImageTag(tenantID, serviceID, buildID string) string {
 func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, req StartBuildRequest) (*Build, error) {
 	// Check disk space before starting build
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
-		return nil, fmt.Errorf("disk check: %w", err)
+		log.Printf("builds: disk check refused build for tenant=%s service=%s: %v", tenantID, serviceID, err)
+		return nil, apierr.Unavailable("insufficient disk space for builds; try again later", err)
 	}
 
 	if req.SourceType != "git" {
@@ -210,13 +211,23 @@ func (m *Manager) StartBuild(ctx context.Context, tenantID, serviceID string, re
 	imageTag := ImageTag(tenantID, serviceID, buildID)
 	now := time.Now().Unix()
 
-	_, err = m.db.ExecContext(ctx,
+	// Enforce tenant_quotas.max_builds_concurrent: count and insert in one
+	// statement so concurrent StartBuild calls cannot both pass the check.
+	// A tenant with no quota row is not limited here (global queue still applies).
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO builds (id, service_id, tenant_id, status, source_type, source_url, source_ref, image, created_at)
-		 VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
-		buildID, serviceID, tenantID, req.SourceType, req.SourceURL, ref, imageTag, now,
+		 SELECT ?, ?, ?, 'pending', ?, ?, ?, ?, ?
+		 WHERE (SELECT COUNT(*) FROM builds WHERE tenant_id = ? AND status IN ('pending', 'running'))
+		       < COALESCE((SELECT max_builds_concurrent FROM tenant_quotas WHERE tenant_id = ?), 9223372036854775807)`,
+		buildID, serviceID, tenantID, req.SourceType, req.SourceURL, ref, imageTag, now, tenantID, tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert build: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var maxBuilds int
+		_ = m.db.QueryRowContext(ctx, `SELECT max_builds_concurrent FROM tenant_quotas WHERE tenant_id = ?`, tenantID).Scan(&maxBuilds)
+		return nil, apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d concurrent builds", maxBuilds))
 	}
 
 	build := &Build{

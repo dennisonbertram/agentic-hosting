@@ -2,6 +2,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,11 +73,27 @@ func Default() Config {
 
 // FromEnv returns a Config populated from environment variables, falling back
 // to defaults. Setting AH_DATA_DIR changes all derived paths unless individually
-// overridden.
+// overridden. Invalid numeric/duration values fall back to the default and are
+// logged; use LoadFromEnv to treat them as fatal.
 func FromEnv() Config {
-	dataDir := envOr("AH_DATA_DIR", defaultDataDir)
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		log.Printf("WARNING: config: %v (using defaults for invalid values)", err)
+	}
+	return cfg
+}
 
-	return Config{
+// LoadFromEnv is FromEnv but also returns every invalid setting it found
+// (unparseable ints/durations, kanban start > end) instead of silently
+// substituting defaults. A silently-defaulted retention value such as
+// AH_SNAPSHOT_MAX_AGE=90d would otherwise make GC delete snapshots the
+// operator meant to keep. The returned Config still holds defaults for the
+// invalid values.
+func LoadFromEnv() (Config, error) {
+	dataDir := envOr("AH_DATA_DIR", defaultDataDir)
+	var errs []error
+
+	cfg := Config{
 		DataDir:               dataDir,
 		DBPath:                envOr("AH_DB_PATH", filepath.Join(dataDir, "ah.db")),
 		MeterDBPath:           envOr("AH_METER_DB_PATH", filepath.Join(dataDir, "meter.db")),
@@ -86,12 +105,22 @@ func FromEnv() Config {
 		AdminToken:            strings.TrimSpace(os.Getenv("AH_ADMIN_TOKEN")),
 		ExternalTLSTerminated: os.Getenv("AH_EXTERNAL_TLS_TERMINATED") == "true",
 		TraefikConfigDir:      envOr("AH_TRAEFIK_CONFIG_DIR", "/etc/traefik/dynamic"),
-		KanbanPortStart:       envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart),
-		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd),
-		SnapshotMaxPerService: envOrInt("AH_SNAPSHOT_MAX_PER_SERVICE", DefaultSnapshotMaxPerService),
-		SnapshotMaxAge:        envOrDuration("AH_SNAPSHOT_MAX_AGE", DefaultSnapshotMaxAge),
+		KanbanPortStart:       envOrInt("AH_KANBAN_PORT_START", DefaultKanbanPortStart, &errs),
+		KanbanPortEnd:         envOrInt("AH_KANBAN_PORT_END", DefaultKanbanPortEnd, &errs),
+		SnapshotMaxPerService: envOrInt("AH_SNAPSHOT_MAX_PER_SERVICE", DefaultSnapshotMaxPerService, &errs),
+		SnapshotMaxAge:        envOrDuration("AH_SNAPSHOT_MAX_AGE", DefaultSnapshotMaxAge, &errs),
 		CORSOrigins:           ParseCORSOrigins(os.Getenv("AH_CORS_ORIGINS")),
 	}
+	if cfg.KanbanPortStart > cfg.KanbanPortEnd {
+		errs = append(errs, fmt.Errorf("AH_KANBAN_PORT_START (%d) must not exceed AH_KANBAN_PORT_END (%d)", cfg.KanbanPortStart, cfg.KanbanPortEnd))
+	}
+	if cfg.SnapshotMaxPerService < 0 {
+		errs = append(errs, fmt.Errorf("AH_SNAPSHOT_MAX_PER_SERVICE must be >= 0 (0 = unlimited), got %d", cfg.SnapshotMaxPerService))
+	}
+	if cfg.SnapshotMaxAge < 0 {
+		errs = append(errs, fmt.Errorf("AH_SNAPSHOT_MAX_AGE must be >= 0 (0 = unlimited), got %s", cfg.SnapshotMaxAge))
+	}
+	return cfg, errors.Join(errs...)
 }
 
 // DefaultCORSOrigins is the public dashboard allowlist.
@@ -104,16 +133,18 @@ func DefaultCORSOrigins() []string {
 }
 
 // ParseCORSOrigins splits a comma-separated Origin allowlist. Empty input
-// returns DefaultCORSOrigins. "*" is dropped (never allow-all).
+// returns DefaultCORSOrigins. "*" is dropped (never allow-all), as is "none".
+// Non-empty input that yields no origins (e.g. "none", "*", ",") returns a
+// non-nil empty slice, which disables CORS; only nil means "use defaults".
 func ParseCORSOrigins(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return DefaultCORSOrigins()
 	}
 	seen := make(map[string]struct{})
-	var out []string
+	out := []string{}
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" || part == "*" {
+		if part == "" || part == "*" || strings.EqualFold(part, "none") {
 			continue
 		}
 		if _, dup := seen[part]; dup {
@@ -137,26 +168,45 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func envOrInt(key string, fallback int) int {
-	v := os.Getenv(key)
+func envOrInt(key string, fallback int, errs *[]error) int {
+	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		*errs = append(*errs, fmt.Errorf("invalid %s=%q: must be an integer", key, v))
 		return fallback
 	}
 	return n
 }
 
-func envOrDuration(key string, fallback time.Duration) time.Duration {
-	v := os.Getenv(key)
+func envOrDuration(key string, fallback time.Duration, errs *[]error) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
 	}
-	d, err := time.ParseDuration(v)
+	d, err := ParseDuration(v)
 	if err != nil {
+		*errs = append(*errs, fmt.Errorf("invalid %s=%q: %v", key, v, err))
 		return fallback
 	}
 	return d
+}
+
+// ParseDuration is time.ParseDuration plus a whole-day suffix ("90d"), the
+// natural unit for retention settings.
+func ParseDuration(v string) (time.Duration, error) {
+	if strings.HasSuffix(v, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err != nil {
+			return 0, fmt.Errorf("must be a Go duration (e.g. 720h) or whole days (e.g. 30d)")
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("must be a Go duration (e.g. 720h) or whole days (e.g. 30d)")
+	}
+	return d, nil
 }

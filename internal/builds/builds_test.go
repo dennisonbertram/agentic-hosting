@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dennisonbertram/agentic-hosting/internal/apierr"
 	"github.com/dennisonbertram/agentic-hosting/internal/builder"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -260,7 +261,7 @@ func TestAppendLog_LargeLogTruncatedWithTail(t *testing.T) {
 
 	// Use large lines (~10KB each) so we hit the 5MB cap in ~520 DB writes,
 	// then write 600 more lines past the cap for the tail buffer.
-	bigPadding := strings.Repeat("X", 10*1024) // 10KB per line
+	bigPadding := strings.Repeat("X", 10*1024)         // 10KB per line
 	linesBeforeCap := (maxLogSize / (10*1024 + 1)) + 1 // +1 for newline char
 	linesAfterCap := 600
 	totalLines := linesBeforeCap + linesAfterCap
@@ -398,4 +399,32 @@ func TestStartBuild_LogTruncationEndToEnd(t *testing.T) {
 	// Verify the build completion lines from runBuild are in the tail
 	// (these are appended after the builder returns)
 	assert.Contains(t, logs, "[ah] Build complete")
+}
+
+func TestStartBuild_EnforcesMaxBuildsConcurrent(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedBuildTestData(t, stateDB)
+	_, err := stateDB.Exec(`UPDATE tenant_quotas SET max_builds_concurrent = 1 WHERE tenant_id = 'tenant-1'`)
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	defer close(release)
+	mgr := NewManager(stateDB, &stubBuilder{buildFn: func(ctx context.Context, req builder.BuildRequest, logCb func(string)) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}}, func(ctx context.Context, tenantID, serviceID, imageTag, buildID string) error { return nil })
+
+	req := StartBuildRequest{SourceType: "git", SourceURL: "https://github.com/example/repo.git", SourceRef: "main"}
+	_, err = mgr.StartBuild(context.Background(), "tenant-1", "svc-1", req)
+	require.NoError(t, err)
+
+	_, err = mgr.StartBuild(context.Background(), "tenant-1", "svc-1", req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, apierr.ErrQuotaExceeded)
+	var n int
+	require.NoError(t, stateDB.QueryRow(`SELECT COUNT(*) FROM builds`).Scan(&n))
+	assert.Equal(t, 1, n, "rejected build must not leave a row")
 }

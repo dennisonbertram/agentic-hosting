@@ -150,7 +150,7 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 
 	// Check disk space before provisioning
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
-		return nil, fmt.Errorf("disk check: %w", err)
+		return nil, apierr.Unavailable("insufficient disk space; try again later", err)
 	}
 
 	// Docker's ContainerCreate does not fetch a missing image. Ensure the
@@ -307,7 +307,16 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 		return nil, fmt.Errorf("database health check failed after 30s")
 	}
 
-	if !m.updateStatus(ctx, id, "ready") {
+	// CAS provisioning -> ready: a tenant suspension that landed after the
+	// health probe has already set 'stopped' and removed the container; an
+	// unconditional update would leave a 'ready' row with no container that
+	// reactivation (which only restarts 'stopped' rows) never starts.
+	switch m.casStatus(ctx, id, "provisioning", "ready") {
+	case casApplied:
+	case casChanged:
+		log.Printf("databases: %s changed state during provisioning (tenant suspended?); leaving it for reactivation", id)
+		return nil, apierr.Conflict("database was stopped during provisioning (tenant suspended)")
+	default:
 		// Row was deleted during provisioning — clean up
 		_ = m.docker.StopContainer(ctx, containerID)
 		_ = m.docker.RemoveContainer(ctx, containerID)
@@ -549,6 +558,37 @@ func (m *Manager) wipeVolume(ctx context.Context, volumeName string) error {
 	return m.docker.WipeVolume(wipeCtx, volumeName)
 }
 
+// casResult is the outcome of casStatus.
+type casResult int
+
+const (
+	casApplied casResult = iota // row was in the expected state and was updated
+	casChanged                  // row exists but is no longer in the expected state
+	casGone                     // row does not exist (or the update failed)
+)
+
+// casStatus moves a database row from one status to another only if it is
+// still in the expected state, on a fresh context like updateStatus.
+func (m *Manager) casStatus(ctx context.Context, id, from, to string) casResult {
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	res, err := m.db.ExecContext(freshCtx,
+		`UPDATE databases SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		to, time.Now().Unix(), id, from)
+	if err != nil {
+		log.Printf("databases: failed to update status for %s: %v", id, err)
+		return casGone
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return casApplied
+	}
+	var one int
+	if err := m.db.QueryRowContext(freshCtx, `SELECT 1 FROM databases WHERE id = ?`, id).Scan(&one); err == nil {
+		return casChanged
+	}
+	return casGone
+}
+
 func (m *Manager) updateStatus(ctx context.Context, id, status string) bool {
 	// Use a fresh context to ensure status updates succeed even if the
 	// request context is cancelled or timed out.
@@ -632,8 +672,12 @@ func (m *Manager) runContainer(ctx context.Context, dbType, tenantID, dbID, name
 
 // StartAllForTenant recreates the containers of a tenant's stopped databases
 // (see StopAllForTenant) from the stored config, reusing each database's
-// volume, port and password. Failures mark that database "failed" and are
-// logged; the remaining databases are still processed.
+// volume, port and password. A failure leaves that database "stopped" (not
+// "failed") and is logged: its volume still holds the data, so the row must
+// keep its port reservation and network ownership and stay eligible for a
+// later start (e.g. a slow Postgres crash recovery that outlasts the health
+// probe). "failed" is terminal: it frees the port and only Delete, which wipes
+// the volume, remains. The remaining databases are still processed.
 func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, type, port, COALESCE(db_name, ''), COALESCE(username, ''), password_encrypted, volume_name
@@ -664,15 +708,13 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 		}
 		pw, err := crypto.Decrypt(d.passEnc, m.masterKey)
 		if err != nil {
-			log.Printf("databases: StartAllForTenant decrypt password for %s: %v", d.id, err)
-			m.updateStatus(ctx, d.id, "failed")
+			log.Printf("databases: StartAllForTenant decrypt password for %s: %v (left stopped)", d.id, err)
 			continue
 		}
 		password := string(pw)
 		containerID, err := m.runContainer(ctx, d.typ, tenantID, d.id, containerNameFor(tenantID, d.id), d.volume, d.port, d.dbName, d.user, password)
 		if err != nil {
-			log.Printf("databases: StartAllForTenant run container for %s: %v", d.id, err)
-			m.updateStatus(ctx, d.id, "failed")
+			log.Printf("databases: StartAllForTenant run container for %s: %v (left stopped)", d.id, err)
 			continue
 		}
 		_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = ?, updated_at = ? WHERE id = ?`,
@@ -688,9 +730,10 @@ func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
 			healthy = m.waitForPostgres(d.port, password, timeout)
 		}
 		if !healthy {
-			log.Printf("databases: StartAllForTenant health check failed for %s", d.id)
-			m.updateStatus(ctx, d.id, "failed")
+			log.Printf("databases: StartAllForTenant health check failed for %s (left stopped; volume kept)", d.id)
 			m.removeContainer(ctx, containerID) // volume kept: it holds the data
+			_, _ = m.db.ExecContext(ctx, `UPDATE databases SET container_id = '', updated_at = ? WHERE id = ? AND container_id = ?`,
+				time.Now().Unix(), d.id, containerID)
 			continue
 		}
 		if !m.tenantActive(ctx, tenantID) {

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -28,7 +29,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	case m.deployQueue <- struct{}{}:
 		defer func() { <-m.deployQueue }()
 	default:
-		return fmt.Errorf("deploy queue full; try again later")
+		return errDeployQueueFull()
 	}
 
 	select {
@@ -40,7 +41,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	// Check disk space before deploy
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
-		return fmt.Errorf("disk check: %w", err)
+		return errDiskLow(err)
 	}
 
 	// LOCK ORDER: deployQueue -> deploySem -> lockService (same as Deploy/Restart).
@@ -116,6 +117,14 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 
 	limits := m.getResourceLimits(ctx, tenantID)
 
+	// Re-check the tenant under the service lock right before creating the
+	// container: a suspension during the build or semaphore wait must not get
+	// a fresh container.
+	if err := m.checkTenantActive(ctx, tenantID); err != nil {
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("tenant not active"), deployments.WithCompletedAt(time.Now().Unix()))
+		return err
+	}
+
 	containerID, err := m.docker.RunContainer(ctx, tenantID, serviceID, imageTag, port, envVars, traefikLabels(serviceID, svc.DNSLabel, m.baseDomain, port), limits)
 	if err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("container start failed: %v", err))
@@ -123,8 +132,7 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 		return fmt.Errorf("run container: %w", err)
 	}
 	if err := m.attachDatabaseNetworks(ctx, tenantID, containerID, envVars); err != nil {
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.discardContainer(ctx, serviceID, containerID)
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("database network attach failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("attach database networks: %w", err)
@@ -133,21 +141,19 @@ func (m *Manager) DeployImage(ctx context.Context, tenantID, serviceID, imageTag
 	now := time.Now().Unix()
 	url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
 	res, err := m.db.ExecContext(ctx,
-		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
-		containerID, url, now, serviceID, tenantID,
+		`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`+activeTenantGuard,
+		containerID, url, now, serviceID, tenantID, tenantID,
 	)
 	if err != nil {
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.discardContainer(ctx, serviceID, containerID)
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("db update failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return fmt.Errorf("update service: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		log.Printf("WARNING: service %s was deleted (or circuit opened) during deploy; removing orphan container %s", serviceID, containerID)
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
-		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted or circuit opened during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
-		return fmt.Errorf("service deleted or circuit opened during deploy")
+		log.Printf("WARNING: service %s was deleted (or circuit opened, or tenant suspended) during deploy; removing orphan container %s", serviceID, containerID)
+		m.discardContainer(ctx, serviceID, containerID)
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(errDeployInterrupted), deployments.WithCompletedAt(time.Now().Unix()))
+		return errors.New(errDeployInterrupted)
 	}
 
 	m.updateDeploymentStatus(ctx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))

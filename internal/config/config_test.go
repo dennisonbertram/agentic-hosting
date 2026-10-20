@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefault(t *testing.T) {
@@ -162,4 +164,35 @@ func TestFromEnv_KanbanPortRangePartialOverride(t *testing.T) {
 	cfg := FromEnv()
 	assert.Equal(t, 8000, cfg.KanbanPortStart)
 	assert.Equal(t, DefaultKanbanPortEnd, cfg.KanbanPortEnd)
+}
+
+func TestParseCORSOrigins_NoValidOriginsDisablesCORS(t *testing.T) {
+	for _, raw := range []string{"*", ",", "none", " NONE ", "*,none"} {
+		got := ParseCORSOrigins(raw)
+		assert.NotNil(t, got, "%q must return a non-nil empty slice (nil means defaults)", raw)
+		assert.Empty(t, got, raw)
+	}
+}
+
+func TestLoadFromEnv_ReportsInvalidValues(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "ninety")
+	t.Setenv("AH_SNAPSHOT_MAX_PER_SERVICE", "unlimited")
+	_, err := LoadFromEnv()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AH_SNAPSHOT_MAX_AGE")
+	assert.Contains(t, err.Error(), "AH_SNAPSHOT_MAX_PER_SERVICE")
+}
+
+func TestLoadFromEnv_AcceptsDaySuffix(t *testing.T) {
+	t.Setenv("AH_SNAPSHOT_MAX_AGE", "90d")
+	cfg, err := LoadFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, 90*24*time.Hour, cfg.SnapshotMaxAge)
+}
+
+func TestLoadFromEnv_RejectsInvertedKanbanRange(t *testing.T) {
+	t.Setenv("AH_KANBAN_PORT_START", "9000")
+	t.Setenv("AH_KANBAN_PORT_END", "8000")
+	_, err := LoadFromEnv()
+	require.Error(t, err)
 }

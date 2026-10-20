@@ -469,6 +469,23 @@ func (m *Manager) Start(ctx context.Context, tenantID, envID string) error {
 		return fmt.Errorf("ensure environment network: %w", err)
 	}
 
+	// Push the lease forward before starting the container. The reconciler's
+	// retry pass stops running containers of 'stopped' rows whose lease has
+	// expired; without this it could stop the container we are starting here
+	// before the final UPDATE commits 'running'.
+	{
+		now := time.Now().Unix()
+		hold := int64(e.LeaseDurationSeconds)
+		if hold < 300 {
+			hold = 300
+		}
+		if _, err := m.db.ExecContext(ctx,
+			`UPDATE environments SET lease_expires_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND status = 'stopped'`,
+			now+hold, now, envID, tenantID); err != nil {
+			return fmt.Errorf("extend lease before start: %w", err)
+		}
+	}
+
 	containerID := e.ContainerID
 	recreated := false
 	if err := m.docker.StartContainer(ctx, e.ContainerID); err != nil {

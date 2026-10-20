@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -568,6 +569,9 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	if len(req.Env) > 0 {
+		if err := checkEnvVarQuota(ctx, tx, tenantID, id, req.Env); err != nil {
+			return nil, err
+		}
 		for k, v := range req.Env {
 			encrypted, encErr := crypto.Encrypt([]byte(v), m.masterKey)
 			if encErr != nil {
@@ -620,7 +624,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		defer func() { <-m.deployQueue }()
 	default:
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", "deploy queue full; try again later")
-		return apierr.Conflict("deploy queue full; try again later")
+		return apierr.Conflict("deploy queue full; try again later") // 409 kept for Deploy (existing API contract)
 	}
 
 	// Acquire deploy slot (bounded concurrency)
@@ -648,7 +652,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 	// Check disk space before deploy
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", err.Error())
-		return fmt.Errorf("disk check: %w", err)
+		return errDiskLow(err)
 	}
 
 	m.updateStatusScoped(ctx, tenantID, serviceID, "deploying")
@@ -729,6 +733,14 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 
 	port := resolvePort(svc.Port, envVars)
 
+	// Re-check the tenant after the (possibly slow) pull: a suspension that
+	// landed meanwhile must not get a fresh container. StopAllForTenant has
+	// already set the row's status, so only the deployment row is failed here.
+	if err := m.checkTenantActive(ctx, tenantID); err != nil {
+		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("tenant not active"), deployments.WithCompletedAt(time.Now().Unix()))
+		return err
+	}
+
 	// Load resource limits from tenant quotas
 	limits := m.getResourceLimits(ctx, tenantID)
 
@@ -739,8 +751,7 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
 	}
 	if err := m.attachDatabaseNetworks(ctx, tenantID, containerID, envVars); err != nil {
-		_ = m.docker.StopContainer(ctx, containerID)
-		_ = m.docker.RemoveContainer(ctx, containerID)
+		m.discardContainer(ctx, serviceID, containerID)
 		m.updateStatusWithErrorScoped(ctx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
 		m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("database network attach failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 		return apierr.DeployFailed(fmt.Errorf("attach database networks: %w", err))
@@ -750,23 +761,22 @@ func (m *Manager) Deploy(ctx context.Context, tenantID, serviceID string) error 
 		now := time.Now().Unix()
 		url := publicURL(serviceID, svc.DNSLabel, m.baseDomain)
 		res, err := m.db.ExecContext(ctx,
-			`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
-			containerID, url, now, serviceID, tenantID,
+			`UPDATE services SET status = 'running', container_id = ?, url = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`+activeTenantGuard,
+			containerID, url, now, serviceID, tenantID, tenantID,
 		)
 		if err != nil {
 			// Container is running but DB update failed; try to clean up
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
+			m.discardContainer(ctx, serviceID, containerID)
 			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(fmt.Sprintf("db update failed: %v", err)), deployments.WithCompletedAt(time.Now().Unix()))
 			return fmt.Errorf("update service: %w", err)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			// Service was deleted while we were deploying; clean up the container
-			log.Printf("WARNING: service %s was deleted (or circuit opened) during deploy; removing orphan container %s", serviceID, containerID)
-			_ = m.docker.StopContainer(ctx, containerID)
-			_ = m.docker.RemoveContainer(ctx, containerID)
-			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError("service deleted or circuit opened during deploy"), deployments.WithCompletedAt(time.Now().Unix()))
-			return fmt.Errorf("service deleted or circuit opened during deploy")
+			// Service was deleted, circuit opened or tenant suspended while we were
+			// deploying; clean up the container
+			log.Printf("WARNING: service %s was deleted (or circuit opened, or tenant suspended) during deploy; removing orphan container %s", serviceID, containerID)
+			m.discardContainer(ctx, serviceID, containerID)
+			m.updateDeploymentStatus(ctx, deployID, deployments.StatusFailed, deployments.WithError(errDeployInterrupted), deployments.WithCompletedAt(time.Now().Unix()))
+			return errors.New(errDeployInterrupted)
 		}
 	}
 
@@ -967,6 +977,34 @@ func (m *Manager) Start(ctx context.Context, tenantID, serviceID string) error {
 	return nil
 }
 
+// activeTenantGuard is appended to the final "status = 'running'" UPDATE of
+// Deploy, DeployImage and Restart (takes one extra tenantID arg). A tenant
+// suspended while a deploy was in flight makes the update affect 0 rows, and
+// the caller then removes the new container instead of leaving it running.
+const activeTenantGuard = ` AND EXISTS (SELECT 1 FROM tenants WHERE id = ? AND status = 'active')`
+
+// errDeployInterrupted is returned when the final state write of a deploy is
+// rejected because the service changed underneath it.
+const errDeployInterrupted = "service deleted, circuit opened or tenant suspended during deploy"
+
+// discardContainer stops and removes a container this manager just created
+// but cannot keep. It runs on a fresh bounded context so a cancelled or
+// expired caller context cannot leave the container running and untracked.
+func (m *Manager) discardContainer(ctx context.Context, serviceID, containerID string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := m.docker.StopContainer(cctx, containerID); err != nil && !isNotFoundError(err) && !isAlreadyStoppedError(err) {
+		log.Printf("WARNING: stop of discarded container %s for service %s failed: %v", cidShort(containerID), serviceID, err)
+	}
+	if err := m.docker.RemoveContainer(cctx, containerID); err != nil && !isNotFoundError(err) {
+		log.Printf("WARNING: remove of discarded container %s for service %s failed: %v (GC will retry)", cidShort(containerID), serviceID, err)
+	}
+}
+
+// restartDeployTimeout bounds the full Deploy that Restart runs for a service
+// with no container. Matches the async create-path deploy timeout.
+const restartDeployTimeout = 10 * time.Minute
+
 // Restart recreates the service container so that updated env vars take effect.
 // Docker container env is immutable after creation; a stop+start does NOT apply
 // env var changes. This method stops the old container, removes it, then runs a
@@ -978,7 +1016,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 
 	// Run disk-space preflight (same as Deploy) before acquiring any semaphore.
 	if err := diskcheck.CheckAll([]string{"/var/lib/ah", "/var/lib/docker"}, 80, 90); err != nil {
-		return fmt.Errorf("disk check: %w", err)
+		return errDiskLow(err)
 	}
 
 	// Verify existence and ownership cheaply before acquiring global backpressure.
@@ -989,8 +1027,14 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	// No container (failed first deploy, failed restart, circuit reset): there is
 	// nothing to restart, so run the full Deploy path (pull, create, route).
 	// Deploy takes its own queue/semaphore/lock, so this must happen before ours.
+	// Deploy runs on a detached, bounded context (as the async create path does):
+	// callers pass a request context with a short HTTP timeout, and an image
+	// pull or the failure-status writes must not die with it, or the service
+	// and deployment rows are left stuck in 'deploying'.
 	if pre.ContainerID == "" && !pre.CircuitOpen {
-		return m.Deploy(ctx, tenantID, serviceID)
+		deployCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartDeployTimeout)
+		defer cancel()
+		return m.Deploy(deployCtx, tenantID, serviceID)
 	}
 
 	// LOCK ORDER: deployQueue → deploySem → lockService (same as Deploy).
@@ -1000,7 +1044,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	case m.deployQueue <- struct{}{}:
 		defer func() { <-m.deployQueue }()
 	default:
-		return fmt.Errorf("deploy queue full; try again later")
+		return errDeployQueueFull()
 	}
 	select {
 	case m.deploySem <- struct{}{}:
@@ -1167,8 +1211,7 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 		return apierr.DeployFailed(fmt.Errorf("run container: %w", err))
 	}
 	if err := m.attachDatabaseNetworks(opCtx, tenantID, containerID, envVars); err != nil {
-		_ = m.docker.StopContainer(opCtx, containerID)
-		_ = m.docker.RemoveContainer(opCtx, containerID)
+		m.discardContainer(opCtx, serviceID, containerID)
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("database network attach failed: %v", err))
 		if traefikErr := m.deleteTraefikRoute(serviceID); traefikErr != nil {
 			log.Printf("WARNING: failed to delete traefik route for service %s after restart attach failure: %v", serviceID, traefikErr)
@@ -1177,21 +1220,22 @@ func (m *Manager) Restart(ctx context.Context, tenantID, serviceID string) (retE
 	}
 
 	dbUpdRes, dbUpdErr := m.db.ExecContext(opCtx,
-		`UPDATE services SET status = 'running', container_id = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`,
-		containerID, time.Now().Unix(), serviceID, tenantID,
+		`UPDATE services SET status = 'running', container_id = ?, last_error = '', last_restart_count = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND circuit_open = 0`+activeTenantGuard,
+		containerID, time.Now().Unix(), serviceID, tenantID, tenantID,
 	)
 	if dbUpdErr != nil {
 		// Container is running but DB update failed; clean up to avoid orphan.
 		m.updateStatusWithErrorScoped(opCtx, tenantID, serviceID, "failed", fmt.Sprintf("DB update failed after restart: %v", dbUpdErr))
-		_ = m.docker.StopContainer(opCtx, containerID)
-		_ = m.docker.RemoveContainer(opCtx, containerID)
+		m.discardContainer(opCtx, serviceID, containerID)
 		return fmt.Errorf("update service after restart: %w", dbUpdErr)
 	}
 	if n, _ := dbUpdRes.RowsAffected(); n == 0 {
-		log.Printf("WARNING: service %s was deleted (or circuit opened) during restart; removing orphan container %s", serviceID, containerID)
-		_ = m.docker.StopContainer(opCtx, containerID)
-		_ = m.docker.RemoveContainer(opCtx, containerID)
-		return fmt.Errorf("service deleted or circuit opened during restart")
+		log.Printf("WARNING: service %s was deleted (or circuit opened, or tenant suspended) during restart; removing orphan container %s", serviceID, containerID)
+		m.discardContainer(opCtx, serviceID, containerID)
+		if traefikErr := m.deleteTraefikRoute(serviceID); traefikErr != nil {
+			log.Printf("WARNING: failed to delete traefik route for service %s after interrupted restart: %v", serviceID, traefikErr)
+		}
+		return fmt.Errorf("service deleted, circuit opened or tenant suspended during restart")
 	}
 
 	m.updateDeploymentStatus(opCtx, deployID, deployments.StatusRunning, deployments.WithContainerID(containerID), deployments.WithCompletedAt(time.Now().Unix()))
@@ -1287,6 +1331,13 @@ func (m *Manager) Delete(ctx context.Context, tenantID, serviceID string) error 
 		return fmt.Errorf("commit delete service: %w", err)
 	}
 	for _, ref := range snapRefs {
+		// A service restored from one of these snapshots runs from its tag,
+		// which exists only locally; keep it (GC reclaims it once unused).
+		var inUse int
+		if err := m.db.QueryRowContext(ctx, `SELECT 1 FROM services WHERE image = ? LIMIT 1`, ref).Scan(&inUse); !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("services: keeping snapshot image %s for deleted service %s (in use or check failed: %v)", ref, serviceID, err)
+			continue
+		}
 		if err := m.docker.RemoveImage(ctx, ref); err != nil {
 			log.Printf("WARNING: failed to remove snapshot image %s for deleted service %s: %v", ref, serviceID, err)
 		}
@@ -1589,7 +1640,7 @@ func (m *Manager) SetEnv(ctx context.Context, tenantID, serviceID string, vars m
 	if err := ValidateEnvVars(vars); err != nil {
 		return err
 	}
-	return m.setEnvVars(ctx, serviceID, vars)
+	return m.setEnvVars(ctx, tenantID, serviceID, vars)
 }
 
 // GetEnv returns env var keys for a service. If reveal is true, returns decrypted values.
@@ -1725,7 +1776,7 @@ func (m *Manager) ResetCircuitBreaker(ctx context.Context, tenantID, serviceID s
 	case m.deployQueue <- struct{}{}:
 		defer func() { <-m.deployQueue }()
 	default:
-		return fmt.Errorf("deploy queue full; try again later")
+		return errDeployQueueFull()
 	}
 	select {
 	case m.deploySem <- struct{}{}:
@@ -1851,12 +1902,16 @@ func (m *Manager) ResetCircuitBreaker(ctx context.Context, tenantID, serviceID s
 	return nil
 }
 
-func (m *Manager) setEnvVars(ctx context.Context, serviceID string, vars map[string]string) error {
+func (m *Manager) setEnvVars(ctx context.Context, tenantID, serviceID string, vars map[string]string) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := checkEnvVarQuota(ctx, tx, tenantID, serviceID, vars); err != nil {
+		return err
+	}
 
 	now := time.Now().Unix()
 	for k, v := range vars {
@@ -1875,6 +1930,57 @@ func (m *Manager) setEnvVars(ctx context.Context, serviceID string, vars map[str
 		}
 	}
 	return tx.Commit()
+}
+
+// checkEnvVarQuota enforces tenant_quotas.max_env_vars_per_service: the
+// service's existing keys plus the new distinct keys in vars must not exceed
+// the limit. Upserts of existing keys do not count. A tenant with no quota row
+// is not limited here. Runs inside the caller's transaction so the count and
+// the inserts are consistent.
+func checkEnvVarQuota(ctx context.Context, tx *sql.Tx, tenantID, serviceID string, vars map[string]string) error {
+	if len(vars) == 0 {
+		return nil
+	}
+	var maxVars int
+	err := tx.QueryRowContext(ctx,
+		`SELECT max_env_vars_per_service FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
+	).Scan(&maxVars)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check env var quota: %w", err)
+	}
+
+	existing := make(map[string]bool)
+	rows, err := tx.QueryContext(ctx, `SELECT key FROM service_env WHERE service_id = ?`, serviceID)
+	if err != nil {
+		return fmt.Errorf("count env vars: %w", err)
+	}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[k] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	total := len(existing)
+	for k := range vars {
+		if !existing[k] {
+			total++
+		}
+	}
+	if total > maxVars {
+		return apierr.QuotaExceeded(fmt.Sprintf("quota exceeded: maximum %d env vars per service (would have %d)", maxVars, total))
+	}
+	return nil
 }
 
 func (m *Manager) getEnvVars(ctx context.Context, serviceID string) (map[string]string, error) {
@@ -1900,6 +2006,18 @@ func (m *Manager) getEnvVars(ctx context.Context, serviceID string) (map[string]
 		result[key] = string(plaintext)
 	}
 	return result, rows.Err()
+}
+
+// errDeployQueueFull is the retryable backpressure error returned when the
+// global deploy queue is full (503 + Retry-After rather than 500).
+func errDeployQueueFull() error {
+	return apierr.Unavailable("deploy queue full; try again later", nil)
+}
+
+// errDiskLow wraps a diskcheck failure as a retryable 503.
+func errDiskLow(cause error) error {
+	log.Printf("services: disk check refused deploy: %v", cause)
+	return apierr.Unavailable("insufficient disk space; try again later", cause)
 }
 
 func generateID() (string, error) {

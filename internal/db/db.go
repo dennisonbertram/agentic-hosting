@@ -53,8 +53,13 @@ func MeteringPath(dbPath string) string {
 	return strings.TrimSuffix(dbPath, ".db") + "-metering.db"
 }
 
+// openDB opens a WAL-mode SQLite pool. _txlock=immediate makes every
+// Begin/BeginTx a BEGIN IMMEDIATE: a deferred transaction that reads and
+// then writes must upgrade its lock, and if another connection committed in
+// between SQLite returns SQLITE_BUSY_SNAPSHOT at once without consulting the
+// busy timeout. Taking the write lock up front lets _busy_timeout apply.
 func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

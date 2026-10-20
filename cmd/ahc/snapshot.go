@@ -197,7 +197,7 @@ func runSnapshotDelete(c *ahclient.Client, nameOrID string, confirm bool) error 
 
 // resolveSnapshotID converts a name-or-ID argument into a snapshot ID.
 // If arg is exactly 32 lowercase hex characters, it is used directly.
-// Otherwise, ListSnapshots is called and filtered by name.
+// Otherwise, ListSnapshots is called and filtered by name, then by unique ID prefix.
 func resolveSnapshotID(c *ahclient.Client, arg string) (string, error) {
 	if isHexID(arg) {
 		return arg, nil
@@ -217,7 +217,11 @@ func resolveSnapshotID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("snapshot %q not found", arg)
+		ids := make([]string, len(snapshots))
+		for i := range snapshots {
+			ids[i] = snapshots[i].ID
+		}
+		return resolveIDPrefix("snapshot", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:

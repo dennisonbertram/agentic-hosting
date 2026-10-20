@@ -47,7 +47,7 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 	// Apply the same rate limiter as tenant registration to prevent
 	// brute-force of the bootstrap token via this endpoint.
 	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
+	if ok, wait := adminLimiter.allow(ip); !ok {
 		secs := int(math.Ceil(wait.Seconds()))
 		if secs < 1 {
 			secs = 1

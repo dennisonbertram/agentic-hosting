@@ -513,7 +513,7 @@ func writeDeploymentTable(w io.Writer, deps []ahclient.Deployment) {
 //
 // Rules:
 //   - If arg is exactly 32 lowercase hex characters, it is used directly as an ID.
-//   - Otherwise, ListServices is called and the result is filtered by name.
+//   - Otherwise, ListServices is called and filtered by name, then by unique ID prefix.
 //   - If exactly one match is found, its ID is returned.
 //   - If zero matches are found, an error is returned.
 //   - If more than one match is found, an "ambiguous" error is returned.
@@ -536,12 +536,44 @@ func resolveServiceID(c *ahclient.Client, arg string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("service %q not found", arg)
+		ids := make([]string, len(svcs))
+		for i := range svcs {
+			ids[i] = svcs[i].ID
+		}
+		return resolveIDPrefix("service", arg, ids)
 	case 1:
 		return matches[0].ID, nil
 	default:
 		return "", fmt.Errorf("ambiguous: %d services named %q", len(matches), arg)
 	}
+}
+
+// minIDPrefix is the shortest ID prefix accepted (list tables print 8).
+const minIDPrefix = 4
+
+// resolveIDPrefix is the fallback when no name matched: a hex argument
+// shorter than a full ID, such as the 8-character IDs printed by the list
+// tables, is matched as an ID prefix. More than one match is ambiguous.
+func resolveIDPrefix(noun, arg string, ids []string) (string, error) {
+	lower := strings.ToLower(arg)
+	if len(lower) >= minIDPrefix && len(lower) < 32 {
+		if _, err := hex.DecodeString(lower + strings.Repeat("0", len(lower)%2)); err == nil {
+			var found []string
+			for _, id := range ids {
+				if strings.HasPrefix(id, lower) {
+					found = append(found, id)
+				}
+			}
+			switch len(found) {
+			case 1:
+				return found[0], nil
+			case 0:
+			default:
+				return "", fmt.Errorf("ambiguous: %d %ss have IDs starting with %q; use more characters", len(found), noun, arg)
+			}
+		}
+	}
+	return "", fmt.Errorf("%s %q not found", noun, arg)
 }
 
 // isHexID returns true if s is exactly 32 lowercase hexadecimal characters.

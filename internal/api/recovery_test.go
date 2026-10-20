@@ -31,7 +31,7 @@ func recoverRequest(ip string, body []byte) *http.Request {
 }
 
 func TestHandleKeyRecover(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const bootstrapToken = "test-bootstrap-token-for-recovery"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 
@@ -202,7 +202,7 @@ func TestHandleKeyRecover(t *testing.T) {
 // TestHandleKeyRecover_FullKeyring tests the auto-revocation behavior when the
 // tenant's keyring is full (issue #138).
 func TestHandleKeyRecover_FullKeyring(t *testing.T) {
-	regLimiter.resetForTest()
+	resetLimitersForTest()
 	const bootstrapToken = "test-bootstrap-token-for-full-keyring"
 	masterKey := []byte("0123456789abcdef0123456789abcdef")
 

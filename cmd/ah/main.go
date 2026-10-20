@@ -32,7 +32,12 @@ import (
 )
 
 func main() {
-	cfg := config.FromEnv()
+	// Fail fast on invalid settings: silently defaulting e.g. a retention
+	// value would let snapshot GC delete data the operator meant to keep.
+	cfg, cfgErr := config.LoadFromEnv()
+	if cfgErr != nil {
+		log.Fatalf("FATAL: invalid configuration: %v", cfgErr)
+	}
 
 	// Check for subcommands before flag.Parse
 	if len(os.Args) > 1 {
@@ -64,7 +69,7 @@ func main() {
 	dbPath := flag.String("db-path", cfg.DBPath, "Path to state SQLite database")
 	masterKeyPath := flag.String("master-key-path", cfg.MasterKeyPath, "Path to master encryption key")
 	baseDomain := flag.String("base-domain", cfg.BaseDomain, "Base domain for public service URLs (e.g. example.com)")
-	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist")
+	corsOrigins := flag.String("cors-origins", strings.Join(cfg.CORSOrigins, ","), "Comma-separated CORS Origin allowlist (\"none\" disables CORS)")
 	devMode := flag.Bool("dev", false, "Development mode (disables HTTPS enforcement)")
 	openRegistration := flag.Bool("open-registration", false, "Allow registration without bootstrap token (requires --dev)")
 	flag.Parse()
@@ -198,11 +203,14 @@ func main() {
 	// Create deployment store for tracking deployment history
 	deployStore := deployments.NewStore(store.StateDB)
 
+	// One service manager shared by the build pipeline and the API so build
+	// deploys and API deploy/restart/reset serialize on the same per-service
+	// locks and share one deploy semaphore/queue.
+	svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
+	svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
+
 	var buildMgr *builds.Manager
 	if nixBuilder != nil {
-		// Create service manager early to get DeployImage function
-		svcMgr := services.NewManager(store.StateDB, dockerClient, masterKey[:32], *baseDomain, cfg.TraefikConfigDir, deployStore)
-		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
 		buildMgr = builds.NewManager(store.StateDB, nixBuilder, svcMgr.DeployImage)
 	}
 
@@ -232,7 +240,15 @@ func main() {
 	// Create kanban manager
 	kanbanMgr := kanbans.NewManagerWithPortRange(store.StateDB, dockerClient, masterKey[:32], cfg.KanbanPortStart, cfg.KanbanPortEnd)
 	log.Printf("kanban port range: %d-%d (%d ports)", cfg.KanbanPortStart, cfg.KanbanPortEnd, cfg.KanbanPortEnd-cfg.KanbanPortStart+1)
-	corsAllow := config.ParseCORSOrigins(*corsOrigins)
+	// Only re-parse when --cors-origins was given: cfg.CORSOrigins may be a
+	// deliberately empty allowlist (AH_CORS_ORIGINS=none), which joins to ""
+	// and would otherwise re-parse as the defaults.
+	corsAllow := cfg.CORSOrigins
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cors-origins" {
+			corsAllow = config.ParseCORSOrigins(*corsOrigins)
+		}
+	})
 	if len(corsAllow) == 0 {
 		log.Printf("CORS: disabled (empty allowlist)")
 	} else {
@@ -249,6 +265,7 @@ func main() {
 		OpenRegistration:      *openRegistration,
 		Docker:                dockerClient,
 		BuildManager:          buildMgr,
+		ServiceManager:        svcMgr,
 		DeploymentStore:       deployStore,
 		DatabaseManager:       dbMgr,
 		KanbanManager:         kanbanMgr,

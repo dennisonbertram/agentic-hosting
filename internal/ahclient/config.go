@@ -59,15 +59,11 @@ func LoadConfig(opts LoadOptions) (*Config, error) {
 		cfgPath, _ = DefaultConfigPath() // empty if no home dir: skip the file
 	}
 	if cfgPath != "" {
-		data, err := os.ReadFile(cfgPath)
-		switch {
-		case err == nil:
-			if err := json.Unmarshal(data, cfg); err != nil {
-				return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
-			}
-		case !errors.Is(err, os.ErrNotExist):
-			return nil, fmt.Errorf("read %s: %w", cfgPath, err)
+		fileCfg, err := readConfigFile(cfgPath)
+		if err != nil {
+			return nil, err
 		}
+		cfg = fileCfg
 	}
 
 	if v := os.Getenv("AH_URL"); v != "" {
@@ -79,6 +75,42 @@ func LoadConfig(opts LoadOptions) (*Config, error) {
 
 	if cfg.URL == "" && cfg.Key == "" {
 		return nil, ErrNoConfig
+	}
+	return cfg, nil
+}
+
+// LoadConfigFile reads only the config file at cfgPath (the default path if
+// empty), ignoring AH_URL and AH_KEY. Use it when the result will be saved
+// back, so transient environment credentials are never written to disk.
+// Returns ErrNoConfig if the file is missing or holds no values.
+func LoadConfigFile(cfgPath string) (*Config, error) {
+	if cfgPath == "" {
+		var err error
+		if cfgPath, err = DefaultConfigPath(); err != nil {
+			return nil, err
+		}
+	}
+	cfg, err := readConfigFile(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.URL == "" && cfg.Key == "" {
+		return nil, ErrNoConfig
+	}
+	return cfg, nil
+}
+
+// readConfigFile parses cfgPath; a missing file yields an empty Config.
+func readConfigFile(cfgPath string) (*Config, error) {
+	cfg := &Config{}
+	data, err := os.ReadFile(cfgPath)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, fmt.Errorf("read %s: %w", cfgPath, err)
 	}
 	return cfg, nil
 }

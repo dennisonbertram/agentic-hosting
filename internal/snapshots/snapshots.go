@@ -280,8 +280,9 @@ func (m *Manager) Delete(ctx context.Context, tenantID, snapshotID string) error
 		return err
 	}
 
-	// Best-effort image removal — log but don't fail the delete.
-	if snap.ImageRef != "" {
+	// Best-effort image removal — log but don't fail the delete. Keep the tag
+	// while a service restored from this snapshot still runs from it.
+	if snap.ImageRef != "" && !m.imageReferencedByService(ctx, snap.ImageRef) {
 		if err := m.docker.RemoveImage(ctx, snap.ImageRef); err != nil {
 			log.Printf("WARNING: failed to remove snapshot image %s: %v", snap.ImageRef, err)
 		}
@@ -513,8 +514,10 @@ func (m *Manager) cleanByAge(ctx context.Context, maxAge time.Duration) (int, er
 
 // deleteSnapshot removes a snapshot's Docker image and DB row.
 func (m *Manager) deleteSnapshot(ctx context.Context, id, tenantID, imageRef string) error {
-	// Best-effort image removal.
-	if imageRef != "" {
+	// Best-effort image removal. Keep the tag while a service restored from
+	// this snapshot still runs from it; GC's removeUnusedBuiltImages reclaims
+	// it once nothing references it.
+	if imageRef != "" && !m.imageReferencedByService(ctx, imageRef) {
 		if err := m.docker.RemoveImage(ctx, imageRef); err != nil {
 			log.Printf("gc/snapshots: WARNING: failed to remove image %s: %v", imageRef, err)
 		}
@@ -529,6 +532,30 @@ func (m *Manager) deleteSnapshot(ctx context.Context, id, tenantID, imageRef str
 	}
 
 	return nil
+}
+
+// imageReferencedByService reports whether any service runs from imageRef
+// (services restored from a snapshot use the snapshot tag, which exists only
+// locally, so untagging it breaks their next recreate). A query error counts
+// as referenced so the tag is kept.
+func (m *Manager) imageReferencedByService(ctx context.Context, imageRef string) bool {
+	return ImageReferencedByService(ctx, m.db, imageRef)
+}
+
+// ImageReferencedByService is the shared check used by snapshot and service
+// deletion before untagging a snapshot image.
+func ImageReferencedByService(ctx context.Context, db *sql.DB, imageRef string) bool {
+	var one int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM services WHERE image = ? LIMIT 1`, imageRef).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	if err != nil {
+		log.Printf("snapshots: image reference check for %s failed: %v (keeping tag)", imageRef, err)
+	} else {
+		log.Printf("snapshots: keeping image %s: still used by a service", imageRef)
+	}
+	return true
 }
 
 func generateID() (string, error) {

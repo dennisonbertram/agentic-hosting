@@ -89,6 +89,20 @@ var regLimiter = &registrationLimiter{
 	// globalWindowAt zero-value: first request starts the window
 }
 
+// adminLimiter rate-limits the admin-token routes (recover, reactivate,
+// quotas) with the same per-IP/global limits as registration but in separate
+// buckets, so bootstrap-token holders exhausting the registration budget
+// cannot lock the operator out of admin endpoints (and vice versa).
+var adminLimiter = &registrationLimiter{
+	entries: cache.New[string, *regEntry](regMaxEntries),
+}
+
+// resetLimitersForTest resets both the registration and admin limiters.
+func resetLimitersForTest() {
+	regLimiter.resetForTest()
+	adminLimiter.resetForTest()
+}
+
 // resetForTest resets the rate limiter state. Exported only for tests within
 // the api package (unexported, same-package access only).
 func (rl *registrationLimiter) resetForTest() {
@@ -104,9 +118,11 @@ func init() {
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
 			now := time.Now()
-			regLimiter.entries.DeleteFunc(func(_ string, v *regEntry) bool {
-				return now.After(v.windowAt)
-			})
+			for _, rl := range []*registrationLimiter{regLimiter, adminLimiter} {
+				rl.entries.DeleteFunc(func(_ string, v *regEntry) bool {
+					return now.After(v.windowAt)
+				})
+			}
 		}
 	}()
 }
@@ -192,7 +208,6 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	regLimiter.chargeGlobal()
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -294,6 +309,9 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// Charge the global registration budget only for a tenant actually
+	// created, so requests that fail validation cannot exhaust it.
+	regLimiter.chargeGlobal()
 
 	// Return token in format "keyID.secret" for O(1) lookup
 	token := keyID + "." + apiKey
@@ -481,7 +499,7 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 	// Apply the same rate limiter as tenant registration to prevent
 	// brute-force of the bootstrap token via this endpoint.
 	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
+	if ok, wait := adminLimiter.allow(ip); !ok {
 		secs := int(math.Ceil(wait.Seconds()))
 		if secs < 1 {
 			secs = 1
@@ -605,15 +623,15 @@ type QuotaUpdateRequest struct {
 
 // QuotaUpdateResponse is the response body for PATCH /v1/tenants/{tenantID}/quotas.
 type QuotaUpdateResponse struct {
-	TenantID             string `json:"tenant_id"`
-	MaxServices          int    `json:"max_services"`
-	MaxDatabases         int    `json:"max_databases"`
-	MaxBuildsConcurrent  int    `json:"max_builds_concurrent"`
-	MaxEnvVarsPerService int    `json:"max_env_vars_per_service"`
-	MaxMemoryMB          int    `json:"max_memory_mb"`
+	TenantID             string  `json:"tenant_id"`
+	MaxServices          int     `json:"max_services"`
+	MaxDatabases         int     `json:"max_databases"`
+	MaxBuildsConcurrent  int     `json:"max_builds_concurrent"`
+	MaxEnvVarsPerService int     `json:"max_env_vars_per_service"`
+	MaxMemoryMB          int     `json:"max_memory_mb"`
 	MaxCPUCores          float64 `json:"max_cpu_cores"`
-	MaxDiskGB            int    `json:"max_disk_gb"`
-	APIRateLimit         int    `json:"api_rate_limit"`
+	MaxDiskGB            int     `json:"max_disk_gb"`
+	APIRateLimit         int     `json:"api_rate_limit"`
 }
 
 // Quota caps — hard upper bounds for operator-set quotas.
@@ -636,7 +654,7 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 	// Apply the same rate limiter as tenant registration to prevent
 	// brute-force of the bootstrap token via this endpoint.
 	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
+	if ok, wait := adminLimiter.allow(ip); !ok {
 		secs := int(math.Ceil(wait.Seconds()))
 		if secs < 1 {
 			secs = 1
@@ -830,7 +848,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, provided, unavailableMsg st
 			return false
 		}
 	}
-	regLimiter.chargeGlobal()
+	adminLimiter.chargeGlobal()
 	return true
 }
 

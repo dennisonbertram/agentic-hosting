@@ -46,6 +46,11 @@ type ServerConfig struct {
 	DataDir               string // data dir for health disk checks (default /var/lib/ah)
 	ExternalTLSTerminated bool
 	CORSOrigins           []string // nil = middleware defaults; empty = disable CORS
+	// ServiceManager, when set, is used for all service lifecycle calls. Pass
+	// the same instance whose DeployImage the build manager uses so build
+	// deploys and API deploy/restart/reset share per-service locks and the
+	// deploy semaphore/queue. When nil and Docker is set, NewServer creates one.
+	ServiceManager *services.Manager
 }
 
 type kanbanManager interface {
@@ -127,10 +132,15 @@ func NewServer(cfg ServerConfig) *Server {
 
 	var svcMgr *services.Manager
 	var snapMgr *snapshots.Manager
+	if cfg.ServiceManager != nil {
+		svcMgr = cfg.ServiceManager
+	}
 	if cfg.Docker != nil {
+		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
+	}
+	if svcMgr == nil && cfg.Docker != nil {
 		svcMgr = services.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey, cfg.BaseDomain, cfg.TraefikConfigDir, cfg.DeploymentStore)
 		svcMgr.SetExternalTLSTerminated(cfg.ExternalTLSTerminated)
-		snapMgr = snapshots.NewManager(cfg.Store.StateDB, cfg.Docker, cfg.MasterKey)
 	}
 
 	s := &Server{
@@ -227,7 +237,6 @@ func (s *Server) setupRoutes() {
 		r.Get("/v1/tenant/usage", s.handleTenantUsage)
 		r.Get("/v1/tenant/usage/metrics", s.handleTenantMetrics)
 		r.Patch("/v1/tenant", s.handleTenantUpdate)
-		r.Delete("/v1/tenant", s.handleTenantDelete)
 
 		r.Post("/v1/auth/keys", s.handleKeyCreate)
 		r.Get("/v1/auth/keys", s.handleKeyList)
@@ -302,6 +311,11 @@ func (s *Server) setupRoutes() {
 		r.Use(s.longInflight.Middleware)
 		r.Use(middleware.IdleWriteDeadline(streamIdleWriteDeadline))
 		r.Use(s.idempotencyStore.Middleware)
+		// Tenant delete stops every service/database/kanban/environment
+		// container synchronously after the suspension commits; that can take
+		// minutes, and a timeout here would leave the client unable to tell
+		// the delete succeeded (its retry gets 401, keys are revoked).
+		r.Delete("/v1/tenant", s.handleTenantDelete)
 		r.Get("/v1/services/{serviceID}/logs", s.handleServiceLogs)
 		r.Get("/v1/services/{serviceID}/builds/{buildID}/logs", s.handleBuildLogs)
 		r.Post("/v1/databases", s.handleDatabaseCreate)

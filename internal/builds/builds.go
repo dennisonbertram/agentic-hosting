@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -134,30 +133,6 @@ func (m *Manager) reconcileStaleBuilds() {
 	}
 	if n, _ := result.RowsAffected(); n > 0 {
 		log.Printf("builds: marked %d stale builds as failed on startup", n)
-	}
-}
-
-// cleanupStaleBuildDirs removes build directories not referenced by active builds.
-func (m *Manager) cleanupStaleBuildDirs(workDir string) {
-	entries, err := os.ReadDir(workDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		// Check if this dir corresponds to an active build
-		var count int
-		m.db.QueryRow(`SELECT COUNT(*) FROM builds WHERE id = ? AND status IN ('pending', 'running')`, e.Name()).Scan(&count)
-		if count == 0 {
-			path := workDir + "/" + e.Name()
-			if err := os.RemoveAll(path); err != nil {
-				log.Printf("builds: failed to cleanup stale dir %s: %v", path, err)
-			} else {
-				log.Printf("builds: cleaned up stale build dir %s", e.Name())
-			}
-		}
 	}
 }
 
@@ -294,7 +269,8 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	}()
 	// NOTE: flushTailBuffer is called explicitly before each final status write
 	// (succeeded/failed) so that the DB log is fully flushed before any caller
-	// polling on build status can observe the terminal state.
+	// polling on build status can observe the terminal state. Log subscribers are
+	// closed here, after that write, on every exit path.
 	defer func() {
 		close(stopFlusher)
 		cbMu.Lock()
@@ -305,6 +281,7 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 		delete(m.cancels, buildID)
 		delete(m.phases, buildID)
 		m.logMu.Unlock()
+		m.closeLogSubs(buildID)
 	}()
 
 	now := time.Now().Unix()
@@ -314,6 +291,15 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	)
 	if dbErr != nil {
 		log.Printf("builds: failed to set build %s to running: %v", buildID, dbErr)
+		// Do not leave the row 'pending' until the next restart; nothing will run it.
+		failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer failCancel()
+		if _, err := m.db.ExecContext(failCtx,
+			`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'pending'`,
+			time.Now().Unix(), buildID,
+		); err != nil {
+			log.Printf("builds: failed to mark build %s as failed: %v", buildID, err)
+		}
 		return
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
@@ -341,16 +327,7 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if err != nil {
 		logCb("[ah] BUILD FAILED: " + err.Error())
 		log.Printf("build %s failed: %v", buildID, err)
-		// Flush tail buffer before writing final status so that any caller
-		// polling on status=failed will see a complete log.
-		m.flushTailBuffer(finalCtx, buildID)
-		if _, dbErr := m.db.ExecContext(finalCtx,
-			`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'`,
-			finishedAt, buildID,
-		); dbErr != nil {
-			log.Printf("builds: failed to mark build %s as failed: %v", buildID, dbErr)
-		}
-		m.closeLogSubs(buildID)
+		m.finishBuild(finalCtx, buildID, "failed", finishedAt)
 		return
 	}
 
@@ -359,7 +336,6 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if qErr := m.db.QueryRowContext(finalCtx, `SELECT status FROM builds WHERE id = ?`, buildID).Scan(&status); qErr != nil || status != "running" || ctx.Err() != nil {
 		log.Printf("build %s no longer running (status %q), skipping deploy", buildID, status)
 		m.flushTailBuffer(finalCtx, buildID)
-		m.closeLogSubs(buildID)
 		return
 	}
 	// Enter the deploy phase atomically with cancelActive: after this a cancel is
@@ -373,7 +349,6 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if cancelled {
 		log.Printf("build %s cancelled before deploy, skipping deploy", buildID)
 		m.flushTailBuffer(finalCtx, buildID)
-		m.closeLogSubs(buildID)
 		return
 	}
 
@@ -382,36 +357,29 @@ func (m *Manager) runBuild(buildID, tenantID, serviceID string, req builder.Buil
 	if m.deployFn != nil {
 		logCb("[ah] Deploying built image...")
 		deployCtx, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		if deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag, buildID); deployErr != nil {
+		deployErr := m.deployFn(deployCtx, tenantID, serviceID, req.ImageTag, buildID)
+		deployCancel()
+		if deployErr != nil {
 			log.Printf("build %s deploy failed: %v", buildID, deployErr)
 			logCb("[ah] Deploy failed: " + deployErr.Error())
-			// Flush tail buffer before writing final status so that any caller
-			// polling on status=failed will see a complete log.
-			m.flushTailBuffer(finalCtx, buildID)
-			if _, dbErr := m.db.ExecContext(finalCtx,
-				`UPDATE builds SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'`,
-				finishedAt, buildID,
-			); dbErr != nil {
-				log.Printf("builds: failed to mark build %s as failed after deploy error: %v", buildID, dbErr)
-			}
-			deployCancel()
-			m.closeLogSubs(buildID)
+			m.finishBuild(finalCtx, buildID, "failed", finishedAt)
 			return
-		} else {
-			logCb("[ah] Deploy succeeded")
 		}
-		deployCancel()
+		logCb("[ah] Deploy succeeded")
 	}
-	// Flush tail buffer before writing final status so that any caller
-	// polling on status=succeeded will see a complete log.
-	m.flushTailBuffer(finalCtx, buildID)
-	if _, dbErr := m.db.ExecContext(finalCtx,
-		`UPDATE builds SET status = 'succeeded', finished_at = ? WHERE id = ? AND status = 'running'`,
-		finishedAt, buildID,
-	); dbErr != nil {
-		log.Printf("builds: failed to mark build %s as succeeded: %v", buildID, dbErr)
+	m.finishBuild(finalCtx, buildID, "succeeded", finishedAt)
+}
+
+// finishBuild moves a running build to its terminal status. The log is flushed
+// first so a caller polling on the terminal status always sees the complete log.
+func (m *Manager) finishBuild(ctx context.Context, buildID, status string, finishedAt int64) {
+	m.flushTailBuffer(ctx, buildID)
+	if _, err := m.db.ExecContext(ctx,
+		`UPDATE builds SET status = ?, finished_at = ? WHERE id = ? AND status = 'running'`,
+		status, finishedAt, buildID,
+	); err != nil {
+		log.Printf("builds: failed to mark build %s as %s: %v", buildID, status, err)
 	}
-	m.closeLogSubs(buildID)
 }
 
 // appendLog accepts a log line. Lines are buffered and written to the DB in batches
@@ -598,17 +566,30 @@ func (m *Manager) GetBuild(ctx context.Context, tenantID, buildID string) (*Buil
 	return b, nil
 }
 
-// ListBuilds returns builds for a service, scoped to tenant.
+// ListBuilds returns the 50 most recent builds for a service, scoped to tenant.
 func (m *Manager) ListBuilds(ctx context.Context, tenantID, serviceID string) ([]*Build, error) {
+	return m.listBuilds(ctx, `b.tenant_id = ? AND b.service_id = ?`, []any{tenantID, serviceID}, 50)
+}
+
+// ListTenantBuilds returns recent builds across all services for a tenant.
+func (m *Manager) ListTenantBuilds(ctx context.Context, tenantID string, limit int) ([]*Build, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	return m.listBuilds(ctx, `b.tenant_id = ?`, []any{tenantID}, limit)
+}
+
+// listBuilds returns builds (without logs) matching where, newest first.
+func (m *Manager) listBuilds(ctx context.Context, where string, args []any, limit int) ([]*Build, error) {
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT b.id, b.service_id, COALESCE(s.name, ''), b.tenant_id, b.status, b.source_type, b.source_url, b.source_ref,
 		        b.image, b.started_at, b.finished_at, b.created_at
 		 FROM builds b
 		 LEFT JOIN services s ON s.id = b.service_id
-		 WHERE b.tenant_id = ? AND b.service_id = ?
+		 WHERE `+where+`
 		 ORDER BY b.created_at DESC
-		 LIMIT 50`,
-		tenantID, serviceID,
+		 LIMIT ?`,
+		append(args, limit)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list builds: %w", err)
@@ -620,38 +601,6 @@ func (m *Manager) ListBuilds(ctx context.Context, tenantID, serviceID string) ([
 		b := &Build{}
 		if err := rows.Scan(&b.ID, &b.ServiceID, &b.ServiceName, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan build: %w", err)
-		}
-		result = append(result, b)
-	}
-	return result, rows.Err()
-}
-
-// ListTenantBuilds returns recent builds across all services for a tenant.
-func (m *Manager) ListTenantBuilds(ctx context.Context, tenantID string, limit int) ([]*Build, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT b.id, b.service_id, COALESCE(s.name, ''), b.tenant_id, b.status, b.source_type, b.source_url, b.source_ref,
-		        b.image, b.started_at, b.finished_at, b.created_at
-		 FROM builds b
-		 LEFT JOIN services s ON s.id = b.service_id
-		 WHERE b.tenant_id = ?
-		 ORDER BY b.created_at DESC
-		 LIMIT ?`,
-		tenantID, limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list tenant builds: %w", err)
-	}
-	defer rows.Close()
-
-	var result []*Build
-	for rows.Next() {
-		b := &Build{}
-		if err := rows.Scan(&b.ID, &b.ServiceID, &b.ServiceName, &b.TenantID, &b.Status, &b.SourceType, &b.SourceURL, &b.SourceRef, &b.Image, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan tenant build: %w", err)
 		}
 		result = append(result, b)
 	}

@@ -81,26 +81,6 @@ func TestPullImageHonorsCallerCancellationDuringStream(t *testing.T) {
 	}
 }
 
-func TestDrainPullStream_ReturnsStreamError(t *testing.T) {
-	stream := `{"status":"Pulling from library/x"}` + "\n" +
-		`{"errorDetail":{"message":"manifest unknown"},"error":"manifest unknown"}` + "\n"
-	err := drainPullStream(strings.NewReader(stream))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "manifest unknown")
-}
-
-func TestDrainPullStream_OKStream(t *testing.T) {
-	assert.NoError(t, drainPullStream(strings.NewReader(`{"status":"Download complete"}`+"\n")))
-}
-
-func TestDrainPullStream_ReturnsReadError(t *testing.T) {
-	assert.Error(t, drainPullStream(io.MultiReader(strings.NewReader(`{"status":"x"}`+"\n"), errReader{})))
-}
-
-type errReader struct{}
-
-func (errReader) Read([]byte) (int, error) { return 0, context.DeadlineExceeded }
-
 // Integration: skips without a reachable Docker daemon.
 func TestPullImage_NonexistentImageErrors(t *testing.T) {
 	c, err := NewClient()

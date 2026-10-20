@@ -32,24 +32,17 @@ func brokerSocketPath() string {
 }
 
 func brokerCall(ctx context.Context, request brokerRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	response, err := brokerExchange(ctx, request)
-	if err != nil {
-		return err
-	}
-	if !response.OK {
-		return errors.New(response.Error)
-	}
-	return nil
+	_, err := brokerDo(ctx, request)
+	return err
 }
 
 func brokerStatus(ctx context.Context, buildID string) (brokerResponse, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	response, err := brokerExchange(ctx, brokerRequest{Operation: "status", BuildID: buildID})
+	return brokerDo(ctx, brokerRequest{Operation: "status", BuildID: buildID})
+}
+
+// brokerDo performs one broker exchange and turns a refused request into an error.
+func brokerDo(ctx context.Context, request brokerRequest) (brokerResponse, error) {
+	response, err := brokerExchange(ctx, request)
 	if err != nil {
 		return brokerResponse{}, err
 	}
@@ -272,17 +265,17 @@ func (b brokerServer) perform(request brokerRequest) (brokerResponse, error) {
 	defer cancel()
 	switch request.Operation {
 	case "start":
-		if err := b.run(ctx, "start", unit); err != nil {
+		if _, err := b.execute(ctx, "start", unit); err != nil {
 			return brokerResponse{}, err
 		}
 		return brokerResponse{ActiveState: "active"}, nil
 	case "stop":
-		if err := b.run(ctx, "stop", unit); err != nil {
+		if _, err := b.execute(ctx, "stop", unit); err != nil {
 			return brokerResponse{}, err
 		}
 		return brokerResponse{ActiveState: "inactive", Result: "success"}, nil
 	case "status":
-		output, err := b.output(ctx, "show", "--no-pager", "--property=ActiveState,Result,ExecMainStatus,MainPID", unit)
+		output, err := b.execute(ctx, "show", "--no-pager", "--property=ActiveState,Result,ExecMainStatus,MainPID", unit)
 		if err != nil {
 			return brokerResponse{}, err
 		}
@@ -308,15 +301,6 @@ func (b brokerServer) perform(request brokerRequest) (brokerResponse, error) {
 	default:
 		return brokerResponse{}, fmt.Errorf("unsupported operation")
 	}
-}
-
-func (b brokerServer) run(ctx context.Context, args ...string) error {
-	_, err := b.execute(ctx, args...)
-	return err
-}
-
-func (b brokerServer) output(ctx context.Context, args ...string) (string, error) {
-	return b.execute(ctx, args...)
 }
 
 func (b brokerServer) execute(ctx context.Context, args ...string) (string, error) {

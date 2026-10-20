@@ -155,9 +155,9 @@ func TestContainerName(t *testing.T) {
 		{"t", "s", "ah-t-s"},
 	}
 	for _, tc := range tests {
-		got := containerName(tc.tenantID, tc.serviceID)
+		got := ServiceContainerName(tc.tenantID, tc.serviceID)
 		if got != tc.want {
-			t.Errorf("containerName(%q, %q) = %q, want %q", tc.tenantID, tc.serviceID, got, tc.want)
+			t.Errorf("ServiceContainerName(%q, %q) = %q, want %q", tc.tenantID, tc.serviceID, got, tc.want)
 		}
 	}
 }
@@ -361,40 +361,6 @@ func TestBuildServiceContainerConfig_LabelImmutability(t *testing.T) {
 	// Non-reserved labels should pass through normally.
 	if got := cfg.Labels["custom"]; got != "allowed" {
 		t.Errorf("custom label: got %q, want %q", got, "allowed")
-	}
-}
-
-// TestFindTraefikContainerNameMatching verifies the exact-name matching logic used
-// by findTraefikContainer. Only the name "paas-traefik" (with or without leading "/")
-// should match — any other name, including ones that merely contain "traefik", must not.
-//
-// Because findTraefikContainer is an unexported method that calls the Docker API,
-// we replicate its name-matching predicate here so it can be tested without a daemon.
-func TestFindTraefikContainerNameMatching(t *testing.T) {
-	// matchesTraefik replicates the predicate inside findTraefikContainer.
-	matchesTraefik := func(name string) bool {
-		return name == "/paas-traefik" || name == "paas-traefik"
-	}
-
-	tests := []struct {
-		name      string
-		wantMatch bool
-	}{
-		{"/paas-traefik", true},
-		{"paas-traefik", true},
-		// Must NOT match unrelated containers that happen to contain "traefik".
-		{"/traefik", false},
-		{"traefik", false},
-		{"/myapp-traefik", false},
-		{"/paas-traefik-v2", false},
-		{"", false},
-		{"/paas-Traefik", false}, // case-sensitive
-	}
-	for _, tc := range tests {
-		got := matchesTraefik(tc.name)
-		if got != tc.wantMatch {
-			t.Errorf("matchesTraefik(%q) = %v, want %v", tc.name, got, tc.wantMatch)
-		}
 	}
 }
 

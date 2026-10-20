@@ -101,7 +101,7 @@ http:
 
 Traefik can also discover routes from Docker labels. That is a bad idea here, because tenants choose the image and an image can ship any label it likes. A malicious image could claim `Host(`your-bank.example.com`)`.
 
-Two things prevent this. First, `RunContainer` in `internal/docker/client.go` forces `traefik.enable=false` on every service container after merging labels, so a label in the image cannot turn it back on. Second, `traefikLabels` in `internal/services/services.go` returns an empty map, so `ah` does not pass routing labels either. Routes exist only as files that `ah` writes.
+Two things prevent this. First, `RunContainer` in `internal/docker/client.go` forces `traefik.enable=false` on every service container after merging labels, so a label in the image cannot turn it back on. Second, every deploy path in `internal/services/` calls `RunContainer` with no extra labels, so `ah` does not pass routing labels either. Routes exist only as files that `ah` writes.
 
 The Traefik config in `deploy/traefik/traefik.yml` in the repo still lists a Docker provider with `exposedByDefault: false`. The installer, `scripts/bootstrap-stack.sh`, writes a Traefik config with only the file provider. On a bootstrapped host there is no Docker provider to attack.
 

@@ -22,7 +22,6 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
@@ -378,7 +377,7 @@ type ResourceLimits struct {
 //   - Health checks are left to the image author; ah does not inject a shell
 //     probe because many minimal images do not ship curl/wget.
 func (c *DockerClient) RunContainer(ctx context.Context, tenantID, serviceID, img string, port int, envVars map[string]string, extraLabels map[string]string, limits *ResourceLimits) (string, error) {
-	name := containerName(tenantID, serviceID)
+	name := ServiceContainerName(tenantID, serviceID)
 
 	if port <= 0 {
 		port = 8000
@@ -499,25 +498,6 @@ func buildServiceContainerConfig(tenantID, serviceID, img string, port int, envV
 		},
 		Labels: labels,
 	}
-}
-
-// findTraefikContainer finds the platform Traefik container by exact name.
-// Only matches the container named "paas-traefik" to prevent tenant containers
-// from being mistaken for Traefik (e.g. by deploying a traefik image).
-func (c *DockerClient) findTraefikContainer(ctx context.Context) (string, error) {
-	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: false})
-	if err != nil {
-		return "", err
-	}
-	for _, ctr := range containers {
-		for _, name := range ctr.Names {
-			// Docker prefixes container names with "/".
-			if name == "/paas-traefik" || name == "paas-traefik" {
-				return ctr.ID, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("traefik container not found (expected container named paas-traefik)")
 }
 
 // StopContainer stops a running container with a 10s timeout.
@@ -733,9 +713,10 @@ func (c *DockerClient) GetContainerName(ctx context.Context, containerID string)
 	return info.Name
 }
 
-// containerName generates a deterministic container name from tenant and service IDs.
-func containerName(tenantID, serviceID string) string {
-	return fmt.Sprintf("ah-%s-%s", tenantID, serviceID)
+// ServiceContainerName returns the deterministic container name RunContainer
+// gives a service, so callers can find split-brain containers whose ID was lost.
+func ServiceContainerName(tenantID, serviceID string) string {
+	return "ah-" + tenantID + "-" + serviceID
 }
 
 // VerifyGVisorRuntime checks that the Docker daemon has the gVisor (runsc) runtime available.
@@ -1295,39 +1276,20 @@ func (c *DockerClient) CopyToContainer(ctx context.Context, containerID string, 
 }
 
 // cappedWriter writes to buf up to max bytes, silently discarding the rest.
+// It always reports the full len(p) as written: stdcopy.StdCopy treats a short
+// count as io.ErrShortWrite, which would turn over-limit output into an error.
 type cappedWriter struct {
 	buf *bytes.Buffer
 	max int
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
-	remaining := w.max - w.buf.Len()
-	if remaining <= 0 {
-		return len(p), nil // discard but report success
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-	}
-	w.buf.Write(p)
-	return len(p), nil
-}
-
-// drainPullStream reads Docker's JSON progress stream to the end and returns
-// the first error message in it, or the read error (including a timeout).
-// PullImage uses consumeImagePullResponse, which omits daemon error text;
-// this variant keeps it for callers and tests that want the daemon message.
-func drainPullStream(r io.Reader) error {
-	dec := json.NewDecoder(r)
-	for {
-		var msg jsonmessage.JSONMessage
-		if err := dec.Decode(&msg); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
+	n := len(p)
+	if remaining := w.max - w.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
 		}
-		if msg.Error != nil {
-			return msg.Error
-		}
+		w.buf.Write(p)
 	}
+	return n, nil
 }

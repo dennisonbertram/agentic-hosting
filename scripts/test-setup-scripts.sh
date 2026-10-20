@@ -45,6 +45,20 @@ has "$tmp/out" 'mode=fresh'
 has "$tmp/out" '[ok]   Ubuntu 24.04'
 has "$tmp/out" 'scripts/bootstrap-stack.sh --domain example.com --acme-email ops@example.com'
 has "$tmp/out" 'install /usr/local/bin/ahc'
+lacks "$tmp/out" 'running the installer preflight'
+
+# With every prerequisite met (stubbed Linux, root, tools), the fake-root run
+# must still skip the real bootstrap preflight so the test stays hermetic.
+lstub=$tmp/linux-stub
+mkdir -p "$lstub"
+printf '#!/bin/sh\necho Linux\n' > "$lstub/uname"
+printf '#!/bin/sh\necho 0\n' > "$lstub/id"
+for tool in python3 curl git; do printf '#!/bin/sh\nexit 0\n' > "$lstub/$tool"; done
+chmod +x "$lstub"/*
+PATH="$lstub:/usr/bin:/bin" AH_SETUP_ROOT=$fake "$linux" --dry-run --domain example.com --acme-email ops@example.com > "$tmp/out" 2>&1
+has "$tmp/out" 'skipping the installer preflight (AH_SETUP_ROOT test hook)'
+lacks "$tmp/out" 'running the installer preflight'
+has "$tmp/out" 'dry-run: no changes made'
 
 AH_SETUP_ROOT=$fake "$linux" --dry-run --domain example.com --external-tls-terminated --skip-website > "$tmp/out" 2>&1
 has "$tmp/out" '--external-tls-terminated --skip-website'
@@ -67,8 +81,10 @@ mkdir -p "$fake/etc/default" "$fake/etc/systemd/system"
 : > "$fake/var/lib/ah/master.key"; : > "$fake/etc/default/ah"; : > "$fake/etc/systemd/system/ah.service"
 AH_SETUP_ROOT=$fake "$linux" --dry-run > "$tmp/out" 2>&1
 has "$tmp/out" 'mode=existing'
-has "$tmp/out" 'add AH_ADMIN_TOKEN to /etc/default/ah if it is missing (bootstrap token untouched)'
+has "$tmp/out" 'add AH_ADMIN_TOKEN to /etc/default/ah if it is missing (bootstrap token untouched'
 has "$tmp/out" 'restart ah only if something changed'
+has "$tmp/out" 'ah-build-broker if the ah binary or its unit changed'
+has "$tmp/out" 'bootstrap tokens no longer authorize recover, reactivate or quota'
 has "$tmp/out" 'dry-run'
 pass 'setup-linux.sh --dry-run (fresh, partial, existing, non-Ubuntu)'
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -312,6 +313,11 @@ func (m *Manager) Create(ctx context.Context, tenantID string, req CreateRequest
 	case casChanged:
 		log.Printf("databases: %s changed state during provisioning (tenant suspended?); leaving it for reactivation", id)
 		return nil, apierr.Conflict("database was stopped during provisioning (tenant suspended)")
+	case casError:
+		// The row may still exist and own its per-database network: mark it
+		// failed (frees quota) and let markFailed decide whether it is gone.
+		cleanup(containerID, m.markFailed(ctx, id))
+		return nil, fmt.Errorf("mark database ready failed")
 	default:
 		// Row was deleted during provisioning — clean up
 		cleanup(containerID, true)
@@ -558,7 +564,8 @@ type casResult int
 const (
 	casApplied casResult = iota // row was in the expected state and was updated
 	casChanged                  // row exists but is no longer in the expected state
-	casGone                     // row does not exist (or the update failed)
+	casGone                     // row does not exist
+	casError                    // the update or the existence check failed; row state unknown
 )
 
 // casStatus moves a database row from one status to another only if it is
@@ -571,16 +578,26 @@ func (m *Manager) casStatus(ctx context.Context, id, from, to string) casResult 
 		to, time.Now().Unix(), id, from)
 	if err != nil {
 		log.Printf("databases: failed to update status for %s: %v", id, err)
-		return casGone
+		return casError
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		log.Printf("databases: failed to read rows affected for %s: %v", id, err)
+		return casError
+	}
+	if n > 0 {
 		return casApplied
 	}
 	var one int
-	if err := m.db.QueryRowContext(freshCtx, `SELECT 1 FROM databases WHERE id = ?`, id).Scan(&one); err == nil {
+	switch err := m.db.QueryRowContext(freshCtx, `SELECT 1 FROM databases WHERE id = ?`, id).Scan(&one); {
+	case err == nil:
 		return casChanged
+	case errors.Is(err, sql.ErrNoRows):
+		return casGone
+	default:
+		log.Printf("databases: failed to check whether %s exists: %v", id, err)
+		return casError
 	}
-	return casGone
 }
 
 // markFailed sets a row to 'failed' on a detached context and reports whether

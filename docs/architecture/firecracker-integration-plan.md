@@ -14,10 +14,10 @@ The platform currently runs every tenant workload as a Docker container under th
 
 | Assumption | Where | Detail |
 |---|---|---|
-| gVisor is the only runtime | `RunContainer` hardcodes `Runtime: "runsc"` | Also enforced at startup by `VerifyGVisorRuntime` |
+| gVisor is the only production runtime | `RunContainer` uses the configured runtime (`c.Runtime()`), which defaults to `docker.DefaultRuntime` (`runsc`) | `AH_CONTAINER_RUNTIME=runc` is accepted only with `--dev`. Without `--dev`, startup fails unless `VerifyGVisorRuntime` finds `runsc` |
 | Docker Engine API is the sole orchestration surface | `DockerClient` wraps `client.Client` from `github.com/docker/docker` | Every container operation (create, start, stop, remove, inspect, logs) goes through the Docker socket |
 | OCI images are the only artifact format | `PullImage`, `TagImage`, `RemoveImage` | Nixpacks build pipeline also produces OCI images pushed to a local registry |
-| Container naming is deterministic | `containerName()` returns `ah-<tenantID>-<serviceID>` | Used for stop-before-recreate and Traefik routing |
+| Container naming is deterministic | `docker.ServiceContainerName()` returns `ah-<tenantID>-<serviceID>` | Used for stop-before-recreate and Traefik routing |
 | Security posture is defense-in-depth | `CapDrop: ALL`, `no-new-privileges`, `ReadonlyRootfs`, `PidsLimit=256`, `MemorySwap=Memory` | gVisor intercepts syscalls; these flags add Linux-kernel-level constraints |
 
 ### 1.2 Networking (`internal/docker/client.go`, `internal/services/services.go`)

@@ -711,8 +711,11 @@ func (m *Manager) StopForTenant(ctx context.Context, tenantID string) {
 	}
 
 	if k.Status == "failed" {
-		// A failed board must not become restartable (its volume may be gone);
-		// just drop the stale container reference.
+		// A failed board stays failed so tenant reactivation (StartForTenant,
+		// which only restarts 'stopped' rows) skips it. Recovery goes through
+		// Create: restartFailedInPlace reuses the kept volume once setup has
+		// completed, otherwise the board is re-created. Just drop the stale
+		// container reference.
 		_, _ = m.db.ExecContext(ctx, `UPDATE kanbans SET container_id = NULL WHERE id = ?`, k.ID)
 		return
 	}

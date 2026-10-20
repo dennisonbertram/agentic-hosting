@@ -152,15 +152,24 @@ exit 0
 EOF
 done
 chmod +x "$stub"/*
-# Hide the real toolchain so go/jq look missing; keep coreutils.
-PATH="$stub:/usr/bin:/bin" "$macos" --dry-run --engine colima > "$tmp/out" 2>&1
+# Hide the real toolchain so go/jq/python3 look missing; keep coreutils.
+# A shadow of /usr/bin and /bin is used instead of those directories
+# because CI runners (and some Macs) ship jq and python3 in /usr/bin.
+shadow=$tmp/shadow
+mkdir -p "$shadow"
+for f in /bin/* /usr/bin/*; do
+  name=${f##*/}
+  case $name in go|jq|python3|python3.*) continue ;; esac
+  [[ -e $shadow/$name ]] || ln -s "$f" "$shadow/$name"
+done
+PATH="$stub:$shadow" "$macos" --dry-run --engine colima > "$tmp/out" 2>&1
 has "$tmp/out" 'would run: brew install'
 has "$tmp/out" 'would run: colima start'
 has "$tmp/out" 'would run: make -C'
 has "$tmp/out" 'NOT gVisor'
 if grep -Ev '^docker info' "$tmp/calls" | grep -q .; then cat "$tmp/calls" >&2; fail 'setup-macos.sh --dry-run invoked an installer or engine'; fi
 rm -f "$stub/docker" "$stub/colima"
-PATH="$stub:/usr/bin:/bin" "$macos" --dry-run --engine colima --skip-build > "$tmp/out" 2>&1
+PATH="$stub:$shadow" "$macos" --dry-run --engine colima --skip-build > "$tmp/out" 2>&1
 has "$tmp/out" 'colima'
 lacks "$tmp/out" 'would run: make'
 pass 'setup-macos.sh --dry-run (stubbed brew/docker/colima)'

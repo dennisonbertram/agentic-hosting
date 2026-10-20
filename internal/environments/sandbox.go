@@ -80,6 +80,9 @@ type SandboxCreateRequest struct {
 	MemoryMB      *int          `json:"memory_mb,omitempty"`
 	CPUMillicores *int          `json:"cpu_millicores,omitempty"`
 	Egress        string        `json:"egress,omitempty"`
+	// DiskMB sizes the tmpfs /workspace. Only accepted when the server runs
+	// sandboxes with a tmpfs workspace (AH_SANDBOX_WORKSPACE_TMPFS).
+	DiskMB *int `json:"disk_mb,omitempty"`
 }
 
 // SandboxSourceRef is the source recorded on a sandbox.
@@ -100,6 +103,7 @@ type Sandbox struct {
 	Egress         string           `json:"egress"`
 	MemoryMB       int              `json:"memory_mb"`
 	CPUMillicores  int              `json:"cpu_millicores"`
+	DiskMB         int              `json:"disk_mb"` // tmpfs /workspace size; 0 = volume, no hard limit
 	TTLSeconds     int              `json:"ttl_seconds"`
 	CreatedAt      int64            `json:"created_at"`
 	ExpiresAt      int64            `json:"expires_at"`
@@ -141,6 +145,7 @@ type sandboxQuota struct {
 	egressAllowed bool
 	maxMemoryMB   int
 	maxCPUMillis  int
+	maxDiskMB     int
 }
 
 func (m *Manager) loadSandboxQuota(ctx context.Context, tenantID string) (*sandboxQuota, error) {
@@ -148,9 +153,10 @@ func (m *Manager) loadSandboxQuota(ctx context.Context, tenantID string) (*sandb
 	var egress int
 	var cpuCores float64
 	err := m.db.QueryRowContext(ctx,
-		`SELECT max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds, sandbox_egress_allowed, max_memory_mb, max_cpu_cores
+		`SELECT max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds, sandbox_egress_allowed, max_memory_mb, max_cpu_cores,
+		 max_sandbox_disk_mb
 		 FROM tenant_quotas WHERE tenant_id = ?`, tenantID,
-	).Scan(&q.maxTTL, &q.maxLifetime, &egress, &q.maxMemoryMB, &cpuCores)
+	).Scan(&q.maxTTL, &q.maxLifetime, &egress, &q.maxMemoryMB, &cpuCores, &q.maxDiskMB)
 	if err != nil {
 		return nil, fmt.Errorf("load sandbox quota: %w", err)
 	}
@@ -271,15 +277,18 @@ func (m *Manager) resolveSource(ctx context.Context, tenantID string, req Sandbo
 	return r, nil
 }
 
-// CreateSandbox provisions a disposable sandbox. Only egress "none" is
-// supported: the sandbox is attached only to the tenant's internal network.
+// CreateSandbox provisions a disposable sandbox. With egress "none" (the
+// default) the sandbox is attached only to the tenant's internal network.
+// Egress "internet" needs the operator's egress network and the tenant's
+// sandbox_egress_allowed quota (see sandboxEgressGate); such a sandbox is
+// attached only to the egress bridge.
 func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req SandboxCreateRequest) (*Sandbox, error) {
-	switch req.Egress {
-	case "", "none":
-	case "internet":
-		return nil, apierr.Forbidden("egress \"internet\" is not available on this server")
-	default:
-		return nil, apierr.Validation(fmt.Sprintf("unknown egress %q (want none)", req.Egress))
+	egress, err := parseSandboxEgress(req.Egress)
+	if err != nil {
+		return nil, err
+	}
+	if egress == SandboxEgressInternet && m.sandboxEgressNetwork == "" {
+		return nil, errEgressUnavailable
 	}
 	switch req.Run {
 	case "", "idle", "app":
@@ -293,6 +302,10 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 	}
 
 	q, err := m.loadSandboxQuota(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	egressNetwork, err := m.sandboxEgressGate(egress, q)
 	if err != nil {
 		return nil, err
 	}
@@ -344,6 +357,10 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 	if memoryMB < sandboxMinMemoryMB || cpuMillis < sandboxMinCPUMillis {
 		return nil, apierr.Validation("tenant quota is too small for a sandbox")
 	}
+	diskMB, err := m.resolveSandboxDisk(req.DiskMB, memoryMB, q)
+	if err != nil {
+		return nil, err
+	}
 
 	check := m.diskCheck
 	if check == nil {
@@ -385,13 +402,17 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		sourceType:   req.Source.Type,
 		sourceRef:    r.sourceRef,
 		runMode:      r.runMode,
-		egress:       "none",
+		egress:       egress,
+
+		runtime:          m.sandboxRuntime,
+		workspaceTmpfsMB: diskMB,
+		egressNetwork:    egressNetwork,
 	})
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("AUDIT: action=sandbox.create tenant=%s sandbox=%s source=%s:%s run=%s ttl=%d include_env=%t",
-		tenantID, c.id, req.Source.Type, r.sourceRef, r.runMode, ttl, req.IncludeEnv)
+	log.Printf("AUDIT: action=sandbox.create tenant=%s sandbox=%s source=%s:%s run=%s ttl=%d include_env=%t egress=%s disk_mb=%d",
+		tenantID, c.id, req.Source.Type, r.sourceRef, r.runMode, ttl, req.IncludeEnv, egress, diskMB)
 
 	return &Sandbox{
 		ID:             c.id,
@@ -400,9 +421,10 @@ func (m *Manager) CreateSandbox(ctx context.Context, tenantID string, req Sandbo
 		Source:         SandboxSourceRef{Type: req.Source.Type, Ref: r.sourceRef},
 		Image:          r.image,
 		Run:            r.runMode,
-		Egress:         "none",
+		Egress:         egress,
 		MemoryMB:       memoryMB,
 		CPUMillicores:  cpuMillis,
+		DiskMB:         diskMB,
 		TTLSeconds:     ttl,
 		CreatedAt:      c.now,
 		ExpiresAt:      c.leaseExpiresAt,
@@ -427,14 +449,14 @@ func validateSandboxName(name string) error {
 
 // sandboxColumns is the column list scanned by scanSandbox.
 const sandboxColumns = `id, tenant_id, name, status, COALESCE(container_id, ''), COALESCE(volume_name, ''),
-	 source_type, source_ref, image_ref, run_mode, egress, memory_mb, cpu_millicores,
+	 source_type, source_ref, image_ref, run_mode, egress, memory_mb, cpu_millicores, disk_mb,
 	 lease_duration_seconds, COALESCE(lease_expires_at, 0), COALESCE(max_expires_at, 0),
 	 COALESCE(last_activity_at, 0), created_at`
 
 func scanSandbox(row interface{ Scan(...any) error }) (*Sandbox, error) {
 	s := &Sandbox{}
 	err := row.Scan(&s.ID, &s.tenantID, &s.Name, &s.Status, &s.containerID, &s.volumeName,
-		&s.Source.Type, &s.Source.Ref, &s.Image, &s.Run, &s.Egress, &s.MemoryMB, &s.CPUMillicores,
+		&s.Source.Type, &s.Source.Ref, &s.Image, &s.Run, &s.Egress, &s.MemoryMB, &s.CPUMillicores, &s.DiskMB,
 		&s.TTLSeconds, &s.ExpiresAt, &s.MaxExpiresAt, &s.LastActivityAt, &s.CreatedAt)
 	return s, err
 }

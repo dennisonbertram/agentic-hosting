@@ -319,7 +319,7 @@ curl -s -X DELETE $AH_URL/v1/snapshots/$SNAPSHOT_ID -H "Authorization: Bearer $A
 
 ## Sandboxes — run code in a throwaway container
 
-A sandbox is deleted by the server when its TTL expires. No network egress (no internet, no other containers). Sources: an environment template, a Docker Hub image, a snapshot, or a service's current image.
+A sandbox is deleted by the server when its TTL expires. No network egress by default (no internet, no other containers); `egress: "internet"` only where the operator enabled it and the tenant has `sandbox_egress_allowed=1` (otherwise 403). Sources: an environment template, a Docker Hub image, a snapshot, or a service's current image.
 
 ```bash
 # One shot with the CLI: create, run, delete (exit code propagated)

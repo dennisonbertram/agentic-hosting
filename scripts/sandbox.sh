@@ -243,6 +243,10 @@ start_ah() {
     # shellcheck disable=SC1090
     . "$secrets_file"
     set +a
+    # This script's AH_SANDBOX_RUNTIME (auto|runsc|runc) picks the local
+    # instance's AH_CONTAINER_RUNTIME. ah reads AH_SANDBOX_RUNTIME as the
+    # disposable-sandbox runtime, so it must not inherit this value.
+    unset AH_SANDBOX_RUNTIME
     export AH_DATA_DIR="$data_dir" AH_BUILD_DIR="$sandbox_dir/builds" \
       AH_TRAEFIK_CONFIG_DIR="$sandbox_dir/traefik/dynamic" AH_DOCKER_DATA_DIR="$data_dir" \
       AH_NIXPACKS_PATH="$nixpacks" AH_CONTAINER_RUNTIME="$rt" \

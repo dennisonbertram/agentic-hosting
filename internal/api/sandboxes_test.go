@@ -208,6 +208,63 @@ func TestSandboxAPI_CreateRateLimited(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
+// The create limiter reports itself under X-Sandbox-Create-RateLimit-* and
+// leaves the general X-RateLimit-* headers describing the general limit.
+func TestSandboxAPI_CreateLimiterKeepsGeneralRateLimitHeaders(t *testing.T) {
+	h := newSandboxTestHelper(t)
+	_, err := h.stateDB.Exec(`UPDATE tenant_quotas SET max_sandboxes = 50, api_rate_limit = 1000`)
+	require.NoError(t, err)
+
+	general := h.doRequest(t, http.MethodGet, "/v1/sandboxes", nil)
+	require.Equal(t, http.StatusOK, general.Code)
+	require.Equal(t, "1000", general.Header().Get("X-RateLimit-Limit"))
+
+	rr := h.doRequest(t, http.MethodPost, "/v1/sandboxes", []byte(`{"source":{"type":"template"}}`))
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	assert.Equal(t, "1000", rr.Header().Get("X-RateLimit-Limit"), "general limit header is not overwritten")
+	assert.NotEmpty(t, rr.Header().Get("X-RateLimit-Remaining"))
+	assert.Equal(t, "0.333", rr.Header().Get("X-Sandbox-Create-RateLimit-Limit"), "20 per minute, as requests per second")
+	// Remaining is read before the request is charged, as for X-RateLimit-Remaining.
+	assert.Equal(t, "10", rr.Header().Get("X-Sandbox-Create-RateLimit-Remaining"))
+}
+
+func TestSandboxAPI_EgressAndDisk(t *testing.T) {
+	h := newSandboxTestHelper(t)
+
+	// Defaults: egress refused, disk_mb rejected, disk_mb reported as 0.
+	rr := h.doRequest(t, http.MethodPost, "/v1/sandboxes", []byte(`{"source":{"type":"template"},"egress":"internet"}`))
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "not available on this server")
+	rr = h.doRequest(t, http.MethodPost, "/v1/sandboxes", []byte(`{"source":{"type":"template"},"disk_mb":64}`))
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	s := h.createSandbox(t, `{"source":{"type":"template"}}`)
+	assert.Equal(t, "none", s.Egress)
+	assert.Zero(t, s.DiskMB)
+
+	// Operator enables both; the tenant is still not allowed egress.
+	h.envMgr.SetSandboxEgressNetwork("ah-sbx-egress")
+	h.envMgr.SetSandboxWorkspaceTmpfs(true)
+	rr = h.doRequest(t, http.MethodPost, "/v1/sandboxes", []byte(`{"source":{"type":"template"},"egress":"internet"}`))
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "not enabled for this tenant")
+
+	_, err := h.stateDB.Exec(`UPDATE tenant_quotas SET sandbox_egress_allowed = 1`)
+	require.NoError(t, err)
+	s = h.createSandbox(t, `{"source":{"type":"image","image":"alpine"},"egress":"internet","memory_mb":512,"disk_mb":128}`)
+	assert.Equal(t, "internet", s.Egress)
+	assert.Equal(t, 128, s.DiskMB)
+
+	rr = h.doRequest(t, http.MethodGet, "/v1/sandboxes/"+s.ID, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.Equal(t, "internet", raw["egress"])
+	assert.EqualValues(t, 128, raw["disk_mb"])
+
+	rr = h.doRequest(t, http.MethodPost, "/v1/sandboxes", []byte(`{"source":{"type":"template"},"memory_mb":256,"disk_mb":512}`))
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "disk_mb above memory_mb")
+}
+
 func TestSandboxAPI_RequiresAuth(t *testing.T) {
 	h := newSandboxTestHelper(t)
 	for _, rq := range []struct{ method, path string }{

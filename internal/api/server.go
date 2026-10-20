@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/builds"
@@ -104,6 +105,9 @@ type Server struct {
 	corsOrigins       []string
 	// sandboxCreateLimiter caps POST /v1/sandboxes per tenant.
 	sandboxCreateLimiter *middleware.RateLimiter
+	// backgroundDeploys tracks first deploys started by respondDeploying, so
+	// tests can wait for them before their temp dirs are removed.
+	backgroundDeploys sync.WaitGroup
 }
 
 const (
@@ -175,7 +179,7 @@ func NewServer(cfg ServerConfig) *Server {
 		longInflight:      middleware.NewInflightLimiter(maxLongPerTenant),
 		corsOrigins:       cfg.CORSOrigins,
 
-		sandboxCreateLimiter: middleware.NewRateLimiter(sandboxCreateRPS, sandboxCreateBurst),
+		sandboxCreateLimiter: middleware.NewRateLimiterWithHeaderPrefix(sandboxCreateRPS, sandboxCreateBurst, sandboxCreateHeaderPrefix),
 	}
 	s.setupRoutes()
 	return s

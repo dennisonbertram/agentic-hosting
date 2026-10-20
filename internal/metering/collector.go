@@ -23,13 +23,14 @@ type Collector struct {
 	state        *sql.DB
 	meter        *sql.DB
 	docker       docker.Client
-	lastCPU      map[string]uint64 // container ID -> cumulative CPU ns at last recorded sample
-	warned       map[string]bool   // container IDs whose stats failure was already logged
+	lastCPU      map[string]uint64    // container ID -> cumulative CPU ns at last recorded sample
+	lastNet      map[string][2]uint64 // container ID -> cumulative [rx, tx] bytes (egress sandboxes)
+	warned       map[string]bool      // container IDs whose stats failure was already logged
 	statsTimeout time.Duration
 }
 
 func NewCollector(state, meter *sql.DB, d docker.Client) *Collector {
-	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}, warned: map[string]bool{}, statsTimeout: 10 * time.Second}
+	return &Collector{state: state, meter: meter, docker: d, lastCPU: map[string]uint64{}, lastNet: map[string][2]uint64{}, warned: map[string]bool{}, statsTimeout: 10 * time.Second}
 }
 
 // Run collects until ctx is cancelled.
@@ -54,7 +55,10 @@ func (c *Collector) Tick(ctx context.Context) {
 		log.Printf("metering: list running services: %v", err)
 		return
 	}
-	type svc struct{ id, tenant, container, kind string }
+	type svc struct {
+		id, tenant, container, kind string
+		meterNet                    bool // record network bytes (internet-egress sandboxes)
+	}
 	var svcs []svc
 	for rows.Next() {
 		s := svc{kind: ResourceKindService}
@@ -69,14 +73,16 @@ func (c *Collector) Tick(ctx context.Context) {
 	// Running sandboxes are sampled the same way; the sandbox ID goes in the
 	// service_id column with resource_kind='sandbox'. IDs are random 128-bit
 	// values, so they cannot collide with service IDs in usage_daily's key.
-	sbxRows, err := c.state.QueryContext(ctx, `SELECT id, tenant_id, container_id FROM environments
+	// Sandboxes with internet egress also record network bytes, so per-tenant
+	// egress shows in /v1/tenant/usage/metrics?kind=sandbox.
+	sbxRows, err := c.state.QueryContext(ctx, `SELECT id, tenant_id, container_id, egress = 'internet' FROM environments
 		WHERE kind = 'sandbox' AND status = 'running' AND container_id IS NOT NULL AND container_id != ''`)
 	if err != nil {
 		log.Printf("metering: list running sandboxes: %v", err)
 	} else {
 		for sbxRows.Next() {
 			s := svc{kind: ResourceKindSandbox}
-			if err := sbxRows.Scan(&s.id, &s.tenant, &s.container); err != nil {
+			if err := sbxRows.Scan(&s.id, &s.tenant, &s.container, &s.meterNet); err != nil {
 				log.Printf("metering: scan sandbox: %v", err)
 				continue
 			}
@@ -117,16 +123,33 @@ func (c *Collector) Tick(ctx context.Context) {
 		}
 		memMBSec := float64(st.MemoryBytes) / (1024 * 1024) * SampleSeconds
 
-		if err := c.record(s.tenant, s.id, s.kind, cpuSec, memMBSec, now); err != nil {
+		// Network counters follow the CPU rules: the first sample is the
+		// baseline, a reset (restart) records the new total.
+		var rx, tx uint64
+		if s.meterNet {
+			if prev, ok := c.lastNet[s.container]; ok {
+				rx, tx = counterDelta(st.NetRxBytes, prev[0]), counterDelta(st.NetTxBytes, prev[1])
+			}
+		}
+
+		if err := c.record(s.tenant, s.id, s.kind, cpuSec, memMBSec, rx, tx, now); err != nil {
 			log.Printf("metering: record %s %s: %v", s.kind, s.id, err)
 			continue // keep the old baseline so the next delta covers this interval
 		}
 		c.lastCPU[s.container] = st.CPUTotalNanos
+		if s.meterNet {
+			c.lastNet[s.container] = [2]uint64{st.NetRxBytes, st.NetTxBytes}
+		}
 	}
 	// Drop state for containers that are no longer running services.
 	for id := range c.lastCPU {
 		if !seen[id] {
 			delete(c.lastCPU, id)
+		}
+	}
+	for id := range c.lastNet {
+		if !seen[id] {
+			delete(c.lastNet, id)
 		}
 	}
 	for id := range c.warned {
@@ -136,7 +159,15 @@ func (c *Collector) Tick(ctx context.Context) {
 	}
 }
 
-func (c *Collector) record(tenantID, serviceID, kind string, cpuSec, memMBSec float64, now time.Time) error {
+// counterDelta is cur-prev for a cumulative counter, or cur after a reset.
+func counterDelta(cur, prev uint64) uint64 {
+	if cur >= prev {
+		return cur - prev
+	}
+	return cur
+}
+
+func (c *Collector) record(tenantID, serviceID, kind string, cpuSec, memMBSec float64, rxBytes, txBytes uint64, now time.Time) error {
 	idb := make([]byte, 16)
 	if _, err := rand.Read(idb); err != nil {
 		return err
@@ -146,16 +177,21 @@ func (c *Collector) record(tenantID, serviceID, kind string, cpuSec, memMBSec fl
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO usage_events (id, tenant_id, service_id, event_type, cpu_seconds, memory_mb_seconds, recorded_at, resource_kind)
-		VALUES (?, ?, ?, 'sample', ?, ?, ?, ?)`, hex.EncodeToString(idb), tenantID, serviceID, cpuSec, memMBSec, now.Unix(), kind); err != nil {
+	if _, err := tx.Exec(`INSERT INTO usage_events (id, tenant_id, service_id, event_type, cpu_seconds, memory_mb_seconds, recorded_at, resource_kind,
+		network_ingress_bytes, network_egress_bytes)
+		VALUES (?, ?, ?, 'sample', ?, ?, ?, ?, ?, ?)`, hex.EncodeToString(idb), tenantID, serviceID, cpuSec, memMBSec, now.Unix(), kind,
+		int64(rxBytes), int64(txBytes)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO usage_daily (tenant_id, service_id, date, cpu_seconds, memory_mb_seconds, resource_kind)
-		VALUES (?, ?, ?, ?, ?, ?)
+	if _, err := tx.Exec(`INSERT INTO usage_daily (tenant_id, service_id, date, cpu_seconds, memory_mb_seconds, resource_kind,
+		network_ingress_bytes, network_egress_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id, date, service_id) DO UPDATE SET
 			cpu_seconds = cpu_seconds + excluded.cpu_seconds,
-			memory_mb_seconds = memory_mb_seconds + excluded.memory_mb_seconds`,
-		tenantID, serviceID, now.Format("2006-01-02"), cpuSec, memMBSec, kind); err != nil {
+			memory_mb_seconds = memory_mb_seconds + excluded.memory_mb_seconds,
+			network_ingress_bytes = network_ingress_bytes + excluded.network_ingress_bytes,
+			network_egress_bytes = network_egress_bytes + excluded.network_egress_bytes`,
+		tenantID, serviceID, now.Format("2006-01-02"), cpuSec, memMBSec, kind, int64(rxBytes), int64(txBytes)); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,27 @@ type Config struct {
 	// MaxSandboxesTotal caps non-failed disposable sandboxes across all
 	// tenants on this host (AH_MAX_SANDBOXES_TOTAL, default 20, 0 = no host cap).
 	MaxSandboxesTotal int
+
+	// Sandbox hardening (phase 2). Every setting is off by default, which
+	// keeps the phase 1 behaviour: no egress, the container runtime and a
+	// workspace volume.
+	//
+	// SandboxEgressNetwork (AH_SANDBOX_EGRESS_NETWORK) names the bridge that
+	// sandboxes with egress "internet" attach to. Empty disables egress.
+	SandboxEgressNetwork string
+	// SandboxEgressSubnet (AH_SANDBOX_EGRESS_SUBNET) is that bridge's IPv4
+	// subnet (default DefaultSandboxEgressSubnet).
+	SandboxEgressSubnet string
+	// SandboxEgressSkipFirewallCheck (AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK)
+	// enables egress without verifying the host firewall rules. For hosts
+	// where the rules are enforced outside iptables; never the default.
+	SandboxEgressSkipFirewallCheck bool
+	// SandboxRuntime (AH_SANDBOX_RUNTIME) is the OCI runtime sandboxes run
+	// under, e.g. runsc-sbx. Empty uses ContainerRuntime.
+	SandboxRuntime string
+	// SandboxWorkspaceTmpfs (AH_SANDBOX_WORKSPACE_TMPFS) makes each sandbox's
+	// /workspace a tmpfs of its disk_mb instead of a named volume.
+	SandboxWorkspaceTmpfs bool
 }
 
 // Container runtimes accepted in AH_CONTAINER_RUNTIME.
@@ -79,6 +101,14 @@ const (
 // DefaultMaxSandboxesTotal is the default host-wide sandbox cap.
 const DefaultMaxSandboxesTotal = 20
 
+// DefaultSandboxEgressSubnet is the default sandbox egress bridge subnet. It
+// must match docker.DefaultSandboxEgressSubnet (checked by a cmd/ah test);
+// config does not import docker.
+const DefaultSandboxEgressSubnet = "10.250.0.0/24"
+
+// runtimeNamePattern is a Docker runtime name as registered in daemon.json.
+var runtimeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
+
 // Default returns a Config with all default values.
 func Default() Config {
 	return Config{
@@ -99,6 +129,7 @@ func Default() Config {
 		WarmPoolEnabled:       true,
 		GCPruneDocker:         true,
 		MaxSandboxesTotal:     DefaultMaxSandboxesTotal,
+		SandboxEgressSubnet:   DefaultSandboxEgressSubnet,
 	}
 }
 
@@ -145,6 +176,16 @@ func LoadFromEnv() (Config, error) {
 		WarmPoolEnabled:       envOrBool("AH_WARM_POOL_ENABLED", true, &errs),
 		GCPruneDocker:         envOrBool("AH_GC_PRUNE_DOCKER", true, &errs),
 		MaxSandboxesTotal:     envOrInt("AH_MAX_SANDBOXES_TOTAL", DefaultMaxSandboxesTotal, &errs),
+
+		SandboxEgressNetwork:           strings.TrimSpace(os.Getenv("AH_SANDBOX_EGRESS_NETWORK")),
+		SandboxEgressSubnet:            strings.TrimSpace(envOr("AH_SANDBOX_EGRESS_SUBNET", DefaultSandboxEgressSubnet)),
+		SandboxEgressSkipFirewallCheck: envOrBool("AH_SANDBOX_EGRESS_SKIP_FIREWALL_CHECK", false, &errs),
+		SandboxRuntime:                 strings.TrimSpace(os.Getenv("AH_SANDBOX_RUNTIME")),
+		SandboxWorkspaceTmpfs:          envOrBool("AH_SANDBOX_WORKSPACE_TMPFS", false, &errs),
+	}
+	if cfg.SandboxRuntime != "" && !runtimeNamePattern.MatchString(cfg.SandboxRuntime) {
+		errs = append(errs, fmt.Errorf("AH_SANDBOX_RUNTIME=%q is not a valid Docker runtime name", cfg.SandboxRuntime))
+		cfg.SandboxRuntime = ""
 	}
 	if cfg.MaxSandboxesTotal < 0 {
 		errs = append(errs, fmt.Errorf("AH_MAX_SANDBOXES_TOTAL must be >= 0 (0 = no host cap), got %d", cfg.MaxSandboxesTotal))

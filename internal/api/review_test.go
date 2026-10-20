@@ -568,6 +568,11 @@ func TestServiceCreate_FromSnapshot(t *testing.T) {
 		Docker:           &testutil.MockDockerClient{},
 		TraefikConfigDir: t.TempDir(),
 	})
+	// The fork's first deploy runs in the background and writes a Traefik
+	// route into TraefikConfigDir. Wait for it before t.TempDir's RemoveAll
+	// (cleanups run last-registered first), or the late write makes the
+	// removal fail with "directory not empty".
+	t.Cleanup(srv.waitBackgroundDeploys)
 	snapID := createSnapshotViaAPI(t, srv, token, serviceID, "base")
 
 	rr := doReq(t, srv, http.MethodPost, "/v1/services?from_snapshot="+snapID, token, `{"name":"fork"}`)

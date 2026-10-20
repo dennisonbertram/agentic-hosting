@@ -20,13 +20,14 @@ const testSbxID = "aabbccdd11223344aabbccdd11223344"
 
 // fakeSandboxAPI is a minimal /v1/sandboxes server for CLI tests.
 type fakeSandboxAPI struct {
-	mu        sync.Mutex
-	created   []map[string]any
-	execBody  map[string]any
-	execCode  int  // exit code returned by exec
-	execFail  bool // exec returns HTTP 500
-	deleted   []string
-	deleteErr bool
+	mu         sync.Mutex
+	created    []map[string]any
+	execBody   map[string]any
+	execCode   int  // exit code returned by exec
+	execFail   bool // exec returns HTTP 500
+	deleted    []string
+	deleteErr  bool
+	deleteGone bool // delete returns 404 (sandbox already reaped)
 }
 
 func (f *fakeSandboxAPI) handler(t *testing.T) http.Handler {
@@ -54,6 +55,11 @@ func (f *fakeSandboxAPI) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(ahclient.ExecResult{ExitCode: f.execCode, Stdout: "out\n", Stderr: "err\n"})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+testSbxID:
 			f.deleted = append(f.deleted, testSbxID)
+			if f.deleteGone {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":"sandbox not found"}`)
+				return
+			}
 			if f.deleteErr {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = io.WriteString(w, `{"error":"daemon busy"}`)
@@ -120,6 +126,12 @@ func TestBuildSandboxRequest_FlagMapping(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ahclient.SandboxSource{Type: "service", ServiceID: "s1"}, req.Source)
 
+	req, err = buildSandboxRequest(sandboxCreateOpts{egress: "internet", diskMB: 128})
+	require.NoError(t, err)
+	assert.Equal(t, "internet", req.Egress)
+	require.NotNil(t, req.DiskMB)
+	assert.Equal(t, 128, *req.DiskMB)
+
 	_, err = buildSandboxRequest(sandboxCreateOpts{image: "a", template: "b"})
 	assert.ErrorContains(t, err, "only one")
 	_, err = buildSandboxRequest(sandboxCreateOpts{ttl: "later"})
@@ -174,6 +186,18 @@ func TestSandboxRun_DeleteFailureIsReported(t *testing.T) {
 	var ec *exitCodeError
 	require.True(t, errors.As(err, &ec))
 	assert.Equal(t, 2, ec.ExitCode())
+}
+
+// A 404 on the final delete means the sandbox is already gone (for example
+// its TTL expired during a long command): that is success, not a warning.
+func TestSandboxRun_DeleteNotFoundIsSuccess(t *testing.T) {
+	f, c := newFakeSandboxAPI(t)
+	f.deleteGone = true
+	var errOut bytes.Buffer
+	err := runSandboxRun(c, io.Discard, &errOut, ahclient.CreateSandboxRequest{Source: ahclient.SandboxSource{Type: "template"}}, []string{"ls"}, "", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "err\n", errOut.String(), "no delete warning, only the command's stderr")
+	assert.Equal(t, []string{testSbxID}, f.deleted)
 }
 
 func TestResolveSandboxID(t *testing.T) {

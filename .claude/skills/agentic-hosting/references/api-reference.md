@@ -284,7 +284,7 @@ DELETE /v1/snapshots/:snapshotID
 
 ## Sandboxes (disposable)
 
-A sandbox is a throwaway container that the server deletes when its TTL expires (no stop/start). Same isolation as environments (gVisor in production, caps dropped, PID/memory/CPU limits). Network egress is `none`: no internet, no other tenant containers, no other tenants. Separate quota from environments: `max_sandboxes` (default 5) plus a host-wide cap (default 20). Creates are rate limited to ~20/min per tenant.
+A sandbox is a throwaway container that the server deletes when its TTL expires (no stop/start). Same isolation as environments (gVisor in production, caps dropped, PID/memory/CPU limits). Network egress is `none` by default: no internet, no other tenant containers, no other tenants. `egress:"internet"` is opt-in: it needs the operator's egress network (`--sandbox-egress-network`) **and** the tenant quota `sandbox_egress_allowed=1`, else 403; such a sandbox is attached only to the egress bridge (public internet; private ranges, cloud metadata and the host are firewalled off). Separate quota from environments: `max_sandboxes` (default 5) plus a host-wide cap (default 20). Creates are rate limited to ~20/min per tenant.
 
 ```bash
 # Create (long route; Idempotency-Key honoured). source.type: template|image|snapshot|service
@@ -293,11 +293,17 @@ Body: {"source":{"type":"image","image":"python:3.12-slim"},"ttl_seconds":1800}
 #   {"source":{"type":"template","template":"python"}}
 #   {"source":{"type":"snapshot","snapshot_id":"..."},"include_env":true}   # runs the app (run=app)
 #   {"source":{"type":"service","service_id":"..."},"run":"idle"}            # service's current image
-#   optional: name, run (idle|app), include_env, memory_mb (128..2048), cpu_millicores (100..2000), egress ("none" only; "internet" → 403)
+#   optional: name, run (idle|app), include_env, memory_mb (128..2048), cpu_millicores (100..2000),
+#             egress ("none" | "internet": 403 unless server + tenant allow it),
+#             disk_mb (only on servers with tmpfs workspaces, else 400; 16..min(memory_mb, max_sandbox_disk_mb))
 # → 201 {"id":"...","name":"sbx-1a2b3c4d","status":"running","source":{"type":"image","ref":"python:3.12-slim"},
-#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,
+#        "image":"python:3.12-slim","run":"idle","egress":"none","memory_mb":512,"cpu_millicores":1000,"disk_mb":0,
 #        "ttl_seconds":1800,"created_at":unix,"expires_at":unix,"max_expires_at":unix,"last_activity_at":unix}
-# ttl_seconds: default 1800, 60..max_sandbox_ttl_seconds (default 14400)
+# ttl_seconds: 60..min(max_sandbox_ttl_seconds, max_sandbox_lifetime_seconds) (defaults 14400, 86400).
+#   Omitted: 1800, lowered to that bound if the tenant's bound is smaller. Explicit out-of-range → 400.
+# memory_mb / cpu_millicores omitted: template value (else 512 / 1000), lowered to the tenant maximum.
+# disk_mb: 0 = /workspace is a volume (no hard limit). >0 = tmpfs of that size, counted against memory_mb.
+# Create limiter headers: X-Sandbox-Create-RateLimit-Limit/-Remaining (X-RateLimit-* stay the general limit).
 # Images: Docker Hub, or your own 127.0.0.1:5000 build/snapshot images. Other tenants' resources → 404.
 
 GET /v1/sandboxes?status=running          # list (limit/offset)
@@ -318,9 +324,11 @@ Body: {"ttl_seconds":3600}
 # 400 past max lifetime; 409 when not running / already expired
 ```
 
+Egress and tmpfs workspaces are operator opt-ins and are unverified on the production host until the checklist in docs/runbooks/sandboxes-hardening.md has been run. Egress sandboxes' network bytes show in `GET /v1/tenant/usage/metrics?kind=sandbox`.
+
 Notes: a sandbox forked with `include_env` gets values like `DATABASE_URL` but is not attached to database networks, so those connections fail. Exec needs the `timeout` binary in the image (distroless → exit 127). Expired sandboxes are deleted within ~30s; stopped/failed ones after 10 minutes. Environment routes return 404 for sandbox IDs and vice versa.
 
-CLI: `ahc sandbox run --image python:3.12-slim -- python3 -V` (create, exec, delete; exit code propagated), plus `ahc sandbox create|list|get|exec|logs|extend|delete` (alias `ahc sbx`).
+CLI: `ahc sandbox run --image python:3.12-slim -- python3 -V` (create, exec, delete; exit code propagated; a 404 on the final delete means it was already gone and is not an error; `--egress internet`, `--disk MB` where allowed), plus `ahc sandbox create|list|get|exec|logs|extend|delete` (alias `ahc sbx`).
 
 ---
 

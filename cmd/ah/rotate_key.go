@@ -13,7 +13,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func runRotateKey(args []string) {
+// runRotateKey implements `ah rotate-key`. defaultDBPath is the configured
+// state DB (AH_DB_PATH / AH_DATA_DIR), used when --db-path is not given so the
+// command rotates the same database the server opens.
+func runRotateKey(args []string, defaultDBPath string) {
 	// Parse flags manually since the global flag set is used by 'serve'.
 	var oldKeyPath, newKeyPath, dbPath string
 	var dryRun bool
@@ -64,7 +67,7 @@ func runRotateKey(args []string) {
 		log.Fatalf("--new-key-path is required")
 	}
 	if dbPath == "" {
-		dbPath = "/var/lib/ah/ah.db"
+		dbPath = defaultDBPath
 	}
 
 	// Load keys
@@ -117,6 +120,12 @@ func runRotateKey(args []string) {
 // server_secrets, which a DB the server has not started on since migration 020
 // does not have yet. ApplyStateMigrations skips already-applied migrations.
 func openRotateDB(dbPath string, dryRun bool) (*sql.DB, error) {
+	// SQLite silently creates a missing file. Rotating a fresh empty DB
+	// "succeeds" with 0 fields, and an operator who then swaps in the new
+	// master key can no longer decrypt the real database.
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("state database %s: %w", dbPath, err)
+	}
 	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database %s: %w", dbPath, err)
@@ -166,7 +175,8 @@ The operation is atomic: either all fields are re-encrypted or none are.
 Flags:
   --old-key-path PATH   Path to the current (old) master key file (required)
   --new-key-path PATH   Path to the new master key file (required)
-  --db-path PATH        Path to the state database (default: /var/lib/ah/ah.db)
+  --db-path PATH        Path to the state database (default: $AH_DB_PATH, else
+                        $AH_DATA_DIR/ah.db, else /var/lib/ah/ah.db)
   --dry-run             Report what would be re-encrypted without making changes
 
 Example:

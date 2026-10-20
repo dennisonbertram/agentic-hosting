@@ -2,10 +2,11 @@
 package apierr
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/dennisonbertram/agentic-hosting/internal/httpx"
 )
 
 // Sentinel errors for error routing via errors.Is().
@@ -90,14 +91,8 @@ func WriteAPIError(w http.ResponseWriter, err error) {
 		if apiErr.Code == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", RetryAfterSeconds)
 		}
-		writeJSON(w, apiErr.Code, apiErr.Message)
+		httpx.WriteError(w, apiErr.Code, apiErr.Message)
 		return
 	}
-	writeJSON(w, http.StatusInternalServerError, "internal error")
-}
-
-func writeJSON(w http.ResponseWriter, code int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	httpx.WriteError(w, http.StatusInternalServerError, "internal error")
 }

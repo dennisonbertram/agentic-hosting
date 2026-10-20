@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/cache"
-	"github.com/dennisonbertram/agentic-hosting/internal/crypto"
 	"github.com/dennisonbertram/agentic-hosting/internal/middleware"
 	"github.com/go-chi/chi/v5"
 )
@@ -156,6 +155,22 @@ func (rl *registrationLimiter) allow(ip string) (bool, time.Duration) {
 	return true, 0
 }
 
+// allowRequest charges the per-IP bucket for r's trusted client IP. When the
+// request is over the limit it writes a 429 with Retry-After and returns false.
+func (rl *registrationLimiter) allowRequest(w http.ResponseWriter, r *http.Request) bool {
+	ok, wait := rl.allow(trustedRealIP(r))
+	if ok {
+		return true
+	}
+	secs := int(math.Ceil(wait.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	return false
+}
+
 // chargeGlobal counts one authenticated request against the global hourly
 // budget. allow only checks the global bucket; it is charged here, after the
 // token validated, so invalid requests cannot exhaust it.
@@ -181,14 +196,7 @@ func generateID() (string, error) {
 func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// Rate limit ALL registration attempts (including invalid tokens) to prevent
 	// brute-force of the bootstrap token. Uses trusted real IP from proxy headers.
-	ip := trustedRealIP(r)
-	if ok, wait := regLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	if !regLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -281,24 +289,16 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
-	// Use keyID prefix as display hint, not the secret's prefix
-	if len(keyID) < 8 {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	prefix := keyID[:8]
-
 	_, err = tx.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
 		 VALUES (?, ?, 'default', ?, ?, ?)`,
-		keyID, tenantID, prefix, keyHash, now,
+		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -313,12 +313,9 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	// created, so requests that fail validation cannot exhaust it.
 	regLimiter.chargeGlobal()
 
-	// Return token in format "keyID.secret" for O(1) lookup
-	token := keyID + "." + apiKey
-
 	writeJSON(w, http.StatusCreated, RegisterResponse{
 		TenantID: tenantID,
-		APIKey:   token,
+		APIKey:   key.token,
 	})
 }
 
@@ -453,7 +450,7 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 	// Stop environments before service cleanup removes tenant networks. Keep
 	// their workspace and preview records so they can be started after reactivation.
 	if s.envManager != nil {
-		s.envManager.StopAllForTenant(r.Context(), tenantID)
+		s.envManager.StopAllForTenant(cleanupCtx, tenantID)
 	}
 
 	// Stop and remove all running containers for this tenant
@@ -487,6 +484,10 @@ type ReactivateResponse struct {
 	Status   string `json:"status"`
 }
 
+// reactivateAfterStatusCheck is a test hook run between the reactivation
+// status check and the guarded UPDATE.
+var reactivateAfterStatusCheck func()
+
 // handleTenantReactivate handles POST /v1/tenants/{tenantID}/reactivate.
 //
 // Security model:
@@ -498,14 +499,7 @@ type ReactivateResponse struct {
 func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) {
 	// Apply the same rate limiter as tenant registration to prevent
 	// brute-force of the bootstrap token via this endpoint.
-	ip := trustedRealIP(r)
-	if ok, wait := adminLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	if !adminLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -537,6 +531,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "tenant is already active")
 		return
 	}
+	if reactivateAfterStatusCheck != nil {
+		reactivateAfterStatusCheck()
+	}
 
 	now := time.Now().Unix()
 
@@ -547,35 +544,34 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 	}
 	defer tx.Rollback()
 
-	// Set tenant status back to active.
-	_, err = tx.Exec(
-		`UPDATE tenants SET status = 'active', updated_at = ? WHERE id = ?`,
+	// Set tenant status back to active. The status guard makes a concurrent
+	// reactivation (which passed the check above) a 409 instead of a second
+	// key and a second round of container restarts.
+	res, err := tx.Exec(
+		`UPDATE tenants SET status = 'active', updated_at = ? WHERE id = ? AND status != 'active'`,
 		now, tenantID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to reactivate tenant")
 		return
 	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		writeError(w, http.StatusConflict, "tenant is already active")
+		return
+	}
 
 	// Generate a new API key for the reactivated tenant since all keys
 	// were revoked on suspension.
-	apiKey, keyID, err := crypto.GenerateAPIKeyWithID()
+	key, err := s.mintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	keyHash := crypto.HashAPIKey(apiKey, s.apiKeyHashKey)
-	if len(keyID) < 8 {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	prefix := keyID[:8]
-
 	_, err = tx.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
 		 VALUES (?, ?, 'reactivation', ?, ?, ?)`,
-		keyID, tenantID, prefix, keyHash, now,
+		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create reactivation key")
@@ -602,12 +598,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		}()
 	}
 
-	// Return token in format "keyID.secret" for O(1) lookup.
-	token := keyID + "." + apiKey
-
 	writeJSON(w, http.StatusOK, ReactivateResponse{
 		TenantID: tenantID,
-		APIKey:   token,
+		APIKey:   key.token,
 		Status:   "active",
 	})
 }
@@ -653,14 +646,7 @@ const (
 func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 	// Apply the same rate limiter as tenant registration to prevent
 	// brute-force of the bootstrap token via this endpoint.
-	ip := trustedRealIP(r)
-	if ok, wait := adminLimiter.allow(ip); !ok {
-		secs := int(math.Ceil(wait.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
+	if !adminLimiter.allowRequest(w, r) {
 		return
 	}
 
@@ -694,66 +680,37 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate: all provided values must be positive and within caps.
-	if req.MaxServices != nil {
-		if *req.MaxServices < 1 {
-			writeError(w, http.StatusBadRequest, "max_services must be at least 1")
-			return
-		}
-		if *req.MaxServices > quotaCapMaxServices {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_services must not exceed %d", quotaCapMaxServices))
-			return
-		}
-	}
-	if req.MaxDatabases != nil {
-		if *req.MaxDatabases < 1 {
-			writeError(w, http.StatusBadRequest, "max_databases must be at least 1")
-			return
-		}
-		if *req.MaxDatabases > quotaCapMaxDatabases {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_databases must not exceed %d", quotaCapMaxDatabases))
-			return
-		}
-	}
-	if req.MaxBuildsConcurrent != nil {
-		if *req.MaxBuildsConcurrent < 1 {
-			writeError(w, http.StatusBadRequest, "max_builds_concurrent must be at least 1")
-			return
-		}
-		if *req.MaxBuildsConcurrent > quotaCapMaxBuildsConcurrent {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_builds_concurrent must not exceed %d", quotaCapMaxBuildsConcurrent))
-			return
-		}
-	}
-	if req.MaxEnvVarsPerService != nil {
-		if *req.MaxEnvVarsPerService < 1 {
-			writeError(w, http.StatusBadRequest, "max_env_vars_per_service must be at least 1")
-			return
-		}
-		if *req.MaxEnvVarsPerService > quotaCapMaxEnvVarsPerService {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("max_env_vars_per_service must not exceed %d", quotaCapMaxEnvVarsPerService))
-			return
-		}
+	// Each field's JSON name is also its tenant_quotas column name (a constant,
+	// never user input, so it is safe to build into the UPDATE).
+	fields := []struct {
+		column string
+		value  *int
+		cap    int
+	}{
+		{"max_services", req.MaxServices, quotaCapMaxServices},
+		{"max_databases", req.MaxDatabases, quotaCapMaxDatabases},
+		{"max_builds_concurrent", req.MaxBuildsConcurrent, quotaCapMaxBuildsConcurrent},
+		{"max_env_vars_per_service", req.MaxEnvVarsPerService, quotaCapMaxEnvVarsPerService},
 	}
 
-	// Build dynamic UPDATE query for partial updates.
-	setClauses := []string{}
-	args := []any{}
-	if req.MaxServices != nil {
-		setClauses = append(setClauses, "max_services = ?")
-		args = append(args, *req.MaxServices)
-	}
-	if req.MaxDatabases != nil {
-		setClauses = append(setClauses, "max_databases = ?")
-		args = append(args, *req.MaxDatabases)
-	}
-	if req.MaxBuildsConcurrent != nil {
-		setClauses = append(setClauses, "max_builds_concurrent = ?")
-		args = append(args, *req.MaxBuildsConcurrent)
-	}
-	if req.MaxEnvVarsPerService != nil {
-		setClauses = append(setClauses, "max_env_vars_per_service = ?")
-		args = append(args, *req.MaxEnvVarsPerService)
+	// Validate: all provided values must be positive and within caps.
+	// Build the partial UPDATE from the fields that are present.
+	var setClauses []string
+	var args []any
+	for _, f := range fields {
+		if f.value == nil {
+			continue
+		}
+		if *f.value < 1 {
+			writeError(w, http.StatusBadRequest, f.column+" must be at least 1")
+			return
+		}
+		if *f.value > f.cap {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must not exceed %d", f.column, f.cap))
+			return
+		}
+		setClauses = append(setClauses, f.column+" = ?")
+		args = append(args, *f.value)
 	}
 
 	if len(setClauses) > 0 {

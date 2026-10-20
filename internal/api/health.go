@@ -191,7 +191,7 @@ func (s *Server) buildDetailedHealth() DetailedHealthResponse {
 		if nets, err := s.dockerClient.NetworkList(ctx4); err == nil {
 			count := 0
 			for _, n := range nets {
-				if len(n.Name) > 10 && n.Name[:10] == "ah-tenant-" {
+				if len(n.Name) > len("ah-tenant-") && strings.HasPrefix(n.Name, "ah-tenant-") {
 					count++
 				}
 			}

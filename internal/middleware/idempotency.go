@@ -193,7 +193,10 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 		for {
 			s.mu.Lock()
 			existing, exists := s.entries[fullKey]
-			if exists && !time.Now().Before(existing.expiresAt) {
+			// Like sweep, never expire a pending entry: its handler is still
+			// running (long routes can outlive the TTL), and dropping it would
+			// let a retry start a second, concurrent execution.
+			if exists && !existing.pending && !time.Now().Before(existing.expiresAt) {
 				delete(s.entries, fullKey)
 				exists = false
 			}
@@ -253,6 +256,8 @@ func (s *IdempotencyStore) Middleware(next http.Handler) http.Handler {
 				entry.contentType = rec.Header().Get("Content-Type")
 				entry.body = rec.body
 				entry.pending = false
+				// The replay window runs from completion, not from reservation.
+				entry.expiresAt = time.Now().Add(idempotencyTTL)
 				stored = true
 			}
 			s.mu.Unlock()

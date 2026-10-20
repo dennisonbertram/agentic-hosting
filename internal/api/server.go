@@ -437,17 +437,27 @@ func normalizeIP(s string) string {
 	return ""
 }
 
+// maxPageLimit caps the limit query parameter on list endpoints.
+const maxPageLimit = 200
+
+// parseLimit reads the limit query parameter: def when absent, an error when
+// it is not a positive integer, and capped at maxPageLimit.
+func parseLimit(r *http.Request, def int) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return def, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 {
+		return 0, fmt.Errorf("limit must be between 1 and %d", maxPageLimit)
+	}
+	return min(limit, maxPageLimit), nil
+}
+
 // parsePagination extracts limit and offset query parameters with defaults.
 func parsePagination(r *http.Request) (limit, offset int, err error) {
-	limit = 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		limit, err = strconv.Atoi(raw)
-		if err != nil || limit < 1 {
-			return 0, 0, fmt.Errorf("limit must be between 1 and 200")
-		}
-		if limit > 200 {
-			limit = 200
-		}
+	if limit, err = parseLimit(r, 100); err != nil {
+		return 0, 0, err
 	}
 	if raw := r.URL.Query().Get("offset"); raw != "" {
 		offset, err = strconv.Atoi(raw)

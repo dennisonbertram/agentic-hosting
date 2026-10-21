@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Public site on GitHub Pages.** `https://agentic.hosting/` is the `website/` homepage; Astro docs are at `https://agentic.hosting/docs/`. `www.agentic.hosting` stays on Hetzner and 301s to the GitHub repo (TLS kept). Docs links that used `dennisonbertram.github.io/agentic-hosting/` now point at `/docs/`. The dashboard no longer defaults its API base to the Pages origin.
 - **Docs and agent skills match live API behavior.** Disk ≥90% on sync paths is 503 `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` (it was 500 before this release). Circuit reset removes the container, so the next step is `/redeploy` not `/start`. `circuit_open` is a boolean, not a `status` string. Idempotency is POST/PUT only. New-tenant resource defaults are 2048 MB / 2 CPUs. Quickstart image is `nginxinc/nginx-unprivileged` on 8080 (stock nginx crash-loops under ReadonlyRootfs). Secrets use the server master key, not per-tenant keys.
+- Operator skill and `docs-site/CORRECTIONS.md` now read `build_id` from `POST /v1/services/{id}/builds` (the create handler does not return `id`) and document disk-full as 503 + `Retry-After: 10` since #168.
 
 ## [0.6.0] - 2026-10-15
 

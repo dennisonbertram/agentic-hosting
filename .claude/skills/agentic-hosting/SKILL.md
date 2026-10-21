@@ -120,7 +120,7 @@ BUILD=$(curl -s -X POST $AH_URL/v1/services/$SERVICE_ID/builds \
   -H "Authorization: Bearer $AH_KEY" \
   -H "Content-Type: application/json" \
   -d '{"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}')
-BUILD_ID=$(echo $BUILD | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+BUILD_ID=$(echo $BUILD | python3 -c 'import sys,json; print(json.load(sys.stdin)["build_id"])')
 
 # 3. Stream build logs (blocks until done)
 curl -sN -H "Authorization: Bearer $AH_KEY" \

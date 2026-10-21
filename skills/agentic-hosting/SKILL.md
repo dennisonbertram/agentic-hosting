@@ -150,7 +150,7 @@ BUILD=$(curl -s -X POST "$AH_URL/v1/services/$SERVICE_ID/builds" \
   -H "Content-Type: application/json" \
   -d '{"source_type":"git","source_url":"https://github.com/org/repo","source_ref":"main"}')
 # There is no git_url / branch field. source_ref defaults to main.
-BUILD_ID=$(echo "$BUILD" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+BUILD_ID=$(echo "$BUILD" | python3 -c 'import sys,json; print(json.load(sys.stdin)["build_id"])')
 
 curl -sN -H "Authorization: Bearer $AH_KEY" \
   "$AH_URL/v1/services/$SERVICE_ID/builds/$BUILD_ID/logs?follow=true"
@@ -263,7 +263,7 @@ Bearer (`Authorization: Bearer $AH_KEY`):
 | POST/GET/DELETE | `/v1/kanban` · GET `.../admin-token` |
 | POST/GET/DELETE | `/v1/environments` · `.../start` `.../stop` `.../lease` `.../exec` `.../sync` (`git_url`/`git_ref` on **sync only**) · previews |
 
-Pagination default **100** (activity **50**), max 200. Quota exceeded → **409**. Docker/manager down → **503**. Disk ≥90% on build/DB/restart/redeploy → **500** `{"error":"internal error"}` (diskcheck is untyped). Service create still returns 201; the async deploy then sets `status=failed` and `last_error`.
+Pagination default **100** (activity **50**), max 200. Quota exceeded → **409**. Docker/manager down → **503**. Disk ≥90% on build/DB/kanban create/deploy/restart/redeploy → **503** `{"error":"insufficient disk space; try again later"}` (builds say `insufficient disk space for builds; try again later`) with `Retry-After: 10`. Service create still returns 201; the async deploy then sets `status=failed` and `last_error`.
 
 ## Day-to-day
 
@@ -286,7 +286,7 @@ Backup on the server: `ah backup` (VACUUM INTO, gzip, keep last 10). Also back u
 | 401 | Key format `keyID.secret`; tenant suspended; key revoked |
 | 422 | Duplicate name/email, reserved DNS label (`api`,`admin`,…), bad field |
 | 429 | Honor `Retry-After`; register limiter is 5/IP/hr |
-| 500 `{"error":"internal error"}` on build/DB/restart/redeploy | Disk ≥90% — `GET /v1/system/health/detailed?fresh=true` (diskcheck is untyped; not 503) |
+| 503 `{"error":"insufficient disk space; try again later"}` on build/DB/restart/redeploy | Disk ≥90% — `GET /v1/system/health/detailed?fresh=true`; retry after `Retry-After` (10s) once space is freed |
 | 503 | Docker/build/metering/registration unavailable |
 | `unsupported source_type` | You sent `git_url`/`branch`. Send `source_type`/`source_url`/`source_ref` |
 | `image is required` | Always send `image` (`pending` for git) |

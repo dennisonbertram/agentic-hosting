@@ -21,7 +21,7 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | `GET/PUT .../environments/{id}/files` | Not routed; sync is `POST .../sync` |
 | PATCH tenant email | PATCH only accepts `name` |
 | Homepage `/deploy` commands | Repo files are `/ah-*`; `install.sh` now installs those same files |
-| Disk ≥90% → 503 | Sync paths return 500 `{"error":"internal error"}`; create returns 201 then fails async |
+| Disk ≥90% → 503 (pre-#168: assumed stale) | Since #168, sync paths return 503 `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` via `apierr.Unavailable`. Builds use `insufficient disk space for builds; try again later`. Service create still returns 201; async deploy sets `failed` + `last_error`. |
 | Circuit reset then `/start` | Reset removes the container; `/start` is 409; `/redeploy` creates a new one |
 | Poll `status == "circuit_open"` | `circuit_open` is a boolean; `status` stays `crashed` |
 | Idempotency on DELETE | POST and PUT only (`idempotency.go` method check) |

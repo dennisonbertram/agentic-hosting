@@ -24,8 +24,8 @@ Get an Ubuntu 24.04 server (Hetzner is one option). Open ports 80 and 443. Point
 git clone https://github.com/dennisonbertram/agentic-hosting && cd agentic-hosting
 sudo scripts/setup-linux.sh --domain example.com --acme-email you@example.com -y
 export AH_URL=https://api.example.com
-export AH_BOOTSTRAP_TOKEN=   # from /etc/default/ah (root-only); api_key is shown once
-ahc register my-team you@example.com --save
+export AH_BOOTSTRAP_TOKEN="$(sudo sed -n 's/^AH_BOOTSTRAP_TOKEN=//p' /etc/default/ah)"
+ahc register my-team you@example.com --save   # api_key is shown once
 ahc deploy https://github.com/org/repo my-app
 # prints URL: https://my-app.apps.example.com
 ```

@@ -9,7 +9,7 @@ The "Your PaaS is down? Deploy here in 5 minutes." section in the root README is
 | Fresh install is `sudo scripts/setup-linux.sh --domain … --acme-email …` (`-y` skips the prompt) | `scripts/setup-linux.sh` usage; delegates to `bootstrap-stack.sh` |
 | Installer also installs `ahc` | `scripts/setup-linux.sh` header and end of fresh path |
 | API is `https://api.$domain`; services are `*.apps.$domain` | setup-linux help: `AH_BASE_DOMAIN=apps.DOMAIN`; `publicURL` → `https://{dnsLabel}.{baseDomain}` |
-| Tokens live in `/etc/default/ah` | `bootstrap-stack.sh` writes `AH_BOOTSTRAP_TOKEN` and `AH_ADMIN_TOKEN` there (root, 0600) |
+| Tokens live in `/etc/default/ah` | `bootstrap-stack.sh` writes `AH_BOOTSTRAP_TOKEN` and `AH_ADMIN_TOKEN` there (root, 0600). The rescue path loads the token with `sudo sed` so it is not printed and is not placed on a process argv. An empty `export AH_BOOTSTRAP_TOKEN=` fails `resolveBootstrapToken`. |
 | Register body is `name` + `email`; response is `tenant_id` + `api_key` | `RegisterRequest` / `RegisterResponse` in `internal/api/tenants.go` and `internal/ahclient/types.go`; `ahc register <name> <email> --save` |
 | Header is `X-Bootstrap-Token` | `handleTenantRegister` |
 | Git create uses `image: "pending"` | `runDeployGit` in `cmd/ahc/deploy.go`; `ValidateImage` accepts `pending` as a Docker Hub name |

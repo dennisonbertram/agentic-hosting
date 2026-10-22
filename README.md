@@ -16,6 +16,24 @@ A self-hosted PaaS for bare metal servers, designed to be operated by AI agents 
 - **Default port**: 8080 (loopback only, behind Traefik)
 - **License**: [MIT](LICENSE)
 
+## Your PaaS is down? Deploy here in 5 minutes.
+
+Get an Ubuntu 24.04 server (Hetzner is one option). Open ports 80 and 443. Point `api` and `*.apps` at that server.
+
+```sh
+git clone https://github.com/dennisonbertram/agentic-hosting && cd agentic-hosting
+sudo scripts/setup-linux.sh --domain example.com --acme-email you@example.com -y
+export AH_URL=https://api.example.com
+export AH_BOOTSTRAP_TOKEN=   # from /etc/default/ah (root-only); api_key is shown once
+ahc register my-team you@example.com --save
+ahc deploy https://github.com/org/repo my-app
+# prints URL: https://my-app.apps.example.com
+```
+
+`ahc` wraps `POST /v1/tenants/register` (`name`, `email` → `tenant_id`, `api_key`), `POST /v1/services` with `image: "pending"` (route port defaults to **8000**; pass `--port` if the app listens elsewhere), then `POST /v1/services/{id}/builds` with `source_type` / `source_url` (`source_ref` defaults to `main`) which returns **`build_id`**, not `id`. Need a database? `ahc db provision my-app postgres` sets `DATABASE_URL` from `GET /v1/databases/{id}/connection-string` (host `ah-db-<id>`, port `5432` / `6379`) and restarts so the service joins that network.
+
+Give this to your agent: [llms.txt](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/llms.txt) · [operator skill](https://raw.githubusercontent.com/dennisonbertram/agentic-hosting/main/skills/agentic-hosting/SKILL.md).
+
 ## Quick start
 
 | You have | Run | Runbook |

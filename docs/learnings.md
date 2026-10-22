@@ -78,4 +78,11 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **Fix shipped as per-database `ah-dbnet-*` (Internal + ICC) + `ah-db-<id>` alias.** Tenant bridges stay ICC=false. Host loopback publish stays for probes. Attach is env-link (alias in service env), so another tenant cannot join even with a copied URL.
 - **Tradeoff:** two services on the same DB network can talk to each other. Same class as Traefik ingress pair networks.
 - **`service_env` is a separate ciphertext.** Rewriting `databases.connection_string_encrypted` is not enough; matching env values must be rewritten too, and the running container still needs a restart to pick up the new URL and join the network.
+
+## 2026-10-22 — README rescue path fields
+
+- **Build create returns `build_id`**, not `id`. `handleBuildCreate` writes `{"build_id","status","image"}`. GET still uses `json:"id"` on the `Build` struct — do not mix them.
+- **Omitted service port is 8000**, not 8080. 8080 is the `ah` loopback listen address. `ahc deploy` passes `--port` default `0`, and `Create` fills 8000.
+- **Git create still requires `image`.** `"pending"` is a valid Docker Hub-shaped placeholder; `ahc` sends that, then `POST .../builds` with `source_type` / `source_url`.
+- **#164 connection strings** use `ah-db-<id>` and the engine port (`5432` / `6379`). Host loopback is probes only. Restart after setting `DATABASE_URL` so the service joins `ah-dbnet-*`.
 - **Network names must stay ≤63 characters.** Full tenant ID + db ID overflows (`ah-dbnet-` + 32 + 1 + 32 = 73). Truncate the tenant ID first; keep the globally unique database ID.

@@ -33,7 +33,7 @@ The token is in the **JSON body**, not `X-Bootstrap-Token` (that header is used 
 
 ## Admin token
 
-`AH_ADMIN_TOKEN` (comma-separated, 32+ chars) authorizes operator-only routes: `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `PATCH /v1/tenants/{id}/quotas`. Send `X-Admin-Token` (or the same value in `X-Bootstrap-Token`). Once configured, a valid bootstrap token on those routes returns **403**. If unset, bootstrap tokens still work (deprecated; startup warning).
+`AH_ADMIN_TOKEN` (comma-separated, 32+ chars) authorizes operator-only routes: `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `POST /v1/tenants/{id}/suspend`, `PATCH /v1/tenants/{id}/quotas`. Send `X-Admin-Token` (or the same value in `X-Bootstrap-Token`). Once configured, a valid bootstrap token on those routes returns **403**. If unset, bootstrap tokens still work (deprecated; startup warning).
 
 ## Register
 
@@ -114,6 +114,14 @@ X-Admin-Token: <admin-token>
 
 Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
 
+## Operator suspend
+
+`POST /v1/tenants/{tenantID}/suspend` with `X-Admin-Token` is the operator kill switch: same effect as `DELETE /v1/tenant` (status suspended, all keys revoked, workloads stopped, records kept) without needing a tenant API key. Already-suspended tenants return 409. Missing tenants return 404. Uses `adminLimiter`. Workload stop runs in the background after the 204.
+
+```bash
+ahc suspend <tenant-id> --confirm
+```
+
 ## Tenant self-service
 
 | Method | Path | Notes |
@@ -141,6 +149,7 @@ ahc key create --name ci
 ahc key list
 ahc key revoke <keyID>
 ahc recover --email agent@example.com
+ahc suspend <tenant-id> --confirm
 ```
 
 Config file expected by `ahclient.LoadConfig` is `~/.ah/config.json` with `url` and `key`.

@@ -283,6 +283,18 @@ func (c *Client) ReactivateTenant(tenantID, bootstrapToken string) (*ReactivateR
 	return &resp, nil
 }
 
+// SuspendTenant suspends a tenant using a bootstrap token (only when the
+// server has no AH_ADMIN_TOKEN). Same effect as DELETE /v1/tenant.
+func (c *Client) SuspendTenant(tenantID, bootstrapToken string) error {
+	headers := map[string]string{"X-Bootstrap-Token": bootstrapToken}
+	return c.doJSON(http.MethodPost, "/v1/tenants/"+esc(tenantID)+"/suspend", nil, nil, headers)
+}
+
+// SuspendTenantWithAdminToken is SuspendTenant authenticated with X-Admin-Token.
+func (c *Client) SuspendTenantWithAdminToken(tenantID, adminToken string) error {
+	return c.doJSON(http.MethodPost, "/v1/tenants/"+esc(tenantID)+"/suspend", nil, nil, map[string]string{"X-Admin-Token": adminToken})
+}
+
 // ---- API key endpoints ----
 
 // ListKeys returns all non-revoked API keys for the current tenant.

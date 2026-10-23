@@ -30,6 +30,7 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | Rate limiter ignores `api_rate_limit` | Auth reads the column; limiter uses it with burst 2× |
 | Expired keys still count toward the 20-key cap | Create/list/usage/recover count only live keys (`revoked_at IS NULL` and not past `expires_at`) |
 | Keys have no roles | `owner` vs `member`; only owner can revoke keys or `DELETE /v1/tenant` |
+| No operator kill switch for a tenant | `POST /v1/tenants/{id}/suspend` + `ahc suspend` with the admin token |
 
 ## Build constraints
 

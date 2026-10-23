@@ -53,6 +53,7 @@ Getting Started:
 	root.AddCommand(newRegisterCmd(state))
 	root.AddCommand(newKeyCmd(state))
 	root.AddCommand(newRecoverCmd(state))
+	root.AddCommand(newSuspendCmd(state))
 	root.AddCommand(newDeployCmd(state))
 	root.AddCommand(newDbCmd(state))
 	root.AddCommand(newBuildCmd(state))

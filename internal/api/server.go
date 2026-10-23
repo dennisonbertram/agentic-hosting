@@ -33,7 +33,7 @@ type ServerConfig struct {
 	MasterKey             []byte
 	DevMode               bool
 	BootstrapTokens       []string
-	AdminTokens           []string // operator-only endpoints (recover/reactivate/quota); empty = fall back to BootstrapTokens
+	AdminTokens           []string // operator-only endpoints (recover/reactivate/suspend/quota); empty = fall back to BootstrapTokens
 	OpenRegistration      bool
 	Docker                docker.Client
 	BuildManager          *builds.Manager
@@ -226,6 +226,8 @@ func (s *Server) setupRoutes() {
 		// tokens only when AH_ADMIN_TOKEN is unset), not an API key.
 		// Allows operator to reactivate a suspended tenant and generate a new API key.
 		r.Post("/v1/tenants/{tenantID}/reactivate", s.handleTenantReactivate)
+		// Operator kill switch: same effect as DELETE /v1/tenant, admin token.
+		r.Post("/v1/tenants/{tenantID}/suspend", s.handleTenantSuspend)
 		// Validate endpoint: checks if a bootstrap token is valid.
 		// Useful during token rotation to verify both old and new tokens.
 		r.Post("/v1/system/bootstrap-token/validate", s.handleBootstrapTokenValidate)

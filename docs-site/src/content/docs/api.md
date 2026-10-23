@@ -33,7 +33,7 @@ Timestamps in bodies are **unix seconds** unless a query param says RFC3339 (met
 |--------|--------|
 | `Authorization: Bearer …` | All tenant routes |
 | `X-Bootstrap-Token` | Register (and recover/reactivate/quotas only if `AH_ADMIN_TOKEN` is unset) |
-| `X-Admin-Token` | Recover, reactivate, quotas when `AH_ADMIN_TOKEN` is set |
+| `X-Admin-Token` | Recover, reactivate, suspend, quotas when `AH_ADMIN_TOKEN` is set |
 | `Idempotency-Key` | POST and PUT only (not DELETE/PATCH; no PUT routes). Excluded: `POST /v1/auth/keys`, `POST .../exec` |
 | `Content-Type: application/json` | Bodies |
 | `X-Forwarded-Proto: https` | Required in production from loopback Traefik |

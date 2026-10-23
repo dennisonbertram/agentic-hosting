@@ -185,7 +185,7 @@ func (m *Manager) dnsLabelFor(name string) (string, error) {
 // returns nil for any other error.
 func dnsLabelConflict(err error, dnsLabel string) error {
 	if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "dns_label") {
-		return apierr.Conflict("subdomain already taken: " + dnsLabel + " — choose a different service name")
+		return apierr.Conflict("subdomain already taken: " + dnsLabel + " — labels are unique across the whole server, choose a different service name")
 	}
 	return nil
 }

@@ -130,7 +130,7 @@ On authenticated routes the value is capped at 60 seconds. On the registration l
 The status code alone does not tell you which one you have, so read the `error` text. The code uses 409 for:
 
 - Quota: `quota exceeded: maximum N services reached`.
-- Duplicate label: `subdomain already taken: <label> — choose a different service name`.
+- Duplicate label: `subdomain already taken: <label> — labels are unique across the whole server, choose a different service name`.
 - Idempotency: `idempotency key reused with different request body`, or `a request with this idempotency key is still in progress`. Use a new `Idempotency-Key` for a different body.
 - Build queue: `build queue full; try again later`. The queue holds 10.
 - No container: `service has no container — use POST /redeploy to deploy it`. This is what `/start` returns after a reset. Call `POST /v1/services/{id}/redeploy`.

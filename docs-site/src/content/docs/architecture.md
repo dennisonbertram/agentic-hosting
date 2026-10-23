@@ -81,7 +81,7 @@ Default container port if the service omits one: **8000**.
 - `ah` writes host routes for services and environment previews
 - Without `--base-domain`, URLs are `http://{serviceID}.localhost` and localhost file routes are generated
 - With `--base-domain example.com`, URLs are `https://{dns_label}.example.com`
-- `dns_label` is a normalized service name, globally unique, max 63 chars
+- `dns_label` is a normalized service name, unique across the whole server (first-come, not per tenant), max 63 chars. The hostname is `{dns_label}.{base-domain}`; namespacing by tenant would need a two-level DNS wildcard the install path does not set up.
 - Reserved labels: `api`, `admin`, `dashboard`, `traefik`, `www`, `mail`, `smtp`, `health`, `status`, `metrics`, `grafana`, `prometheus`, `registry`, `auth`, `login`, `oauth`
 
 The API itself must sit behind Traefik on loopback. `requireHTTPS` only trusts `X-Forwarded-Proto: https` from a loopback `RemoteAddr`. Non-loopback requests have `X-Forwarded-*` and `X-Real-Ip` stripped.

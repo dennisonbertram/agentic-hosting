@@ -887,3 +887,11 @@ func TestIssue164_RestartAttachesDatabaseNetwork(t *testing.T) {
 	assert.Contains(t, mock.EnsureDatabaseNetworkCalls, wantNet)
 	assert.Contains(t, mock.ConnectNetworkCalls, [2]string{"dbnet-" + wantNet, "mock-container-" + svc.ID})
 }
+
+func TestDNSLabelConflict_MessageSaysServerWide(t *testing.T) {
+	err := dnsLabelConflict(fmt.Errorf("UNIQUE constraint failed: services.dns_label"), "web")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, apierr.ErrConflict))
+	assert.Contains(t, err.Error(), "whole server")
+	assert.Nil(t, dnsLabelConflict(fmt.Errorf("disk full"), "web"))
+}

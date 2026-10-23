@@ -61,7 +61,7 @@ Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://agent
 
 1. **Agentic-first** — AI agents use the REST API directly. The dashboard is optional and supervisory, not the primary operating surface.
 2. **One happy path per primitive** — One database engine per type (Postgres, Redis), one build system (Nixpacks), one router (Traefik).
-3. **Multi-tenant** — Full tenant isolation via API keys, namespaced resources, per-tenant rate limits.
+3. **Multi-tenant** — Full tenant isolation via API keys. Services, databases, images and networks are namespaced by tenant ID. Public subdomains (`{dns_label}.{base-domain}`) are first-come across the whole server, not per tenant. Rate limits are per-tenant and global.
 4. **Secure by default** — gVisor syscall interception, ReadonlyRootfs, dropped capabilities, AES-256-GCM encrypted secrets.
 
 ## Architecture

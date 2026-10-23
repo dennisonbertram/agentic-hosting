@@ -337,6 +337,7 @@ type ReactivateResponse struct {
 type CreateKeyRequest struct {
 	Name      string `json:"name"`
 	ExpiresIn *int64 `json:"expires_in,omitempty"`
+	Role      string `json:"role,omitempty"`
 }
 
 // CreateKeyResponse is returned after key creation.
@@ -345,6 +346,7 @@ type CreateKeyResponse struct {
 	Name    string `json:"name"`
 	APIKey  string `json:"api_key"`
 	Prefix  string `json:"prefix"`
+	Role    string `json:"role"`
 	Expires *int64 `json:"expires_at,omitempty"`
 }
 
@@ -353,6 +355,7 @@ type APIKey struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Prefix     string `json:"prefix"`
+	Role       string `json:"role"`
 	CreatedAt  int64  `json:"created_at"`
 	LastUsedAt *int64 `json:"last_used_at,omitempty"`
 	ExpiresAt  *int64 `json:"expires_at,omitempty"`

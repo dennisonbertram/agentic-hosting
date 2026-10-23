@@ -298,8 +298,8 @@ func (s *Server) handleTenantRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
-		 VALUES (?, ?, 'default', ?, ?, ?)`,
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, role)
+		 VALUES (?, ?, 'default', ?, ?, ?, 'owner')`,
 		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {
@@ -398,6 +398,9 @@ func (s *Server) handleTenantUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireKeyRole(w, r, middleware.KeyRoleOwner, "this key cannot suspend the tenant") {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	now := time.Now().Unix()
 
@@ -574,8 +577,8 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
-		 VALUES (?, ?, 'reactivation', ?, ?, ?)`,
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, role)
+		 VALUES (?, ?, 'reactivation', ?, ?, ?, 'owner')`,
 		key.id, tenantID, key.prefix, key.hash, now,
 	)
 	if err != nil {

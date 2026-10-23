@@ -249,7 +249,7 @@ Bearer (`Authorization: Bearer $AH_KEY`):
 | GET | `/v1/system/health/detailed` (`?fresh=true` bypasses 30s cache) |
 | GET/PATCH/DELETE | `/v1/tenant` (PATCH `{"name"}` only) |
 | GET | `/v1/tenant/usage` · `/v1/tenant/usage/metrics` |
-| POST/GET | `/v1/auth/keys` · DELETE `/v1/auth/keys/{keyID}` — create response field is `api_key` |
+| POST/GET | `/v1/auth/keys` · DELETE `/v1/auth/keys/{keyID}` — create response field is `api_key`; extra keys default to `member` (cannot revoke keys or `DELETE /v1/tenant`) |
 | GET | `/v1/activity?limit=50&since=<unix>` |
 | POST/GET | `/v1/services` · GET/PATCH/DELETE `/v1/services/{id}` |
 | POST | `.../start` `.../stop` `.../restart` `.../redeploy` `.../reset` |

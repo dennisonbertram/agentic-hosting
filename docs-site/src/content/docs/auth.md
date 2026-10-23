@@ -85,8 +85,9 @@ DELETE /v1/auth/keys/{keyID}
 - `name` defaults to `unnamed`
 - `expires_in` is seconds, must be > 0, max ~10 years
 - Response field is **`api_key`** (not `key`)
-- List never returns the secret; it returns `id`, `name`, `prefix`, `created_at`, `last_used_at`, `expires_at`
+- List never returns the secret; it returns `id`, `name`, `prefix`, `role`, `created_at`, `last_used_at`, `expires_at`
 - Max **20** live keys per tenant (not revoked and not expired) → **409** `quota exceeded: maximum API keys reached...`
+- Roles: `owner` can revoke keys and `DELETE /v1/tenant`. `member` (the default for `POST /v1/auth/keys`) cannot. Registration, recovery, and reactivation keys are `owner`. Existing keys stay `owner`. Only an owner key can mint another owner (`{"role":"owner"}`).
 
 Creating a key invalidates the auth cache for that tenant.
 

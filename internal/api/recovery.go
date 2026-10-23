@@ -111,8 +111,8 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 	var revokedKeyID string
 	for attempt := 0; ; attempt++ {
 		res, err := s.store.StateDB.Exec(
-			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
-			 SELECT ?, ?, ?, ?, ?, ?
+			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, role)
+			 SELECT ?, ?, ?, ?, ?, ?, 'owner'
 			 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND `+liveAPIKeySQL+`) < ?`,
 			key.id, tenantID, keyName, key.prefix, key.hash, now,
 			tenantID, now, maxKeysPerTenant,

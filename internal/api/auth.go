@@ -19,6 +19,7 @@ const liveAPIKeySQL = `revoked_at IS NULL AND (expires_at IS NULL OR expires_at 
 type CreateKeyRequest struct {
 	Name      string `json:"name"`
 	ExpiresIn *int64 `json:"expires_in,omitempty"`
+	Role      string `json:"role,omitempty"` // owner or member; default member
 }
 
 type CreateKeyResponse struct {
@@ -26,6 +27,7 @@ type CreateKeyResponse struct {
 	Name    string `json:"name"`
 	APIKey  string `json:"api_key"`
 	Prefix  string `json:"prefix"`
+	Role    string `json:"role"`
 	Expires *int64 `json:"expires_at,omitempty"`
 }
 
@@ -33,6 +35,7 @@ type KeyInfo struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Prefix     string `json:"prefix"`
+	Role       string `json:"role"`
 	CreatedAt  int64  `json:"created_at"`
 	LastUsedAt *int64 `json:"last_used_at,omitempty"`
 	ExpiresAt  *int64 `json:"expires_at,omitempty"`
@@ -49,6 +52,19 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		req.Name = "unnamed"
+	}
+
+	role := middleware.KeyRoleMember
+	if req.Role != "" {
+		if req.Role != middleware.KeyRoleOwner && req.Role != middleware.KeyRoleMember {
+			writeError(w, http.StatusBadRequest, "role must be owner or member")
+			return
+		}
+		if req.Role == middleware.KeyRoleOwner && middleware.GetKeyRole(r.Context()) != middleware.KeyRoleOwner {
+			writeError(w, http.StatusForbidden, "this key cannot create owner keys")
+			return
+		}
+		role = req.Role
 	}
 
 	if req.ExpiresIn != nil {
@@ -80,10 +96,10 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	// The quota check is part of the INSERT so concurrent creates cannot both
 	// pass a separate COUNT and push the tenant past maxKeysPerTenant.
 	res, err := s.store.StateDB.Exec(
-		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
-		 SELECT ?, ?, ?, ?, ?, ?, ?
+		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at, role)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?
 		 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND `+liveAPIKeySQL+`) < ?`,
-		key.id, tenantID, req.Name, key.prefix, key.hash, now, expiresAt,
+		key.id, tenantID, req.Name, key.prefix, key.hash, now, expiresAt, role,
 		tenantID, now, maxKeysPerTenant,
 	)
 	if err != nil {
@@ -100,6 +116,7 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		Name:    req.Name,
 		APIKey:  key.token,
 		Prefix:  key.prefix,
+		Role:    role,
 		Expires: expiresAt,
 	})
 }
@@ -132,7 +149,7 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 	rows, err := s.store.StateDB.Query(
-		`SELECT id, name, key_prefix, created_at, last_used_at, expires_at
+		`SELECT id, name, key_prefix, created_at, last_used_at, expires_at, COALESCE(role, 'owner')
 		 FROM api_keys
 		 WHERE tenant_id = ? AND `+liveAPIKeySQL+`
 		 ORDER BY created_at DESC
@@ -148,7 +165,7 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 	keys := []KeyInfo{}
 	for rows.Next() {
 		var k KeyInfo
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.CreatedAt, &k.LastUsedAt, &k.ExpiresAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.CreatedAt, &k.LastUsedAt, &k.ExpiresAt, &k.Role); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -162,7 +179,18 @@ func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, keys)
 }
 
+func requireKeyRole(w http.ResponseWriter, r *http.Request, role, msg string) bool {
+	if middleware.GetKeyRole(r.Context()) != role {
+		writeError(w, http.StatusForbidden, msg)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	if !requireKeyRole(w, r, middleware.KeyRoleOwner, "this key cannot revoke API keys") {
+		return
+	}
 	tenantID := middleware.GetTenantID(r.Context())
 	keyID := chi.URLParam(r, "keyID")
 

@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **API key roles.** Keys are `owner` or `member`. Only an owner key can revoke keys or `DELETE /v1/tenant`. `POST /v1/auth/keys` mints `member` unless an owner asks for `role=owner`. Registration, recovery and reactivation keys are owners; existing rows stay owner.
+
 - **README rescue path** at the top: box → install → register → git deploy → live URL, with fields checked against the code (`build_id` on build create, route port 8000, `ah-db-<id>` connection strings).
 
 - **Disposable sandboxes** (`/v1/sandboxes`, `ahc sandbox`). Short-lived gVisor containers created from a template, a public image, one of the tenant's snapshots, or a copy of one of the tenant's services. Endpoints: create, list, get, exec, logs, extend, delete. Every sandbox has a TTL (`ttl_seconds`, at most `max_sandbox_ttl_seconds`) and an absolute lifetime (`max_sandbox_lifetime_seconds`); a reaper deletes expired sandboxes, and extend and expiry cannot both win. Limits: `max_sandboxes` per tenant (default 5), `--max-sandboxes-total` / `AH_MAX_SANDBOXES_TOTAL` per host (default 20), and a per-tenant create rate limit (reported in `X-Sandbox-Create-RateLimit-*`). By default sandboxes have no network egress and cannot reach other containers. Env values from a source (`include_env`) are never returned by the API. `ahc sandbox run` creates a sandbox, runs one command and always deletes it. Usage is metered with `resource_kind=sandbox` (`?kind=sandbox` on metrics). Environment and sandbox names are unique per kind.

@@ -646,9 +646,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Recreate the database and kanban containers that suspension removed.
-	// They wait for health checks (up to ~30-60s each), so run in the background.
-	if s.dbManager != nil || s.kanbanManager != nil {
+	// Recreate the database, kanban and service containers that suspension
+	// removed. They wait for health checks / image pulls, so run in the background.
+	if s.dbManager != nil || s.kanbanManager != nil || s.svcManager != nil {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
@@ -657,6 +657,9 @@ func (s *Server) handleTenantReactivate(w http.ResponseWriter, r *http.Request) 
 			}
 			if s.kanbanManager != nil {
 				s.kanbanManager.StartForTenant(ctx, tenantID)
+			}
+			if s.svcManager != nil {
+				s.svcManager.StartAllForTenant(ctx, tenantID)
 			}
 		}()
 	}

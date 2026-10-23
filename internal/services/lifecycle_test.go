@@ -576,3 +576,32 @@ func TestCreate_RejectsBadInput(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"K": "v"}, env, "inline env is stored encrypted with the service")
 }
+
+func TestStartAllForTenant_DeploysStoppedServicesSkipsPendingAndCircuit(t *testing.T) {
+	stateDB := testutil.NewStateDB(t)
+	seedTenant(t, stateDB)
+	mock := &testutil.MockDockerClient{}
+	mgr := NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "", "", nil)
+	ctx := context.Background()
+
+	ready, err := mgr.Create(ctx, "tenant-1", CreateRequest{Name: "ready", Image: "nginx:latest"})
+	require.NoError(t, err)
+	pending, err := mgr.Create(ctx, "tenant-1", CreateRequest{Name: "pending", Image: "pending"})
+	require.NoError(t, err)
+	open, err := mgr.Create(ctx, "tenant-1", CreateRequest{Name: "open", Image: "nginx:latest"})
+	require.NoError(t, err)
+
+	_, err = stateDB.Exec(`UPDATE services SET status = 'stopped', container_id = '' WHERE id IN (?, ?, ?)`,
+		ready.ID, pending.ID, open.ID)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`UPDATE services SET circuit_open = 1 WHERE id = ?`, open.ID)
+	require.NoError(t, err)
+
+	mgr.StartAllForTenant(ctx, "tenant-1")
+
+	assert.Equal(t, 1, mock.RunContainerCalls, "only the stopped service with a real image should deploy")
+	got, err := mgr.Get(ctx, "tenant-1", ready.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	assert.NotEmpty(t, got.ContainerID)
+}

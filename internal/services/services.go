@@ -1441,6 +1441,51 @@ func (m *Manager) StopAllForTenant(ctx context.Context, tenantID string) {
 	// its network ID. GC removes it once no persisted workload owns it.
 }
 
+// StartAllForTenant redeploys a tenant's stopped services after reactivation.
+// Suspension clears container_id, so Start() would 409; Deploy recreates the
+// container from the stored image. Skips open circuits and placeholder images.
+func (m *Manager) StartAllForTenant(ctx context.Context, tenantID string) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id FROM services
+		 WHERE tenant_id = ?
+		   AND status IN ('stopped', 'failed')
+		   AND COALESCE(circuit_open, 0) = 0
+		   AND image IS NOT NULL AND image != '' AND image != 'pending'
+		 ORDER BY created_at ASC`,
+		tenantID,
+	)
+	if err != nil {
+		log.Printf("services: StartAllForTenant query failed for tenant %s: %v", tenantID, err)
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("services: StartAllForTenant scan failed: %v", err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("services: StartAllForTenant rows error: %v", err)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			log.Printf("services: StartAllForTenant stopped for tenant %s: %v", tenantID, err)
+			return
+		}
+		if err := m.Deploy(ctx, tenantID, id); err != nil {
+			log.Printf("services: StartAllForTenant deploy %s for tenant %s: %v", id, tenantID, err)
+		}
+	}
+	if len(ids) > 0 {
+		log.Printf("services: StartAllForTenant deployed %d services for tenant %s", len(ids), tenantID)
+	}
+}
+
 func (m *Manager) cleanupServiceIngressNetwork(ctx context.Context, tenantID, serviceID, containerID string) error {
 	name := docker.ServiceIngressNetworkName(tenantID, serviceID)
 	networks, err := m.docker.NetworkList(ctx)

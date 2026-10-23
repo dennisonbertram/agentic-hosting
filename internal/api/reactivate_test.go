@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dennisonbertram/agentic-hosting/internal/db"
+	"github.com/dennisonbertram/agentic-hosting/internal/services"
 	"github.com/dennisonbertram/agentic-hosting/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -251,4 +252,43 @@ func TestHandleTenantReactivate_RestartsDatabasesAndKanban(t *testing.T) {
 	}
 	assert.True(t, got["db:tenant-restart"])
 	assert.True(t, got["kanban:tenant-restart"])
+}
+
+func TestHandleTenantReactivate_RestartsServices(t *testing.T) {
+	resetLimitersForTest()
+	const bootstrapToken = "test-bootstrap-token-for-reactivation"
+	stateDB := testutil.NewStateDB(t)
+	_, err := stateDB.Exec(
+		`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+		 VALUES ('tenant-svcrestart', 'T', 'svc@example.com', 'suspended', 1, 1)`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES ('tenant-svcrestart')`)
+	require.NoError(t, err)
+	_, err = stateDB.Exec(
+		`INSERT INTO services (id, tenant_id, name, status, image, port, container_id, created_at, updated_at)
+		 VALUES ('svc-restart', 'tenant-svcrestart', 'web', 'stopped', 'nginx:latest', 8080, '', 1, 1)`)
+	require.NoError(t, err)
+
+	mock := &testutil.MockDockerClient{}
+	svcMgr := services.NewManager(stateDB, mock, []byte("0123456789abcdef0123456789abcdef"), "", "", nil)
+	srv := NewServer(ServerConfig{
+		Store:           &db.Store{StateDB: stateDB},
+		MasterKey:       []byte("0123456789abcdef0123456789abcdef"),
+		DevMode:         true,
+		BootstrapTokens: []string{bootstrapToken},
+		ServiceManager:  svcMgr,
+	})
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, reactivateRequest("10.1.0.51", "tenant-svcrestart", bootstrapToken))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	deadline := time.After(3 * time.Second)
+	for mock.RunContainerCalls == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for service redeploy")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	assert.GreaterOrEqual(t, mock.RunContainerCalls, 1)
 }

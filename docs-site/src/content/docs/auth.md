@@ -114,6 +114,8 @@ X-Admin-Token: <admin-token>
 
 Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
 
+Reactivation restarts databases, kanban, and the tenant's stopped services in the background (best-effort; open circuits and `pending` images are skipped). The 200 returns before those containers are guaranteed running.
+
 ## Operator suspend
 
 `POST /v1/tenants/{tenantID}/suspend` with `X-Admin-Token` is the operator kill switch: same effect as `DELETE /v1/tenant` (status suspended, all keys revoked, workloads stopped, records kept) without needing a tenant API key. Already-suspended tenants return 409. Missing tenants return 404. Uses `adminLimiter`. Workload stop runs in the background after the 204.

@@ -344,16 +344,17 @@ func (s *Server) handleTenantGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 
+	now := time.Now().Unix()
 	var resp TenantUsageResponse
 	err := s.store.StateDB.QueryRow(
 		`SELECT q.max_services, q.max_databases, q.max_memory_mb, q.max_cpu_cores, q.max_disk_gb, q.api_rate_limit, q.max_sandboxes,
 		    (SELECT COUNT(*) FROM services WHERE tenant_id = ?),
 		    (SELECT COUNT(*) FROM databases WHERE tenant_id = ? AND status != 'failed'),
-		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL),
+		    (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND `+liveAPIKeySQL+`),
 		    (SELECT COUNT(*) FROM environments WHERE tenant_id = ? AND kind = 'sandbox' AND status != 'failed')
 		 FROM tenant_quotas q
 		 WHERE q.tenant_id = ?`,
-		tenantID, tenantID, tenantID, tenantID, tenantID,
+		tenantID, tenantID, tenantID, now, tenantID, tenantID,
 	).Scan(&resp.Services.Max, &resp.Databases.Max, &resp.MemoryMB, &resp.CPUCores, &resp.DiskGB, &resp.RateLimit, &resp.Sandboxes.Max,
 		&resp.Services.Used, &resp.Databases.Used, &resp.APIKeys.Used, &resp.Sandboxes.Used)
 	if err == sql.ErrNoRows {

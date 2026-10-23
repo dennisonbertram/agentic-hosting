@@ -12,6 +12,10 @@ import (
 
 const maxKeysPerTenant = 20
 
+// liveAPIKeySQL is the WHERE fragment for keys that occupy a quota slot:
+// not revoked and not past expires_at. Bind one unix-seconds argument.
+const liveAPIKeySQL = `revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
+
 type CreateKeyRequest struct {
 	Name      string `json:"name"`
 	ExpiresIn *int64 `json:"expires_in,omitempty"`
@@ -78,9 +82,9 @@ func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	res, err := s.store.StateDB.Exec(
 		`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at, expires_at)
 		 SELECT ?, ?, ?, ?, ?, ?, ?
-		 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL) < ?`,
+		 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND `+liveAPIKeySQL+`) < ?`,
 		key.id, tenantID, req.Name, key.prefix, key.hash, now, expiresAt,
-		tenantID, maxKeysPerTenant,
+		tenantID, now, maxKeysPerTenant,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
@@ -126,13 +130,14 @@ func (s *Server) mintAPIKey() (newAPIKey, error) {
 func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
 	tenantID := middleware.GetTenantID(r.Context())
 
+	now := time.Now().Unix()
 	rows, err := s.store.StateDB.Query(
 		`SELECT id, name, key_prefix, created_at, last_used_at, expires_at
 		 FROM api_keys
-		 WHERE tenant_id = ? AND revoked_at IS NULL
+		 WHERE tenant_id = ? AND `+liveAPIKeySQL+`
 		 ORDER BY created_at DESC
 		 LIMIT 100`,
-		tenantID,
+		tenantID, now,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list keys")

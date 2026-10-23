@@ -102,19 +102,20 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 
 	// The key limit is checked inside the INSERT (as in handleKeyCreate), so
 	// concurrent recoveries cannot both pass a separate count and push the
-	// tenant past maxKeysPerTenant. If the keyring is full, the oldest key
-	// is revoked and the guarded INSERT retried. Recovery is a last-resort
-	// operation: it should always succeed for a legitimate tenant, even with
-	// every key slot in use. The retries are bounded so a tenant somehow over
-	// the limit is brought back to it, never looped on forever.
+	// tenant past maxKeysPerTenant. Expired keys do not count. If the
+	// keyring is full of live keys, the oldest live key is revoked and the
+	// guarded INSERT retried. Recovery is a last-resort operation: it should
+	// always succeed for a legitimate tenant, even with every key slot in
+	// use. The retries are bounded so a tenant somehow over the limit is
+	// brought back to it, never looped on forever.
 	var revokedKeyID string
 	for attempt := 0; ; attempt++ {
 		res, err := s.store.StateDB.Exec(
 			`INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, created_at)
 			 SELECT ?, ?, ?, ?, ?, ?
-			 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND revoked_at IS NULL) < ?`,
+			 WHERE (SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND `+liveAPIKeySQL+`) < ?`,
 			key.id, tenantID, keyName, key.prefix, key.hash, now,
-			tenantID, maxKeysPerTenant,
+			tenantID, now, maxKeysPerTenant,
 		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create recovery key")
@@ -131,19 +132,12 @@ func (s *Server) handleKeyRecover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Keyring full: prefer revoking an expired key (least disruptive),
-		// otherwise the oldest key by created_at.
-		revokedID, err := s.store.RevokeOldestExpired(tenantID)
+		// Keyring full of live keys. Expired keys no longer occupy a slot,
+		// so free the oldest live key (by created_at).
+		revokedID, err := s.store.RevokeOldest(tenantID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
-		}
-		if revokedID == "" {
-			revokedID, err = s.store.RevokeOldest(tenantID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal error")
-				return
-			}
 		}
 		if revokedID == "" {
 			// Nothing left to revoke, yet the INSERT still saw a full keyring.

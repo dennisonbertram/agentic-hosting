@@ -2906,8 +2906,8 @@ func TestRecoveryKeyringFull_Regression(t *testing.T) {
 		assert.Empty(t, resp.RevokedKeyID, "no revoked_key_id when keyring has room")
 	})
 
-	t.Run("recovery when keyring full with expired keys auto-revokes oldest expired", func(t *testing.T) {
-		srv, stateDB := newRecoverServer(t, maxKeysPerTenant, true) // full keyring, key-0 is expired
+	t.Run("recovery when one of twenty keys is expired does not revoke", func(t *testing.T) {
+		srv, stateDB := newRecoverServer(t, maxKeysPerTenant, true) // 19 live + 1 expired
 
 		body, _ := json.Marshal(KeyRecoverRequest{
 			Email:          "keyring@example.com",
@@ -2922,14 +2922,13 @@ func TestRecoveryKeyringFull_Regression(t *testing.T) {
 		var resp KeyRecoverResponse
 		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
 		assert.NotEmpty(t, resp.Key)
-		assert.Contains(t, resp.Warning, "revoked oldest key", "warning should mention key revocation")
-		assert.Equal(t, "key-0", resp.RevokedKeyID, "should have revoked the oldest expired key (key-0)")
+		assert.Empty(t, resp.Warning, "expired keys do not occupy a slot")
+		assert.Empty(t, resp.RevokedKeyID)
 
-		// Verify key-0 was actually revoked in DB
 		var revokedAt *int64
 		err := stateDB.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = 'key-0'`).Scan(&revokedAt)
 		require.NoError(t, err)
-		assert.NotNil(t, revokedAt, "key-0 should have revoked_at set")
+		assert.Nil(t, revokedAt, "expired key-0 should be left unrevoked")
 	})
 
 	t.Run("recovery when keyring full with no expired keys auto-revokes oldest active", func(t *testing.T) {
@@ -2979,7 +2978,7 @@ func TestRecoveryKeyringFull_Regression(t *testing.T) {
 	})
 
 	t.Run("response includes revoked_key_id when auto-revoke happened", func(t *testing.T) {
-		srv, _ := newRecoverServer(t, maxKeysPerTenant, true)
+		srv, _ := newRecoverServer(t, maxKeysPerTenant, false)
 
 		body, _ := json.Marshal(KeyRecoverRequest{
 			Email:          "keyring@example.com",

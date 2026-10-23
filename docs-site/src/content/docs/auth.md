@@ -7,7 +7,7 @@ order: 5
 
 # Registration & API keys
 
-Access is a **tenant** plus one or more **API keys**. Keys are `keyID.secret`. The secret is returned once. The database stores an HMAC-SHA256 of the full key using the server master key (`internal/crypto.HashAPIKey`). Verification is constant-time (`hmac.Equal`).
+Access is a **tenant** plus one or more **API keys**. Keys are `keyID.secret`. The secret is returned once. The database stores an HMAC-SHA256 of the **secret only** (not `keyID.secret`) using a dedicated API-key hash key (`internal/crypto.HashAPIKey(secret, apiKeyHashKey)`). That hash key lives in `server_secrets` and is independent of master-key rotation (`LoadOrCreateAPIKeyHashKey`). On first start it is the master key, because that is what pre-existing hashes used. Verification is constant-time (`hmac.Equal`).
 
 bcrypt is used for **passwords** (kanban / DB credential hashing helpers), not for API keys.
 
@@ -69,7 +69,7 @@ Auth middleware (`internal/middleware/auth.go`):
 
 - Looks up the key by ID, checks not revoked / not expired / tenant `active`
 - Verifies HMAC
-- Caches the lookup **30 seconds** (max 5000 entries) so revocation can lag up to 30s
+- Caches the lookup **30 seconds** (max 5000 entries) to cut SQLite load. `DELETE /v1/auth/keys/{id}` and `DELETE /v1/tenant` evict the cache and bump a generation counter, so in-process revocation is immediate. Only an out-of-band DB edit can lag up to 30s.
 - Samples `last_used_at` at most every 5 minutes
 
 Suspended tenants cannot authenticate.
@@ -88,8 +88,9 @@ DELETE /v1/auth/keys/{keyID}
 - List never returns the secret; it returns `id`, `name`, `prefix`, `role`, `created_at`, `last_used_at`, `expires_at`
 - Max **20** live keys per tenant (not revoked and not expired) → **409** `quota exceeded: maximum API keys reached...`
 - Roles: `owner` can revoke keys and `DELETE /v1/tenant`. `member` (the default for `POST /v1/auth/keys`) cannot. Registration, recovery, and reactivation keys are `owner`. Existing keys stay `owner`. Only an owner key can mint another owner (`{"role":"owner"}`).
+- Creating a key does **not** touch the auth cache (the new key is not cached until it is used)
 
-Creating a key invalidates the auth cache for that tenant.
+`ahc key revoke <keyID>` requires `--confirm`.
 
 ## Recover lost keys
 
@@ -101,7 +102,7 @@ X-Admin-Token: <admin-token>
 {"email":"agent@example.com"}
 ```
 
-Email must match the tenant. Issues a new key. Same registration rate limiter.
+Email must match the tenant. Issues a new key. Uses `adminLimiter` (same numbers as registration, separate buckets). If the live keyring is full, recover auto-revokes the oldest live key and returns `warning` / `revoked_key_id`.
 
 ## Reactivate a suspended tenant
 
@@ -112,7 +113,7 @@ POST /v1/tenants/{tenantID}/reactivate
 X-Admin-Token: <admin-token>
 ```
 
-Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Rate-limited like registration.
+Returns `{"tenant_id","api_key","status"}`. Already-active tenants return 409. Uses `adminLimiter`.
 
 Reactivation restarts databases, kanban, and the tenant's stopped services in the background (best-effort; open circuits and `pending` images are skipped). The 200 returns before those containers are guaranteed running.
 
@@ -141,7 +142,7 @@ PATCH /v1/tenants/{tenantID}/quotas
 X-Admin-Token: <admin-token>
 ```
 
-Same bootstrap rate limiter.
+Uses `adminLimiter`.
 
 ## `ahc` equivalents
 
@@ -149,8 +150,8 @@ Same bootstrap rate limiter.
 ahc register --name my-agent --email agent@example.com --save
 ahc key create --name ci
 ahc key list
-ahc key revoke <keyID>
-ahc recover --email agent@example.com
+ahc key revoke <keyID> --confirm
+ahc recover --email agent@example.com   # --admin-token / $AH_ADMIN_TOKEN when AH_ADMIN_TOKEN is set
 ahc suspend <tenant-id> --confirm
 ```
 

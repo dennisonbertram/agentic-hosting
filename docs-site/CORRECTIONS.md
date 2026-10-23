@@ -23,7 +23,7 @@ Operator docs, the homepage, and the Claude skill drifted from `internal/`. This
 | Unhealthy containers are stopped; auto-recovery restarts | Unhealthy containers are **restarted**. Auto-recovery leaves the service **stopped** (no container) | `reconciler.go` |
 | Runtime logs unavailable (issue #11) | `GET /v1/services/{id}/logs?follow=true&tail=100` streams Docker stdout/stderr | `handleServiceLogs` |
 | `PidsLimit: 100` | `PidsLimit: 256` | `internal/docker/client.go` |
-| API keys hashed with bcrypt | HMAC-SHA256 of `keyID.secret` with the master key; bcrypt is for passwords | `internal/crypto` |
+| API keys hashed with bcrypt (or HMAC of the full `keyID.secret` with the master key) | HMAC-SHA256 of the **secret only** with the dedicated API-key hash key (`LoadOrCreateAPIKeyHashKey`); bcrypt is for passwords | `internal/crypto`, `api.mintAPIKey` |
 | Reconciler every 60s | Every **30 seconds** | `cmd/ah/main.go` |
 | Create service accepts `memory_mb` / `cpu_count` | `CreateRequest` is `name`, `image`, `port`, `env` only | `internal/services.CreateRequest` |
 | `image` optional on create (omit for git) | `image` is **required** (`ValidateImage`). Git flow uses placeholder `"pending"` (what `ahc` sends) | `handleServiceCreate`, `cmd/ahc/deploy.go` |

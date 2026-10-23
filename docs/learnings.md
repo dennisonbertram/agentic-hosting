@@ -33,6 +33,7 @@ Cross-cutting facts found while building the documentation site (2026-10-14).
 | No operator kill switch for a tenant | `POST /v1/tenants/{id}/suspend` + `ahc suspend` with the admin token |
 | Reactivate does not restart services | Reactivate now redeploys stopped services in the background (`StartAllForTenant`) |
 | `api_rate_limit` not settable via API | `PATCH /v1/tenants/{id}/quotas` accepts `api_rate_limit` (1–1000) |
+| README “namespaced resources” includes public hostnames | IDs/networks/images are tenant-scoped; `{dns_label}.{base}` is first-come server-wide |
 
 ## Build constraints
 

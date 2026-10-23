@@ -105,7 +105,7 @@ With a base domain set, the name has to produce a usable label. There are three 
 
 1. **Reserved label, `400`.** You cannot claim `api`, `admin`, `dashboard`, `traefik`, `www`, `mail`, `smtp`, `health`, `status`, `metrics`, `grafana`, `prometheus`, `registry`, `auth`, `login`, or `oauth`. Names starting with `env-` are also reserved, because environment previews use them.
 2. **Label over 63 characters, `400`.** DNS labels cap at 63. The error says the name is too long for DNS routing. A name with no letters or digits fails too.
-3. **Label already taken, `409`.** Labels are first come, first served across all tenants. The error reads `subdomain already taken: <label> — choose a different service name`.
+3. **Label already taken, `409`.** Labels are first come, first served across all tenants. The error reads `subdomain already taken: <label> — labels are unique across the whole server, choose a different service name`.
 
 Errors come back as `{"error": "..."}`. The fix is always a different name, such as `myapp-api` instead of `api`. An agent can read that error and retry on its own.
 

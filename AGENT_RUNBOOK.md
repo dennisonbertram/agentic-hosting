@@ -226,7 +226,7 @@ curl -s -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/system/health/detailed
 # "apps.example.com" → subdomain mode, services get https://{label}.apps.example.com
 ```
 
-Reserved subdomains (`api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry`) are blocked and return `422`. DNS labels are globally unique — if the label is already taken by another tenant, you will also get `422` and must choose a different service name.
+Reserved subdomains (`api`, `admin`, `dashboard`, `traefik`, `www`, `auth`, `login`, `registry`) are blocked and return `400`. DNS labels are unique across the whole server (not per tenant) — if the label is already taken, you get `409` `subdomain already taken` and must choose a different service name. The URL scheme is `{dns_label}.{base-domain}`; there is no tenant segment.
 
 ### Step 2 — Poll Until Running
 

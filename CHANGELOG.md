@@ -59,6 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Public subdomains are documented as first-come across the host.** Resources stay tenant-scoped; `{dns_label}.{base-domain}` is globally unique. The 409 now says the label is unique across the whole server. Per-tenant hostnames were rejected: they need a two-level DNS wildcard or would rewrite existing URLs.
 - **Backpressure returns 503 + `Retry-After: 10`** instead of 500: a full deploy queue on restart, circuit reset and image deploy (deploy itself keeps its 409), and low disk on services, builds, databases and kanbans. Database create returns 409 if a tenant suspension interrupts it.
 - **Admin routes have their own rate-limit bucket.** Recover, reactivate and quota update use `adminLimiter` (same limits as registration, separate counters), so bootstrap-token holders can no longer exhaust the budget the operator needs. Bootstrap-token validation no longer charges the global registration counter.
 - CORS can be disabled (`AH_CORS_ORIGINS=none`, or a list with no valid origins).

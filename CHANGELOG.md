@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Expired API keys no longer hold a slot in the 20-key cap.** Create, list, usage, and recover count only live keys (`revoked_at IS NULL` and not past `expires_at`). Recover no longer auto-revokes an expired key to make room — expired keys were not occupying a slot.
 - **Deploys are serialized across the API and build pipeline.** The build pipeline and API used separate service managers, so a build-triggered deploy could overlap a restart or circuit reset of the same service. They now share one.
 - **Suspended tenants stay stopped.** In-flight deploys, restarts, database and kanban provisioning re-check the tenant before starting containers and before marking them running/ready, and remove anything they started if the tenant was suspended meanwhile.
 - **Snapshot images in use are kept.** Snapshot delete and retention no longer untag an image that a restored service still runs from.

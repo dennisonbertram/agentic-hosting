@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -209,8 +210,8 @@ func TestHandleKeyRecover_FullKeyring(t *testing.T) {
 
 	// fillKeyring inserts exactly maxKeysPerTenant keys for the given tenant.
 	// If expiredIdx >= 0, that key index will have an expires_at in the past
-	// (expired but not yet revoked), making it a candidate for preferential
-	// revocation.  Returns the ID of the oldest key.
+	// (expired but not yet revoked). Expired keys do not occupy a slot.
+	// Returns the ID of the oldest key.
 	fillKeyring := func(t *testing.T, stateDB *db.Store, tenantID string, expiredIdx int) string {
 		t.Helper()
 		now := time.Now().Unix()
@@ -247,7 +248,7 @@ func TestHandleKeyRecover_FullKeyring(t *testing.T) {
 		})
 	}
 
-	t.Run("full keyring auto-revokes expired key", func(t *testing.T) {
+	t.Run("expired keys do not fill the keyring", func(t *testing.T) {
 		stateDB := testutil.NewStateDB(t)
 		_, err := stateDB.Exec(
 			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
@@ -259,11 +260,10 @@ func TestHandleKeyRecover_FullKeyring(t *testing.T) {
 		require.NoError(t, err)
 
 		store := &db.Store{StateDB: stateDB}
-		// Fill keyring with key index 5 as expired.
+		// 19 live keys + 1 expired: the expired row must not occupy a slot.
 		fillKeyring(t, store, "tenant-full-exp", 5)
 		expiredKeyID := "key-tenant-full-exp-005"
 
-		logBuf := captureLog(t)
 		srv := newServerWithStore(t, store)
 
 		body, _ := json.Marshal(KeyRecoverRequest{
@@ -280,16 +280,13 @@ func TestHandleKeyRecover_FullKeyring(t *testing.T) {
 		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
 		assert.NotEmpty(t, resp.ID)
 		assert.NotEmpty(t, resp.Key)
-		assert.Equal(t, "key slot was full; revoked oldest key", resp.Warning)
-		assert.Equal(t, expiredKeyID, resp.RevokedKeyID,
-			"should preferentially revoke the expired key")
+		assert.Empty(t, resp.Warning, "expired keys do not occupy a slot")
+		assert.Empty(t, resp.RevokedKeyID)
 
-		// Verify AUDIT log
-		logOutput := logBuf.String()
-		assert.Contains(t, logOutput, "AUDIT:")
-		assert.Contains(t, logOutput, "action=recovery.key_auto_revoked")
-		assert.Contains(t, logOutput, "tenant=tenant-full-exp")
-		assert.Contains(t, logOutput, "revoked_key="+expiredKeyID)
+		var revoked sql.NullInt64
+		err = stateDB.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = ?`, expiredKeyID).Scan(&revoked)
+		require.NoError(t, err)
+		assert.False(t, revoked.Valid, "expired key should be left unrevoked; it does not hold a slot")
 	})
 
 	t.Run("full keyring with no expired keys auto-revokes oldest", func(t *testing.T) {

@@ -688,6 +688,7 @@ type QuotaUpdateRequest struct {
 	MaxSandboxLifetimeSeconds *int `json:"max_sandbox_lifetime_seconds,omitempty"`
 	SandboxEgressAllowed      *int `json:"sandbox_egress_allowed,omitempty"`
 	MaxSandboxDiskMB          *int `json:"max_sandbox_disk_mb,omitempty"`
+	APIRateLimit              *int `json:"api_rate_limit,omitempty"`
 }
 
 // QuotaUpdateResponse is the response body for PATCH /v1/tenants/{tenantID}/quotas.
@@ -721,6 +722,7 @@ const (
 	quotaCapMaxSandboxLifetimeSeconds = 7 * 86400
 	quotaCapSandboxEgressAllowed      = 1
 	quotaCapMaxSandboxDiskMB          = environments.SandboxMaxDiskMBCap
+	quotaCapAPIRateLimit              = 1000
 )
 
 // handleQuotaUpdate handles PATCH /v1/tenants/{tenantID}/quotas.
@@ -786,6 +788,7 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		{"max_sandbox_lifetime_seconds", req.MaxSandboxLifetimeSeconds, 60, quotaCapMaxSandboxLifetimeSeconds},
 		{"sandbox_egress_allowed", req.SandboxEgressAllowed, 0, quotaCapSandboxEgressAllowed},
 		{"max_sandbox_disk_mb", req.MaxSandboxDiskMB, 16, quotaCapMaxSandboxDiskMB},
+		{"api_rate_limit", req.APIRateLimit, 1, quotaCapAPIRateLimit},
 	}
 
 	// Validate: all provided values must be within [min, cap].
@@ -824,10 +827,10 @@ func (s *Server) handleQuotaUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return strconv.Itoa(*p)
 	}
-	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s max_sandboxes=%s max_sandbox_ttl_seconds=%s max_sandbox_lifetime_seconds=%s sandbox_egress_allowed=%s max_sandbox_disk_mb=%s",
+	log.Printf("AUDIT: action=tenant.quotas_updated tenant=%s max_services=%s max_databases=%s max_builds_concurrent=%s max_env_vars_per_service=%s max_sandboxes=%s max_sandbox_ttl_seconds=%s max_sandbox_lifetime_seconds=%s sandbox_egress_allowed=%s max_sandbox_disk_mb=%s api_rate_limit=%s",
 		tenantID, ptrIntStr(req.MaxServices), ptrIntStr(req.MaxDatabases), ptrIntStr(req.MaxBuildsConcurrent), ptrIntStr(req.MaxEnvVarsPerService),
 		ptrIntStr(req.MaxSandboxes), ptrIntStr(req.MaxSandboxTTLSeconds), ptrIntStr(req.MaxSandboxLifetimeSeconds), ptrIntStr(req.SandboxEgressAllowed),
-		ptrIntStr(req.MaxSandboxDiskMB))
+		ptrIntStr(req.MaxSandboxDiskMB), ptrIntStr(req.APIRateLimit))
 
 	// Read back the updated quotas and return them.
 	var resp QuotaUpdateResponse

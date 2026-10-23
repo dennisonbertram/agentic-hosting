@@ -443,4 +443,63 @@ func TestHandleQuotaUpdate(t *testing.T) {
 		assert.Equal(t, 500, resp.MaxEnvVarsPerService)
 	})
 
+	t.Run("api_rate_limit is accepted", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-rps", "RPS Tenant", "rps@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-rps")
+		require.NoError(t, err)
+
+		srv := NewServer(ServerConfig{
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
+		})
+
+		body := []byte(`{"api_rate_limit": 40}`)
+		req := quotaRequest("10.2.0.16", "tenant-rps", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var resp QuotaUpdateResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		assert.Equal(t, 40, resp.APIRateLimit)
+
+		var stored int
+		require.NoError(t, stateDB.QueryRow(`SELECT api_rate_limit FROM tenant_quotas WHERE tenant_id = ?`, "tenant-rps").Scan(&stored))
+		assert.Equal(t, 40, stored)
+	})
+
+	t.Run("api_rate_limit over cap returns 400", func(t *testing.T) {
+		stateDB := testutil.NewStateDB(t)
+		_, err := stateDB.Exec(
+			`INSERT INTO tenants (id, name, email, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'active', 1, 1)`,
+			"tenant-rps-cap", "RPS Cap", "rpscap@example.com",
+		)
+		require.NoError(t, err)
+		_, err = stateDB.Exec(`INSERT INTO tenant_quotas (tenant_id) VALUES (?)`, "tenant-rps-cap")
+		require.NoError(t, err)
+
+		srv := NewServer(ServerConfig{
+			Store:           &db.Store{StateDB: stateDB},
+			MasterKey:       masterKey,
+			DevMode:         true,
+			BootstrapTokens: []string{bootstrapToken},
+		})
+
+		body := []byte(`{"api_rate_limit": 1001}`)
+		req := quotaRequest("10.2.0.17", "tenant-rps-cap", bootstrapToken, body)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+		assert.Contains(t, rr.Body.String(), "api_rate_limit")
+	})
+
 }

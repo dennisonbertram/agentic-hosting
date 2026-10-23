@@ -70,7 +70,7 @@ Invalid bootstrap tokens **still consume** the limiter (brute-force resistance).
 
 `apierr.QuotaExceeded` is **409 Conflict**, not 429. Hitting `max_services` is a resource conflict. Hammering the API is a rate limit.
 
-The `tenant_quotas.api_rate_limit` column defaults to 100. Auth middleware reads it per request (`internal/middleware/auth.go`) and the limiter uses that value with burst **2×** (`ratelimit.go`). Values ≤ 0 fall back to the 100/200 constructor defaults. `PATCH /v1/tenants/{id}/quotas` does not currently accept `api_rate_limit`, so the live default matches the constants unless the column is changed out of band.
+The `tenant_quotas.api_rate_limit` column defaults to 100. Auth middleware reads it per request (`internal/middleware/auth.go`) and the limiter uses that value with burst **2×** (`ratelimit.go`). Values ≤ 0 fall back to the 100/200 constructor defaults. Operators set it with `PATCH /v1/tenants/{id}/quotas` `{"api_rate_limit": 40}` (min 1, cap 1000).
 
 ## Idempotency is not a rate limit
 

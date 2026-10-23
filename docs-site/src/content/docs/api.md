@@ -140,10 +140,11 @@ Bootstrap. Body fields (all optional, must be within min and cap):
 | `max_sandbox_lifetime_seconds` | 60 | 604800 | 86400 |
 | `sandbox_egress_allowed` | 0 | 1 | 0 |
 | `max_sandbox_disk_mb` | 16 | 8192 | 1024 |
+| `api_rate_limit` | 1 | 1000 | 100 |
 
-`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed: 1` lets the tenant create sandboxes with `egress: "internet"`, but only on a server whose operator has enabled sandbox egress (`--sandbox-egress-network`); elsewhere it has no effect and those requests get 403. `max_sandbox_disk_mb` caps a sandbox's `disk_mb`; it only matters on a server with tmpfs sandbox workspaces (`AH_SANDBOX_WORKSPACE_TMPFS`, on by default).
+`max_sandboxes: 0` disables sandboxes for the tenant. `sandbox_egress_allowed: 1` lets the tenant create sandboxes with `egress: "internet"`, but only on a server whose operator has enabled sandbox egress (`--sandbox-egress-network`); elsewhere it has no effect and those requests get 403. `max_sandbox_disk_mb` caps a sandbox's `disk_mb`; it only matters on a server with tmpfs sandbox workspaces (`AH_SANDBOX_WORKSPACE_TMPFS`, on by default). `api_rate_limit` is requests/second for that tenant (burst is 2×). The host-wide global limiter (500 rps) still applies.
 
-Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`, `api_rate_limit`.
+Response includes those plus unchanged `max_memory_mb`, `max_cpu_cores`, `max_disk_gb`.
 
 ---
 

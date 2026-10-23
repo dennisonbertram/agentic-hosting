@@ -37,7 +37,8 @@ API keys are `keyID.secret`, hashed with HMAC-SHA256 (not bcrypt). Errors are `{
 ```bash
 export AH_URL="https://your-host"          # or http://127.0.0.1:8080 on the server
 export AH_KEY="keyid.secret"               # tenant API key
-export AH_BOOTSTRAP_TOKEN="..."            # from /etc/default/ah — min 32 chars
+export AH_BOOTSTRAP_TOKEN="..."            # from /etc/default/ah — min 32 chars; registration only
+export AH_ADMIN_TOKEN="..."                # from /etc/default/ah — recover / reactivate / quotas
 ```
 
 On the server, production health checks need a forwarded HTTPS header:
@@ -129,7 +130,7 @@ curl -s -X POST "$AH_URL/v1/tenants/register" \
 export AH_KEY="keyid.secret"
 ```
 
-Rate limit: 5 / IP / hour and 20 / hour global (includes failed guesses). Duplicate name/email → 422. Lost all keys: `POST /v1/auth/recover` with bootstrap header + `{"email"}`. Suspended tenant: `POST /v1/tenants/{tenantID}/reactivate` (not `/v1/tenant/reactivate`) → new `api_key`.
+Rate limit: 5 / IP / hour and 20 / hour global (includes failed guesses). Duplicate name/email → 422. Lost all keys: `POST /v1/auth/recover` with `X-Admin-Token` + `{"email"}` (or `ahc recover --admin-token` / `$AH_ADMIN_TOKEN`). A bootstrap token on that route is **403** once `AH_ADMIN_TOKEN` is set; it is accepted only on installs that never set an admin token. Suspended tenant: `POST /v1/tenants/{tenantID}/reactivate` (not `/v1/tenant/reactivate`) with the same admin token → new `api_key`.
 
 ## 3. Deploy from git
 

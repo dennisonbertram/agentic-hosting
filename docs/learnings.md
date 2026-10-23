@@ -91,4 +91,5 @@ The marketing homepage lives in this repo at `website/index.html` (also changelo
 - **Omitted service port is 8000**, not 8080. 8080 is the `ah` loopback listen address. `ahc deploy` passes `--port` default `0`, and `Create` fills 8000.
 - **Git create still requires `image`.** `"pending"` is a valid Docker Hub-shaped placeholder; `ahc` sends that, then `POST .../builds` with `source_type` / `source_url`.
 - **#164 connection strings** use `ah-db-<id>` and the engine port (`5432` / `6379`). Host loopback is probes only. Restart after setting `DATABASE_URL` so the service joins `ah-dbnet-*`.
+- **Recover is not a bootstrap-token route once `AH_ADMIN_TOKEN` is set.** `skills/agentic-hosting/SKILL.md` used to say "bootstrap header + email"; `requireAdmin` returns 403 for a valid bootstrap token on recover/reactivate/quotas. Use `X-Admin-Token` / `ahc recover --admin-token`. The `.claude` skill already said this.
 - **Network names must stay ≤63 characters.** Full tenant ID + db ID overflows (`ah-dbnet-` + 32 + 1 + 32 = 73). Truncate the tenant ID first; keep the globally unique database ID.

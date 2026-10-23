@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Docs and agent skills match live API behavior.** Disk ≥90% on sync paths is 503 `{"error":"insufficient disk space; try again later"}` with `Retry-After: 10` (it was 500 before this release). Circuit reset removes the container, so the next step is `/redeploy` not `/start`. `circuit_open` is a boolean, not a `status` string. Idempotency is POST/PUT only. New-tenant resource defaults are 2048 MB / 2 CPUs. Quickstart image is `nginxinc/nginx-unprivileged` on 8080 (stock nginx crash-loops under ReadonlyRootfs). Secrets use the server master key, not per-tenant keys.
 - Operator skill and `docs-site/CORRECTIONS.md` now read `build_id` from `POST /v1/services/{id}/builds` (the create handler does not return `id`) and document disk-full as 503 + `Retry-After: 10` since #168.
 - **`docs-site` `auth.md` matches live auth.** Hash is HMAC of the secret (not `keyID.secret`) with the API-key hash key; create does not flush the auth cache; in-process revoke is immediate; recover/reactivate/quotas use `adminLimiter`; recover auto-revoke and `ahc key revoke --confirm` are documented.
+- Standalone skill recover/reactivate instructions use `X-Admin-Token` / `$AH_ADMIN_TOKEN`. A bootstrap token on those routes is 403 once `AH_ADMIN_TOKEN` is set.
 
 ## [0.6.0] - 2026-10-15
 

@@ -42,6 +42,7 @@ func adminCalls(ip, token string) map[string]*http.Request {
 	return map[string]*http.Request{
 		"recover":    recoverRequest(ip, rec),
 		"reactivate": reactivateRequest(ip, "t-admin", token),
+		"suspend":    suspendRequest(ip, "t-admin", token),
 		"quota":      quotaRequest(ip, "t-admin", token, []byte(`{"max_services": 20}`)),
 	}
 }
@@ -60,8 +61,11 @@ func TestAdminToken_AdminTokenAccepted(t *testing.T) {
 	resetLimitersForTest()
 	srv := newAdminTestServer(t, []string{atAdmin})
 	// Recover and quota succeed; reactivate of an active tenant is 409 (past auth).
+	// Suspend is tested on its own so it cannot race the other calls on t-admin.
 	want := map[string]int{"recover": http.StatusCreated, "reactivate": http.StatusConflict, "quota": http.StatusOK}
-	for name, req := range adminCalls("10.9.0.2", atAdmin) {
+	calls := adminCalls("10.9.0.2", atAdmin)
+	delete(calls, "suspend")
+	for name, req := range calls {
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 		assert.Equal(t, want[name], rr.Code, "%s: %s", name, rr.Body.String())
@@ -79,7 +83,9 @@ func TestAdminToken_FallbackToBootstrapWhenUnset(t *testing.T) {
 	resetLimitersForTest()
 	srv := newAdminTestServer(t, nil)
 	want := map[string]int{"recover": http.StatusCreated, "reactivate": http.StatusConflict, "quota": http.StatusOK}
-	for name, req := range adminCalls("10.9.0.3", atBootstrap) {
+	calls := adminCalls("10.9.0.3", atBootstrap)
+	delete(calls, "suspend")
+	for name, req := range calls {
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 		assert.Equal(t, want[name], rr.Code, "%s: %s", name, rr.Body.String())

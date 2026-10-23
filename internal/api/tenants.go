@@ -91,7 +91,7 @@ var regLimiter = &registrationLimiter{
 }
 
 // adminLimiter rate-limits the admin-token routes (recover, reactivate,
-// quotas) with the same per-IP/global limits as registration but in separate
+// suspend, quotas) with the same per-IP/global limits as registration but in separate
 // buckets, so bootstrap-token holders exhausting the registration budget
 // cannot lock the operator out of admin endpoints (and vice versa).
 var adminLimiter = &registrationLimiter{
@@ -402,14 +402,84 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenantID := middleware.GetTenantID(r.Context())
+	if !s.commitTenantSuspension(w, tenantID, false) {
+		return
+	}
+
+	// Cleanup must outlive the request (30s cap, client disconnects), so run it
+	// on a detached context with its own timeout.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancelCleanup()
+	s.stopTenantWorkloads(cleanupCtx, tenantID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTenantSuspend is the operator kill switch: POST /v1/tenants/{id}/suspend.
+// Same effect as DELETE /v1/tenant (status suspended, keys revoked, workloads
+// stopped, records kept) but authorized with the admin token so the operator
+// does not need a leftover tenant key.
+func (s *Server) handleTenantSuspend(w http.ResponseWriter, r *http.Request) {
+	if !adminLimiter.allowRequest(w, r) {
+		return
+	}
+	if !s.requireAdmin(w, adminTokenFromRequest(r, r.Header.Get("X-Bootstrap-Token")), "suspension temporarily unavailable") {
+		return
+	}
+
+	tenantID := chi.URLParam(r, "tenantID")
+	if tenantID == "" {
+		writeError(w, http.StatusBadRequest, "tenant ID is required")
+		return
+	}
+
+	if !s.commitTenantSuspension(w, tenantID, true) {
+		return
+	}
+
+	log.Printf("AUDIT: action=tenant.suspended tenant=%s auth=admin ip=%s", tenantID, trustedRealIP(r))
+
+	// Stop workloads in the background so the 30s public-route timeout cannot
+	// hide a successful suspend from the operator. Auth is already dead.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		s.stopTenantWorkloads(ctx, tenantID)
+	}()
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// commitTenantSuspension marks the tenant suspended and revokes its keys.
+// requireActive is the admin path: missing tenant is 404, already suspended
+// is 409. The tenant self-delete path (requireActive=false) keeps the previous
+// UPDATE-by-id behavior. Returns false after writing an error response.
+func (s *Server) commitTenantSuspension(w http.ResponseWriter, tenantID string, requireActive bool) bool {
 	now := time.Now().Unix()
 
 	tx, err := s.store.StateDB.Begin()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return false
 	}
 	defer tx.Rollback()
+
+	if requireActive {
+		var current string
+		err := tx.QueryRow(`SELECT status FROM tenants WHERE id = ?`, tenantID).Scan(&current)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "tenant not found")
+			return false
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return false
+		}
+		if current == "suspended" {
+			writeError(w, http.StatusConflict, "tenant is already suspended")
+			return false
+		}
+	}
 
 	res, err := tx.Exec(
 		`UPDATE tenants SET status = 'suspended', updated_at = ? WHERE id = ?`,
@@ -417,70 +487,55 @@ func (s *Server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete tenant")
-		return
+		return false
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		writeError(w, http.StatusNotFound, "tenant not found")
-		return
+		return false
 	}
 
-	// Revoke all API keys for the suspended tenant
 	_, err = tx.Exec(
 		`UPDATE api_keys SET revoked_at = ? WHERE tenant_id = ? AND revoked_at IS NULL`,
 		now, tenantID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return false
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return false
 	}
 
-	// Evict all cached keys for this tenant so suspension takes effect immediately
 	if s.authInvalidator != nil {
 		s.authInvalidator.InvalidateTenant(tenantID)
 	}
+	return true
+}
 
-	// Cleanup must outlive the request (30s cap, client disconnects), so run it
-	// on a detached context with its own timeout.
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
-	defer cancelCleanup()
-
-	// Cancel all active builds for this tenant to free build slots
+// stopTenantWorkloads cancels builds and stops environments, services,
+// databases and kanban for a just-suspended tenant. Records are kept for
+// reactivation.
+func (s *Server) stopTenantWorkloads(ctx context.Context, tenantID string) {
 	if s.buildManager != nil {
-		s.buildManager.CancelAllForTenant(cleanupCtx, tenantID)
+		s.buildManager.CancelAllForTenant(ctx, tenantID)
 	}
-
-	// Stop environments before service cleanup removes tenant networks. Keep
-	// their workspace and preview records so they can be started after reactivation.
 	if s.envManager != nil {
-		s.envManager.StopAllForTenant(cleanupCtx, tenantID)
+		s.envManager.StopAllForTenant(ctx, tenantID)
 	}
-
-	// Stop and remove all running containers for this tenant
 	if s.svcManager != nil {
-		s.svcManager.StopAllForTenant(cleanupCtx, tenantID)
+		s.svcManager.StopAllForTenant(ctx, tenantID)
 	}
-
-	// Stop all database containers for this tenant (records kept for potential reactivation)
 	if s.dbManager != nil {
-		s.dbManager.StopAllForTenant(cleanupCtx, tenantID)
+		s.dbManager.StopAllForTenant(ctx, tenantID)
 	}
-
-	// Stop the kanban board container for this tenant (record kept for potential reactivation)
 	if s.kanbanManager != nil {
-		s.kanbanManager.StopForTenant(cleanupCtx, tenantID)
+		s.kanbanManager.StopForTenant(ctx, tenantID)
 	}
-
-	// Stop all environments (and their previews) for this tenant.
 	if s.envManager != nil {
-		s.envManager.StopAllForTenant(cleanupCtx, tenantID)
+		s.envManager.StopAllForTenant(ctx, tenantID)
 	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // ReactivateResponse is the response body for POST /v1/tenants/{tenantID}/reactivate.

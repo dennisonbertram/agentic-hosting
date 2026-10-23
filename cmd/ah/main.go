@@ -124,7 +124,7 @@ func main() {
 		}
 	}
 
-	// Admin token: authorizes recover, reactivate and quota update. Comma-separated for rotation.
+	// Admin token: authorizes recover, reactivate, suspend and quota update. Comma-separated for rotation.
 	var adminTokens []string
 	for _, tok := range strings.Split(cfg.AdminToken, ",") {
 		tok = strings.TrimSpace(tok)
@@ -137,7 +137,7 @@ func main() {
 		adminTokens = append(adminTokens, tok)
 	}
 	if len(adminTokens) == 0 && len(bootstrapTokens) > 0 {
-		log.Printf("WARNING: AH_ADMIN_TOKEN is not set; bootstrap tokens are also accepted for recover, reactivate and quota update. This fallback is deprecated and will be removed; set AH_ADMIN_TOKEN.")
+		log.Printf("WARNING: AH_ADMIN_TOKEN is not set; bootstrap tokens are also accepted for recover, reactivate, suspend and quota update. This fallback is deprecated and will be removed; set AH_ADMIN_TOKEN.")
 	}
 
 	if *openRegistration && !*devMode {

@@ -57,6 +57,7 @@ Two limiters of type `registrationLimiter` in `internal/api/tenants.go`, with se
 
 - `POST /v1/auth/recover`
 - `POST /v1/tenants/{id}/reactivate`
+- `POST /v1/tenants/{id}/suspend`
 - `PATCH /v1/tenants/{id}/quotas`
 
 Every request charges its per-IP bucket. The global bucket is only checked per request; it is charged only after a successful registration (`regLimiter`) or a successful admin-token check (`adminLimiter`). Validation never charges it. A burst of registrations therefore does not block recovery, and recovery attempts do not use up the registration budget.

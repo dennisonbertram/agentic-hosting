@@ -57,6 +57,7 @@ func TestClient_Routes(t *testing.T) {
 		{"GetTenantUsage", func(c *ahclient.Client) error { _, err := c.GetTenantUsage(); return err }, "GET", "/v1/tenant/usage", ""},
 		{"DeleteTenant", func(c *ahclient.Client) error { return c.DeleteTenant() }, "DELETE", "/v1/tenant", ""},
 		{"ReactivateTenant", func(c *ahclient.Client) error { _, err := c.ReactivateTenant("t1", "tok"); return err }, "POST", "/v1/tenants/t1/reactivate", ""},
+		{"SuspendTenant", func(c *ahclient.Client) error { return c.SuspendTenant("t1", "tok") }, "POST", "/v1/tenants/t1/suspend", ""},
 		{"CreateKey", func(c *ahclient.Client) error {
 			_, err := c.CreateKey(ahclient.CreateKeyRequest{Name: "k"})
 			return err

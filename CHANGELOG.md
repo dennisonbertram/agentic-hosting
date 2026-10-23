@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **API key roles.** Keys are `owner` or `member`. Only an owner key can revoke keys or `DELETE /v1/tenant`. `POST /v1/auth/keys` mints `member` unless an owner asks for `role=owner`. Registration, recovery and reactivation keys are owners; existing rows stay owner.
+- **Operator tenant suspend.** `POST /v1/tenants/{id}/suspend` with `X-Admin-Token` (and `ahc suspend <id> --confirm`) revokes the tenant's keys and stops its workloads without needing a leftover tenant API key.
 
 - **README rescue path** at the top: box → install → register → git deploy → live URL, with fields checked against the code (`build_id` on build create, route port 8000, `ah-db-<id>` connection strings).
 

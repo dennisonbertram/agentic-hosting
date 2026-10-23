@@ -94,7 +94,7 @@ Docs-site copies: `/llms.txt` and `/llms-full.txt` (GitHub Pages: `https://agent
 - Nixpacks installed
 - Traefik running as Docker container
 - `AH_BOOTSTRAP_TOKEN` environment variable (min 32 chars; authorizes tenant registration)
-- `AH_ADMIN_TOKEN` environment variable (min 32 chars per token; authorizes recover, reactivate and quota update)
+- `AH_ADMIN_TOKEN` environment variable (min 32 chars per token; authorizes recover, reactivate, suspend and quota update)
 - `/var/lib/ah/master.key` — hex-encoded 32-byte key
 
 Environment variables read by `ah`:
@@ -102,7 +102,7 @@ Environment variables read by `ah`:
 | Variable | Purpose |
 |---|---|
 | `AH_BOOTSTRAP_TOKEN` | Tenant registration token (min 32 chars, comma-separated for rotation) |
-| `AH_ADMIN_TOKEN` | Operator token for `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate` and `PATCH /v1/tenants/{id}/quotas` (min 32 chars per token, comma-separated for rotation). If unset, bootstrap tokens are accepted for those routes with a deprecation warning |
+| `AH_ADMIN_TOKEN` | Operator token for `POST /v1/auth/recover`, `POST /v1/tenants/{id}/reactivate`, `POST /v1/tenants/{id}/suspend` and `PATCH /v1/tenants/{id}/quotas` (min 32 chars per token, comma-separated for rotation). If unset, bootstrap tokens are accepted for those routes with a deprecation warning |
 | `AH_METER_DB_PATH` | Metering database path. Defaults to `ah-metering.db` next to the state database |
 | `AH_BASE_DOMAIN` | Base domain for service URLs (`https://{name}.{base-domain}`) |
 | `AH_EXTERNAL_TLS_TERMINATED` | `true` when TLS is terminated in front of Traefik |

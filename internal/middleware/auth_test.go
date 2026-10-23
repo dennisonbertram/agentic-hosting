@@ -65,6 +65,7 @@ func newAuthMiddleware(t *testing.T, sqlDB *sql.DB) (http.Handler, *AuthCacheInv
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tid := GetTenantID(r.Context())
 		w.Header().Set("X-Tenant-ID", tid)
+		w.Header().Set("X-Key-Role", GetKeyRole(r.Context()))
 		w.WriteHeader(http.StatusOK)
 	})
 	return mw(next), inv
@@ -120,6 +121,7 @@ func TestAuth_ValidKeyPasses(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, tenantID, rec.Header().Get("X-Tenant-ID"))
+	assert.Equal(t, KeyRoleOwner, rec.Header().Get("X-Key-Role"))
 }
 
 func TestAuth_RevokedKeyRejected(t *testing.T) {

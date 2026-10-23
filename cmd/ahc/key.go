@@ -68,14 +68,18 @@ Displays key ID, name, prefix, creation date, and last used date.`,
 			}
 
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tPREFIX\tCREATED\tLAST USED")
+			fmt.Fprintln(w, "ID\tNAME\tROLE\tPREFIX\tCREATED\tLAST USED")
 			for _, k := range keys {
 				lastUsed := "-"
 				if k.LastUsedAt != nil {
 					lastUsed = time.Unix(*k.LastUsedAt, 0).UTC().Format("2006-01-02")
 				}
 				created := time.Unix(k.CreatedAt, 0).UTC().Format("2006-01-02")
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", k.ID, k.Name, k.Prefix, created, lastUsed)
+				role := k.Role
+				if role == "" {
+					role = "owner"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Name, role, k.Prefix, created, lastUsed)
 			}
 			w.Flush()
 			return nil
@@ -88,6 +92,7 @@ func newKeyCreateCmd(root *rootState) *cobra.Command {
 	var (
 		nameFlag    string
 		expiresFlag string
+		roleFlag    string
 	)
 
 	cmd := &cobra.Command{
@@ -106,6 +111,7 @@ The raw key is shown exactly once — save it immediately.`,
 
 			req := ahclient.CreateKeyRequest{
 				Name: nameFlag,
+				Role: roleFlag,
 			}
 
 			if expiresFlag != "" {
@@ -128,6 +134,9 @@ The raw key is shown exactly once — save it immediately.`,
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Key ID : %s\n", result.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Name   : %s\n", result.Name)
+			if result.Role != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Role   : %s\n", result.Role)
+			}
 			if result.Expires != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Expires: %s\n", time.Unix(*result.Expires, 0).UTC().Format(time.RFC3339))
 			}
@@ -143,6 +152,7 @@ The raw key is shown exactly once — save it immediately.`,
 
 	cmd.Flags().StringVar(&nameFlag, "name", "unnamed", "Key name")
 	cmd.Flags().StringVar(&expiresFlag, "expires", "", "Expiry duration (e.g. 720h)")
+	cmd.Flags().StringVar(&roleFlag, "role", "", "Key role: member (default) or owner")
 	return cmd
 }
 

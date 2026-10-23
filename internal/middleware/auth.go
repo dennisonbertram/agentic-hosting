@@ -17,6 +17,12 @@ type contextKey string
 
 const TenantIDKey contextKey = "tenant_id"
 const KeyIDKey contextKey = "key_id"
+const KeyRoleKey contextKey = "key_role"
+
+const (
+	KeyRoleOwner  = "owner"
+	KeyRoleMember = "member"
+)
 
 const (
 	lastUsedInterval = 5 * time.Minute
@@ -31,6 +37,7 @@ type authCacheEntry struct {
 	tenantID  string
 	keyHash   string
 	status    string
+	role      string
 	rateLimit int    // tenant_quotas.api_rate_limit; 0 = default
 	expiresAt *int64 // key expiration time (nil = no expiry)
 	cachedAt  time.Time
@@ -188,7 +195,7 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 				return
 			}
 
-			var tenantID, keyHash, status string
+			var tenantID, keyHash, status, role string
 			var rateLimit int
 
 			// Check auth cache first to reduce DB load
@@ -202,13 +209,15 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 				tenantID = cached.tenantID
 				keyHash = cached.keyHash
 				status = cached.status
+				role = cached.role
 				rateLimit = cached.rateLimit
 			} else {
 				gen := cache.generation()
 				now := time.Now().Unix()
 				var expiresAt *int64
 				err := db.QueryRowContext(r.Context(),
-					`SELECT ak.tenant_id, ak.key_hash, t.status, ak.expires_at, COALESCE(q.api_rate_limit, 0)
+					`SELECT ak.tenant_id, ak.key_hash, t.status, ak.expires_at, COALESCE(q.api_rate_limit, 0),
+					        COALESCE(ak.role, 'owner')
 					 FROM api_keys ak
 					 JOIN tenants t ON t.id = ak.tenant_id
 					 LEFT JOIN tenant_quotas q ON q.tenant_id = ak.tenant_id
@@ -216,7 +225,7 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 					   AND ak.revoked_at IS NULL
 					   AND (ak.expires_at IS NULL OR ak.expires_at > ?)`,
 					keyID, now,
-				).Scan(&tenantID, &keyHash, &status, &expiresAt, &rateLimit)
+				).Scan(&tenantID, &keyHash, &status, &expiresAt, &rateLimit, &role)
 				if err == sql.ErrNoRows {
 					writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 					return
@@ -229,10 +238,14 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 				if authAfterDBRead != nil {
 					authAfterDBRead()
 				}
+				if role != KeyRoleOwner && role != KeyRoleMember {
+					role = KeyRoleOwner
+				}
 				cache.setIfUnchanged(keyID, &authCacheEntry{
 					tenantID:  tenantID,
 					keyHash:   keyHash,
 					status:    status,
+					role:      role,
 					rateLimit: rateLimit,
 					expiresAt: expiresAt,
 					cachedAt:  time.Now(),
@@ -251,8 +264,12 @@ func Auth(db *sql.DB, hashKey []byte) (func(http.Handler) http.Handler, *AuthCac
 
 			tracker.maybeUpdate(keyID)
 
+			if role != KeyRoleOwner && role != KeyRoleMember {
+				role = KeyRoleOwner
+			}
 			ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
 			ctx = context.WithValue(ctx, KeyIDKey, keyID)
+			ctx = context.WithValue(ctx, KeyRoleKey, role)
 			ctx = ContextWithRateLimit(ctx, rateLimit)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -270,5 +287,11 @@ func GetTenantID(ctx context.Context) string {
 // Returns "" if no key ID is present (e.g. unauthenticated request).
 func GetKeyID(ctx context.Context) string {
 	v, _ := ctx.Value(KeyIDKey).(string)
+	return v
+}
+
+// GetKeyRole returns the API key role from the request context (owner or member).
+func GetKeyRole(ctx context.Context) string {
+	v, _ := ctx.Value(KeyRoleKey).(string)
 	return v
 }

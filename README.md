@@ -121,11 +121,11 @@ Environment variables read by `ah`:
 | `AH_WARM_POOL_ENABLED` | `false` disables the pre-started environment containers (default `true`). The local sandbox turns it off so it does not pull every template image |
 | `AH_GC_PRUNE_DOCKER` | `false` stops GC from running daemon-wide dangling-image and unused anonymous-volume prunes (default `true`). Set it when the Docker daemon is shared with unrelated work |
 
-### Manual installation
+### Installation
 
 For a Mac mini demo, use the [Mac mini first-run guide](docs/ops/macmini.md) for the isolated Lima VM, local health check, ngrok setup, and first deployment. It runs the same Go application with Docker and gVisor inside Ubuntu; the existing Hetzner/server install remains separate in [the fresh-install guide](docs/ops/fresh-install.md).
 
-The quickest path is `scripts/setup-linux.sh` (see [Quick start](#quick-start)); on a fresh host it runs `scripts/bootstrap-stack.sh` and then installs `ahc`, and on an existing host it upgrades in place. For a fresh Ubuntu 24.04 amd64 host, `scripts/bootstrap-stack.sh` installs and configures everything below in one run, including generating the master key, bootstrap token and admin token (see the fresh-install guide). The manual steps that follow are for reference or customized setups.
+The quickest path is `scripts/setup-linux.sh` (see [Quick start](#other-ways-to-run-it)); on a fresh host it runs `scripts/bootstrap-stack.sh` and then installs `ahc`, and on an existing host it upgrades in place. For a fresh Ubuntu 24.04 amd64 host, `scripts/bootstrap-stack.sh` installs and configures everything below in one run, including generating the master key, bootstrap token and admin token (see the fresh-install guide). The manual steps that follow are for reference or customized setups.
 
 #### Run the OpenRouter example on the Mac mini
 
